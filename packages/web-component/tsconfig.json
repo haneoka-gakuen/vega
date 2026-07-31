@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "@haneoka/vega/engine": ["../../src/engine-entry.ts"],
+      "@haneoka/vega-protocol": ["../protocol/src/index.ts"],
+      "@haneoka/vega-protocol/*": ["../protocol/src/*.ts"]
+    },
+    "skipLibCheck": true,
+    "strict": true,
+    "strictPropertyInitialization": false,
+    "target": "ES2022"
+  },
+  "include": ["src/**/*.ts"]
+}

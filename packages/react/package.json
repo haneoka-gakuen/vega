@@ -1,0 +1,53 @@
+{
+  "name": "@haneoka/vega-react",
+  "version": "0.1.0",
+  "description": "Native React adapter for the Vega visual novel engine",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haneoka-gakuen/vega.git",
+    "directory": "packages/react"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify:package": "node ../../scripts/verify-distribution.mjs .",
+    "check": "pnpm run typecheck && pnpm run build && pnpm run verify:package",
+    "prepack": "pnpm run check"
+  },
+  "dependencies": {
+    "@haneoka/vega-protocol": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@haneoka/vega": "^0.1.0",
+    "react": ">=18 <20"
+  },
+  "devDependencies": {
+    "@haneoka/vega": "workspace:*",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.8",
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "name": "@haneoka/vega-web-component",
+  "version": "0.1.0",
+  "description": "Framework-neutral Web Component adapter for the Vega visual novel engine",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haneoka-gakuen/vega.git",
+    "directory": "packages/web-component"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run typecheck && pnpm run build"
+  },
+  "dependencies": {
+    "@haneoka/vega-protocol": "^0.1.0"
+  },
+  "peerDependencies": {
+    "@haneoka/vega": "^0.1.0"
+  },
+  "devDependencies": {
+    "@haneoka/vega": "workspace:*",
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

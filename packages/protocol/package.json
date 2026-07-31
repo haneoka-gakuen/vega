@@ -1,0 +1,69 @@
+{
+  "name": "@haneoka/vega-protocol",
+  "version": "0.1.0",
+  "description": "Versioned Vega visual-novel project, bundle, opcode, and plugin manifest protocol",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/haneoka-gakuen/vega.git",
+    "directory": "packages/protocol"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "schema",
+    "fixtures",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./opcodes": {
+      "types": "./dist/opcodes.d.ts",
+      "import": "./dist/opcodes.js"
+    },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "import": "./dist/model.js"
+    },
+    "./preview": {
+      "types": "./dist/preview.d.ts",
+      "import": "./dist/preview.js"
+    },
+    "./binary": {
+      "types": "./dist/binary.d.ts",
+      "import": "./dist/binary.js"
+    },
+    "./project": {
+      "types": "./dist/project.d.ts",
+      "import": "./dist/project.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    },
+    "./schema/vega-project.json": "./schema/vega-project.schema.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run typecheck && pnpm run build"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "format": "vega-runtime",
+  "formatVersion": 1,
+  "abiVersion": 1,
+  "entrypoint": "deneb-runtime.js",
+  "capabilities": [
+    "adv-story",
+    "lifecycle-v1",
+    "vega-project-v1",
+    "vega-project-assets-v1",
+    "vega-project-multiscene-v1",
+    "vega-bundle-v1",
+    "deneb-manifest-v1",
+    "deneb-runtime-plugins-v1",
+    "deneb-external-runtimes-v1"
+  ],
+  "integrity": {}
+}

@@ -1,0 +1,19 @@
+{
+  "format": "vega-project",
+  "formatVersion": 1,
+  "id": "vega-example",
+  "title": "Vega example",
+  "entryScene": "main",
+  "scenes": {
+    "main": {
+      "id": "main",
+      "commands": [
+        {
+          "command": 2,
+          "name": "Talk",
+          "text": "Vega, Altair, and Deneb."
+        }
+      ]
+    }
+  }
+}

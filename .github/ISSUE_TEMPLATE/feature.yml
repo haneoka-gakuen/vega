@@ -1,0 +1,35 @@
+name: Feature proposal
+description: Propose an engine, protocol, adapter, or plugin capability
+title: "[Proposal] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the author or player need independently of a preferred implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Proposed layer
+      options:
+        - Existing opcode 0–100 compatibility
+        - Official opcode 501–999
+        - Third-party plugin
+        - Engine lifecycle or renderer
+        - Framework adapter
+        - Protocol or format
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and capability-loss behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

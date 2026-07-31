@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Vega
+        uses: actions/checkout@v7
+        with:
+          path: vega
+      - name: Check out Vega Default Shell
+        uses: actions/checkout@v7
+        with:
+          repository: haneoka-gakuen/vega-shell-default
+          path: vega/.dependencies/vega-shell-default
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.14.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: vega/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: vega
+      - run: pnpm check
+        working-directory: vega
+      - run: pnpm pack --dry-run
+        working-directory: vega
+
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out Vega
+        uses: actions/checkout@v7
+        with:
+          path: vega
+      - name: Check out Vega Default Shell
+        uses: actions/checkout@v7
+        with:
+          repository: haneoka-gakuen/vega-shell-default
+          path: vega/.dependencies/vega-shell-default
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.14.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: vega/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: vega
+      - run: pnpm typecheck
+        working-directory: vega
