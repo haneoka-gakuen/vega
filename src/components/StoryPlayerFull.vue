@@ -31,7 +31,10 @@ import {
   VegaMemorySaveStorage,
   type VegaSaveStorage,
 } from "../narrative/save";
-import type { StorySceneBackend } from "../rendering/StorySceneBackend";
+import type {
+  StoryResourceLease,
+  StorySceneBackend,
+} from "../rendering/StorySceneBackend";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { StoryResourceScope } from "../runtime";
 import { createVegaShellController } from "../shell/controller";
@@ -119,14 +122,17 @@ const resourceScopeId = computed(() =>
 let player: AdvPlayer | null = null;
 let playerPluginPreset: VegaOfficialPlayerPluginPreset | null = null;
 let progressSeekTimer: ReturnType<typeof setTimeout> | null = null;
-let progressSeekVersion = 0;
-let currentBootCacheKey = "";
 let bootGeneration = 0;
 let bootController: AbortController | null = null;
 let componentUnmounted = false;
+let playerOperationGeneration = 0;
+let playerOperationTail: Promise<void> = Promise.resolve();
 const seekDecisionHistory = new Map<number, AdvChoiceRecord>();
-const warmedStoryKeys = new Set<string>();
-const portableResources = new DefaultStoryResourceResolver();
+let resourceCacheKey: object = {};
+let portableResources = new DefaultStoryResourceResolver([], {
+  sharedKey: resourceCacheKey,
+});
+const animationLeaseHandoff = new Map<string, StoryResourceLease>();
 const anonymousStoryKeys = new WeakMap<object, string>();
 let anonymousStorySequence = 0;
 
@@ -222,9 +228,25 @@ const storyCacheKey = (value: AdvStory | undefined | null): string => {
   return key;
 };
 
-const preloadCacheKey = (value: AdvStory | undefined | null): string => {
-  const key = storyCacheKey(value);
-  return key ? `${resourceScopeId.value}\u0000${key}` : "";
+const resetResourceCache = (): void => {
+  resourceCacheKey = {};
+  portableResources = new DefaultStoryResourceResolver([], {
+    sharedKey: resourceCacheKey,
+  });
+};
+
+const releaseAnimationLeaseHandoff = (): void => {
+  for (const lease of animationLeaseHandoff.values()) lease.release();
+  animationLeaseHandoff.clear();
+};
+
+const preserveAnimationLeases = (current: AdvPlayer | null): void => {
+  if (!current) return;
+  for (const [url, lease] of current.Loader.takeAnimationLeases()) {
+    const existing = animationLeaseHandoff.get(url);
+    if (existing) lease.release();
+    else animationLeaseHandoff.set(url, lease);
+  }
 };
 
 const beginBootAttempt = (): BootAttempt => {
@@ -244,6 +266,38 @@ const invalidateBootAttempt = (): void => {
   bootGeneration += 1;
   bootController?.abort();
   bootController = null;
+};
+
+const isPlayerOperationActive = (generation: number): boolean =>
+  !componentUnmounted && generation === playerOperationGeneration;
+
+const enqueuePlayerOperation = (
+  operation: (generation: number) => Promise<void>,
+): Promise<void> => {
+  if (componentUnmounted) return Promise.resolve();
+  const generation = ++playerOperationGeneration;
+  // Cancel an active boot immediately. The serialized operation waits for its
+  // cleanup before it mutates ownership, preventing an older restart/seek from
+  // becoming current again after a newer request (the async ABA case).
+  invalidateBootAttempt();
+  if (progressSeekTimer) {
+    clearTimeout(progressSeekTimer);
+    progressSeekTimer = null;
+  }
+  const queued = playerOperationTail
+    .catch(() => undefined)
+    .then(async () => {
+      if (!isPlayerOperationActive(generation)) return;
+      await operation(generation);
+    });
+  const result = queued.catch((error: unknown) => {
+    // Superseded operations must not surface stale failures into the current
+    // player's UI. The operation that is still current keeps normal errors.
+    if (!isPlayerOperationActive(generation)) return;
+    throw error;
+  });
+  playerOperationTail = result.catch(() => undefined);
+  return result;
 };
 
 const saveStorageForPreset = (
@@ -334,10 +388,7 @@ function onStageClick(event: MouseEvent): void {
   startOrAdvance();
 }
 
-async function boot(
-  options: { reusePreload?: boolean } = {},
-  attempt: BootAttempt = beginBootAttempt(),
-): Promise<AdvPlayer | null> {
+async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
   const mount = stageHost.value;
   const storyValue = story.value;
   if (!mount || !storyValue || !isBootAttemptActive(attempt)) return null;
@@ -346,20 +397,37 @@ async function boot(
   let unownedSceneBackend: StorySceneBackend | null = null;
   let unownedPluginPreset: VegaOfficialPlayerPluginPreset | null = null;
   let ownedPluginPreset: VegaOfficialPlayerPluginPreset | null = null;
-  try {
-    const cacheKey = preloadCacheKey(storyValue);
-    const skipPreload = Boolean(
-      options.reusePreload && cacheKey && warmedStoryKeys.has(cacheKey),
+  let playerDisposalClaimed = false;
+  const disposeUnownedSceneBackend = async (): Promise<void> => {
+    const backend = unownedSceneBackend;
+    // Claim ownership before awaiting cleanup. If cleanup itself rejects, the
+    // outer catch must not try to destroy the same backend a second time.
+    unownedSceneBackend = null;
+    await backend?.destroy({ releaseTextures: true });
+  };
+  const disposeBootPlayer = async (): Promise<void> => {
+    if (playerDisposalClaimed) return;
+    // AdvPlayer.dispose and preset.dispose may partially succeed before one of
+    // them rejects. Treat the pair as claimed before awaiting so neither is
+    // invoked twice by the outer catch path.
+    playerDisposalClaimed = true;
+    await disposePlayerInstance(
+      current,
+      unownedPluginPreset ?? ownedPluginPreset,
+      true,
     );
+  };
+  try {
     state.instantText = props.instantText === 0;
 
     unownedPluginPreset = await resolveVegaOfficialPlayerPlugins({
       plugins: props.officialPlugins ?? [],
       renderBackend: props.renderBackend,
+      resourceCacheKey,
       signal: attempt.controller.signal,
     });
     if (!isBootAttemptActive(attempt)) {
-      await unownedPluginPreset.dispose();
+      await disposeBootPlayer();
       return null;
     }
 
@@ -403,9 +471,8 @@ async function boot(
       }
     }
     if (!isBootAttemptActive(attempt)) {
-      await unownedSceneBackend?.destroy({ releaseTextures: true });
-      unownedSceneBackend = null;
-      await unownedPluginPreset.dispose();
+      await disposeUnownedSceneBackend();
+      await disposeBootPlayer();
       return null;
     }
 
@@ -422,16 +489,17 @@ async function boot(
     });
     unownedSceneBackend = null;
     if (!isBootAttemptActive(attempt)) {
-      await disposePlayerInstance(current, unownedPluginPreset, true);
-      unownedPluginPreset = null;
+      await disposeBootPlayer();
       return null;
     }
+
+    current.Loader.adoptAnimationLeases(animationLeaseHandoff);
+    animationLeaseHandoff.clear();
 
     player = current;
     ownedPluginPreset = unownedPluginPreset;
     playerPluginPreset = ownedPluginPreset;
     unownedPluginPreset = null;
-    currentBootCacheKey = cacheKey;
     syncPlayerAudioSettings();
     syncPlayerAutoPlay();
     syncPlayerSubtitlesSettings();
@@ -454,8 +522,13 @@ async function boot(
             signal: presentationLifetime.signal,
           })
         : undefined);
-    shell?.enterGame();
     if (shell && !contributedShell) presentationLifetime.use(shell);
+    if (!isBootAttemptActive(attempt) || player !== current) {
+      if (player === current) clearOwnedPlayer(current, ownedPluginPreset);
+      await disposeBootPlayer();
+      return null;
+    }
+    shell?.enterGame();
     const playerServices = new Map<string, unknown>();
     if (shell) playerServices.set(VEGA_SHELL_CONTROLLER.id, shell);
 
@@ -470,8 +543,13 @@ async function boot(
       service: <T,>(key: VegaServiceKey<T>): T | undefined =>
         playerServices.has(key.id)
           ? (playerServices.get(key.id) as T)
-          : ownedPluginPreset?.service(key),
+            : ownedPluginPreset?.service(key),
     });
+    if (!isBootAttemptActive(attempt) || player !== current) {
+      if (player === current) clearOwnedPlayer(current, ownedPluginPreset);
+      await disposeBootPlayer();
+      return null;
+    }
     for (const input of ownedPluginPreset.inputContributions) {
       presentationLifetime.use(
         input.subscribe(
@@ -483,18 +561,21 @@ async function boot(
     activePluginUiSlots.value = new Set(
       ownedPluginPreset.uiSlots.map(({ slot }) => slot),
     );
-    await current.boot({ skipPreload });
+    // A restart/seek gets a fresh renderer and Loader, but reuses the mounted
+    // player's canonical byte cache. Re-running preload reacquires explicit
+    // animation leases without network work and never relies on a stale
+    // boolean that outlives the resolver which actually owned the bytes.
+    await current.boot({ signal: attempt.controller.signal });
 
     if (!isBootAttemptActive(attempt) || player !== current) {
       if (player === current) clearOwnedPlayer(current, ownedPluginPreset);
-      await disposePlayerInstance(current, ownedPluginPreset, true);
+      await disposeBootPlayer();
       return null;
     }
-    if (cacheKey) warmedStoryKeys.add(cacheKey);
     return current;
   } catch (error: unknown) {
     try {
-      await unownedSceneBackend?.destroy({ releaseTextures: true });
+      await disposeUnownedSceneBackend();
     } catch (cleanupError) {
       console.error(
         "[Vega] failed to dispose an unowned scene backend",
@@ -502,11 +583,7 @@ async function boot(
       );
     }
     try {
-      await disposePlayerInstance(
-        current,
-        unownedPluginPreset ?? ownedPluginPreset,
-        true,
-      );
+      await disposeBootPlayer();
     } catch (cleanupError) {
       console.error(
         "[Vega] failed to dispose an aborted framework player",
@@ -517,6 +594,11 @@ async function boot(
     if (!isBootAttemptActive(attempt) || attempt.controller.signal.aborted) {
       return null;
     }
+    // A restart/seek may have detached animation leases from the previous
+    // player before plugin or renderer creation fails. With no superseding
+    // operation and no new player to own them, this terminal failure must
+    // release the handoff explicitly.
+    releaseAnimationLeaseHandoff();
     state.error = error instanceof Error ? error.message : String(error);
     state.loading = false;
     return null;
@@ -527,10 +609,10 @@ function clearOwnedPlayer(
   current: AdvPlayer | null,
   preset: VegaOfficialPlayerPluginPreset | null,
 ): void {
+  if (player !== current) return;
   player = null;
   if (playerPluginPreset === preset) playerPluginPreset = null;
   activePluginUiSlots.value = new Set();
-  currentBootCacheKey = "";
   const debugHost = globalThis as unknown as Record<string, unknown>;
   if (debugHost.__advPlayer === current) debugHost.__advPlayer = null;
   if (debugHost.__advState === state) debugHost.__advState = null;
@@ -546,16 +628,15 @@ async function destroy(
   }
   const current = player;
   const preset = playerPluginPreset;
-  const cacheKey = currentBootCacheKey;
+  const preserveLeases = options.releaseTextures === false;
+  if (preserveLeases) preserveAnimationLeases(current);
+  else releaseAnimationLeaseHandoff();
   clearOwnedPlayer(current, preset);
   await disposePlayerInstance(
     current,
     preset,
     options.releaseTextures !== false,
   );
-  if (options.releaseTextures !== false && cacheKey) {
-    warmedStoryKeys.delete(cacheKey);
-  }
 }
 
 function playCurrentPlayer(): void {
@@ -584,16 +665,24 @@ function startOrAdvance(): void {
 }
 
 async function restart(): Promise<void> {
-  seekDecisionHistory.clear();
-  await destroy({ releaseTextures: false });
-  const attempt = beginBootAttempt();
-  Object.assign(state, createVegaPlayerState());
-  await nextTick();
-  if (!isBootAttemptActive(attempt)) return;
-  const current = await boot({ reusePreload: true }, attempt);
-  if (current && isBootAttemptActive(attempt) && player === current) {
-    playCurrentPlayer();
-  }
+  return enqueuePlayerOperation(async (generation) => {
+    seekDecisionHistory.clear();
+    await destroy({ releaseTextures: false });
+    if (!isPlayerOperationActive(generation)) return;
+    Object.assign(state, createVegaPlayerState());
+    await nextTick();
+    if (!isPlayerOperationActive(generation)) return;
+    const attempt = beginBootAttempt();
+    const current = await boot(attempt);
+    if (
+      isPlayerOperationActive(generation) &&
+      current &&
+      isBootAttemptActive(attempt) &&
+      player === current
+    ) {
+      playCurrentPlayer();
+    }
+  });
 }
 
 function seekProgress(ratio: number, delayMs = 0): void {
@@ -612,39 +701,41 @@ function seekProgress(ratio: number, delayMs = 0): void {
 }
 
 async function seekStoryProgress(ratio: number): Promise<void> {
-  if (!story.value || !state.commandCount) return;
-  const targetIndex = Math.max(
-    0,
-    Math.min(state.commandCount, Math.round(ratio * state.commandCount)),
-  );
-  const version = ++progressSeekVersion;
-  const current = player;
-  for (const [key, value] of current?.exportSeekDecisions() ?? []) {
-    seekDecisionHistory.set(key, value);
-  }
-  await destroy({ releaseTextures: false });
-  const attempt = beginBootAttempt();
-  Object.assign(state, createVegaPlayerState());
-  await nextTick();
-  if (!isBootAttemptActive(attempt)) return;
-  const restored = await boot({ reusePreload: true }, attempt);
-  if (
-    version !== progressSeekVersion ||
-    !restored ||
-    player !== restored ||
-    !isBootAttemptActive(attempt)
-  ) {
-    return;
-  }
-  restored.importSeekDecisions(seekDecisionHistory);
-  await restored.replayFromStartTo(targetIndex);
-  if (
-    version === progressSeekVersion &&
-    player === restored &&
-    isBootAttemptActive(attempt)
-  ) {
-    playCurrentPlayer();
-  }
+  return enqueuePlayerOperation(async (generation) => {
+    if (!story.value || !state.commandCount) return;
+    const targetIndex = Math.max(
+      0,
+      Math.min(state.commandCount, Math.round(ratio * state.commandCount)),
+    );
+    const current = player;
+    for (const [key, value] of current?.exportSeekDecisions() ?? []) {
+      seekDecisionHistory.set(key, value);
+    }
+    await destroy({ releaseTextures: false });
+    if (!isPlayerOperationActive(generation)) return;
+    Object.assign(state, createVegaPlayerState());
+    await nextTick();
+    if (!isPlayerOperationActive(generation)) return;
+    const attempt = beginBootAttempt();
+    const restored = await boot(attempt);
+    if (
+      !isPlayerOperationActive(generation) ||
+      !restored ||
+      player !== restored ||
+      !isBootAttemptActive(attempt)
+    ) {
+      return;
+    }
+    restored.importSeekDecisions(seekDecisionHistory);
+    await restored.replayFromStartTo(targetIndex);
+    if (
+      isPlayerOperationActive(generation) &&
+      player === restored &&
+      isBootAttemptActive(attempt)
+    ) {
+      playCurrentPlayer();
+    }
+  });
 }
 
 function resize(): void {
@@ -697,10 +788,29 @@ function syncPlayerSubtitlesSettings(): void {
   player?.setSubtitlesEnabled(props.subtitlesEnabled !== false);
 }
 
-onMounted(() => void boot());
+onMounted(() => {
+  void enqueuePlayerOperation(async (generation) => {
+    if (!isPlayerOperationActive(generation)) return;
+    const attempt = beginBootAttempt();
+    await boot(attempt);
+  }).catch((error: unknown) => {
+    state.error = error instanceof Error ? error.message : String(error);
+    state.loading = false;
+  });
+});
 onBeforeUnmount(() => {
   componentUnmounted = true;
-  void destroy({ releaseTextures: true }).catch((error) => {
+  playerOperationGeneration += 1;
+  invalidateBootAttempt();
+  if (progressSeekTimer) {
+    clearTimeout(progressSeekTimer);
+    progressSeekTimer = null;
+  }
+  const cleanup = playerOperationTail
+    .catch(() => undefined)
+    .then(() => destroy({ releaseTextures: true }));
+  playerOperationTail = cleanup.catch(() => undefined);
+  void cleanup.catch((error) => {
     console.error("[Vega] failed to dispose framework player plugins", error);
   });
 });
@@ -714,14 +824,22 @@ watch(
       props.renderBackend,
       props.theme,
     ] as const,
-  async () => {
-    seekDecisionHistory.clear();
-    await destroy({ releaseTextures: true });
-    const attempt = beginBootAttempt();
-    Object.assign(state, createVegaPlayerState());
-    state.instantText = props.instantText === 0;
-    await nextTick();
-    if (isBootAttemptActive(attempt)) await boot({}, attempt);
+  () => {
+    void enqueuePlayerOperation(async (generation) => {
+      seekDecisionHistory.clear();
+      await destroy({ releaseTextures: true });
+      if (!isPlayerOperationActive(generation)) return;
+      resetResourceCache();
+      Object.assign(state, createVegaPlayerState());
+      state.instantText = props.instantText === 0;
+      await nextTick();
+      if (!isPlayerOperationActive(generation)) return;
+      const attempt = beginBootAttempt();
+      await boot(attempt);
+    }).catch((error: unknown) => {
+      state.error = error instanceof Error ? error.message : String(error);
+      state.loading = false;
+    });
   },
 );
 watch(

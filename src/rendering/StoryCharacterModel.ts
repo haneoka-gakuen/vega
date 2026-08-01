@@ -104,19 +104,23 @@ export interface StoryCharacterDescriptorPreparationContext {
 }
 
 export type StoryCharacterResourceKind = "file" | "texture";
+export type StoryCharacterResourceRole = "animation";
 
 /** One directly addressable resource declared by a character provider. */
 export interface StoryCharacterResource {
   readonly source: string;
   readonly kind?: StoryCharacterResourceKind;
+  /** Lets the core preload story-selected animation bytes without allocating a model. */
+  readonly role?: StoryCharacterResourceRole;
   readonly label?: string;
 }
 
 /**
  * ADV animation names referenced while a descriptor is active.
  *
- * An omitted usage means the core could not bind the descriptor to a target,
- * so providers should conservatively enumerate their complete catalog.
+ * An omitted usage means no animation selection was proven. Providers may
+ * still enumerate base model dependencies, but must not infer that the whole
+ * animation catalogue is needed.
  */
 export interface StoryCharacterAnimationResourceUsage {
   readonly motions: readonly string[];
@@ -283,6 +287,14 @@ export const enumerateCharacterProviderResources = async (
           );
         }
         if (
+          resource.role !== undefined &&
+          resource.role !== "animation"
+        ) {
+          throw new TypeError(
+            `Character provider ${provider.id} declared an invalid resource role`,
+          );
+        }
+        if (
           resource.label !== undefined &&
           (typeof resource.label !== "string" || !resource.label.trim())
         ) {
@@ -293,6 +305,7 @@ export const enumerateCharacterProviderResources = async (
         return Object.freeze({
           source: resource.source.trim(),
           ...(resource.kind ? { kind: resource.kind } : {}),
+          ...(resource.role ? { role: resource.role } : {}),
           ...(resource.label ? { label: resource.label.trim() } : {}),
         });
       });

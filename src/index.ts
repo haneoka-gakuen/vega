@@ -157,6 +157,7 @@ export type {
   StoryCharacterResource,
   StoryCharacterResourceEnumerationContext,
   StoryCharacterResourceKind,
+  StoryCharacterResourceRole,
   StoryCharacterRendererModel,
   StoryCharacterRendererModelContext,
 } from "./rendering/StoryCharacterModel";
@@ -171,6 +172,7 @@ export type {
   StoryCharacterHandle,
   StoryPoint2,
   StoryPoint3,
+  StoryResourceLease,
   StoryResourceResolver,
   StorySceneBackend,
   StorySceneBackendContext,

@@ -61,6 +61,7 @@ export type {
   StoryCharacterResource,
   StoryCharacterResourceEnumerationContext,
   StoryCharacterResourceKind,
+  StoryCharacterResourceRole,
   StoryCharacterRendererModel,
   StoryCharacterRendererModelContext,
 } from "./rendering/StoryCharacterModel";
@@ -71,6 +72,7 @@ export {
   isRendererAwareCharacterProvider,
 } from "./rendering/StoryCharacterModel";
 export type {
+  StoryResourceLease,
   StoryResourceResolver,
   StorySceneBackend,
   StorySceneBackendContext,

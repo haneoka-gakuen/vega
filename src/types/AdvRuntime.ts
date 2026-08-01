@@ -150,6 +150,14 @@ export interface AdvRuntimeConfig {
   preloadAheadCommands: number;
   preloadBehindCommands: number;
   preloadBackgroundConcurrency: number;
+  /** Distinct character controllers made render-ready before playback starts. */
+  characterPreloadInitialCount: number;
+  /** Rolling command window used for renderer-ready character preparation. */
+  characterPreloadAheadCommands: number;
+  /** GPU model construction concurrency; intentionally lower than URL fetch concurrency. */
+  characterPreloadConcurrency: number;
+  /** Maximum renderer-ready controllers retained before their first authored In. */
+  characterPreloadCacheMax: number;
   /** Maximum number of proven command-boundary seek snapshots retained per story object. */
   seekCheckpointLimit?: number;
   textureCacheEntryMax: number;

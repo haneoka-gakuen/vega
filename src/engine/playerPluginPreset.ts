@@ -35,6 +35,8 @@ export interface VegaOfficialPlayerPluginPreset {
 export interface ResolveVegaOfficialPlayerPluginsOptions {
   readonly plugins: readonly VegaPlugin[];
   readonly renderBackend?: string;
+  /** Opaque mounted-player key used to reuse canonical bytes across restarts. */
+  readonly resourceCacheKey?: object;
   readonly signal?: AbortSignal;
 }
 
@@ -79,6 +81,7 @@ export const selectVegaRenderContribution = (
 export const resolveVegaOfficialPlayerPlugins = async ({
   plugins,
   renderBackend,
+  resourceCacheKey,
   signal,
 }: ResolveVegaOfficialPlayerPluginsOptions): Promise<VegaOfficialPlayerPluginPreset> => {
   throwIfAborted(signal);
@@ -114,6 +117,7 @@ export const resolveVegaOfficialPlayerPlugins = async ({
       lifetime: host.lifetime,
       resources: new DefaultStoryResourceResolver(
         host.contributions("resource"),
+        resourceCacheKey ? { sharedKey: resourceCacheKey } : {},
       ),
       characterProviders: Object.freeze([
         ...host.contributions("character"),

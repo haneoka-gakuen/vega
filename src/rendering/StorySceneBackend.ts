@@ -50,6 +50,22 @@ export interface StoryCharacterHandle {
   positionType: number;
 }
 
+/**
+ * Renderer-ready character warmup request.
+ *
+ * The command contains the already-resolved model variant and stable target
+ * asset index. Animation names are derived from authored commands; renderers
+ * must not expand them to the provider's complete animation catalogue.
+ */
+export interface StoryCharacterPreloadRequest {
+  readonly command: AdvCommand;
+  /** Top-level story command containing this controller's first reachable In. */
+  readonly commandIndex: number;
+  readonly positionType: number;
+  readonly motions: readonly string[];
+  readonly expressions: readonly string[];
+}
+
 export interface StorySceneBackendContext {
   readonly runtime: AdvRuntimeConfig;
   readonly state: AdvPlayerState;
@@ -80,6 +96,16 @@ export interface StoryResourceResolver {
   canLoad(source: string): boolean;
   load(source: string, signal?: AbortSignal): Promise<Uint8Array>;
   /**
+   * Acquires canonical bytes and keeps them resident until the returned lease
+   * is released. While a lease is active, `load` and `resolveRenderable` for
+   * the same canonical source must reuse those bytes without another network
+   * or adapter request. The signal only cancels lease acquisition.
+   */
+  retain(
+    source: string,
+    signal?: AbortSignal,
+  ): Promise<StoryResourceLease>;
+  /**
    * Produces a URL accepted by browser media elements. The returned release
    * hook must be called by the scene when that media is replaced or destroyed.
    */
@@ -87,6 +113,11 @@ export interface StoryResourceResolver {
     source: string,
     signal?: AbortSignal,
   ): Promise<{ readonly url: string; readonly release: () => void }>;
+}
+
+/** An idempotent ownership handle for resident canonical resource bytes. */
+export interface StoryResourceLease {
+  release(): void;
 }
 
 /**
@@ -113,6 +144,22 @@ export interface StorySceneBackend {
 
   preloadTexture(url: string, signal?: AbortSignal): Promise<unknown>;
   loadTexture(url: string, signal?: AbortSignal): Promise<unknown>;
+  /**
+   * Optional renderer-owned warmup that resolves only after a character can
+   * produce its first frame in this scene's graphics context.
+   */
+  preloadCharacter?(
+    request: StoryCharacterPreloadRequest,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+  /**
+   * Advance the renderer's bounded warm-controller window. Returned identities
+   * were discarded before activation and may be scheduled again after a seek.
+   */
+  advanceCharacterPreload?(
+    commandIndex: number,
+    retainBehindCommands: number,
+  ): readonly string[] | void;
 
   createSeekSnapshot(): AdvStorySceneSeekSnapshot | null;
   /**
@@ -429,5 +476,8 @@ export type StorySceneBackendFactory = (
 
 export type StoryResourceBackend = Pick<
   StorySceneBackend,
-  "loadTexture" | "preloadTexture"
+  | "loadTexture"
+  | "preloadTexture"
+  | "preloadCharacter"
+  | "advanceCharacterPreload"
 >;

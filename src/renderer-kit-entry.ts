@@ -31,6 +31,7 @@ export {
   type StoryCharacterResource,
   type StoryCharacterResourceEnumerationContext,
   type StoryCharacterResourceKind,
+  type StoryCharacterResourceRole,
   type StoryCharacterRendererModel,
   type StoryCharacterRendererModelContext,
 } from "./rendering/StoryCharacterModel";

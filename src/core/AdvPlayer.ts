@@ -772,6 +772,42 @@ function createAbortLink(...parents: Array<AbortSignal | undefined>) {
   return controller;
 }
 
+function combineAbortSignals(...parents: Array<AbortSignal | undefined>): {
+  readonly signal: AbortSignal;
+  dispose(): void;
+} {
+  const controller = new AbortController();
+  const activeParents = parents.filter((parent): parent is AbortSignal =>
+    Boolean(parent),
+  );
+  let disposed = false;
+  const abort = (event: Event): void => {
+    const source = event.target as AbortSignal;
+    if (!controller.signal.aborted) controller.abort(source.reason);
+  };
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    controller.signal.removeEventListener("abort", dispose);
+    for (const parent of activeParents) {
+      parent.removeEventListener("abort", abort);
+    }
+  };
+  controller.signal.addEventListener("abort", dispose, { once: true });
+  for (const parent of activeParents) {
+    if (controller.signal.aborted) break;
+    if (parent.aborted && !controller.signal.aborted) {
+      controller.abort(parent.reason);
+    } else {
+      parent.addEventListener("abort", abort, { once: true });
+    }
+  }
+  return {
+    signal: controller.signal,
+    dispose,
+  };
+}
+
 function isAudioCommand(command: unknown) {
   return (
     command === ADV_COMMAND.Bgm ||
@@ -1038,40 +1074,54 @@ export class AdvPlayer {
     );
   }
 
-  async boot(options: { skipPreload?: boolean } = {}) {
-    if (this.disposed || this.abortController.signal.aborted) return;
-    const generation = ++this.bootGeneration;
-    const isActive = () =>
-      !this.disposed &&
-      !this.abortController.signal.aborted &&
-      generation === this.bootGeneration;
-    const skipPreload = options.skipPreload === true;
-    this.state.loading = !skipPreload;
-    this.state.error = "";
-    this.indexEpisodeKeys();
-    await prepareStoryCharacterProviders(
-      this.characterProviders,
-      this.story,
-      this.resources,
+  async boot(
+    options: { skipPreload?: boolean; signal?: AbortSignal } = {},
+  ) {
+    const linked = combineAbortSignals(
       this.abortController.signal,
+      options.signal,
     );
-    if (!isActive()) return;
-    await this.SceneRoot.prepare?.(this.story);
-    if (!isActive()) return;
-    await this.SceneRoot.setup(this.mount);
-    if (!isActive()) return;
-    if (skipPreload) {
-      this.state.preload = { done: 0, total: 0, label: "", failures: [] };
-    } else {
-      await this.Loader.preload(this.story, this.abortController.signal);
+    const signal = linked.signal;
+    try {
+      if (this.disposed || signal.aborted) return;
+      const generation = ++this.bootGeneration;
+      const isActive = () =>
+        !this.disposed &&
+        !signal.aborted &&
+        generation === this.bootGeneration;
+      const skipPreload = options.skipPreload === true;
+      this.state.loading = !skipPreload;
+      this.state.error = "";
+      this.indexEpisodeKeys();
+      await prepareStoryCharacterProviders(
+        this.characterProviders,
+        this.story,
+        this.resources,
+        signal,
+      );
       if (!isActive()) return;
+      await this.SceneRoot.prepare?.(this.story);
+      if (!isActive()) return;
+      await this.SceneRoot.setup(this.mount);
+      if (!isActive()) return;
+      if (skipPreload) {
+        this.state.preload = { done: 0, total: 0, label: "", failures: [] };
+      } else {
+        await this.Loader.preload(this.story, signal);
+        if (!isActive()) return;
+      }
+      if (!isActive()) return;
+      this.warmOpeningBgm();
+      this.state.loading = false;
+      this.state.ready = true;
+      this.state.commandCount = this.story?.commands?.length || 0;
+      this.captureCheckpoint(0, true);
+    } finally {
+      // Loader owns its own episode controller after preload completes. Only
+      // detach the temporary parent listeners here; aborting this composite on
+      // success would incorrectly release the episode's animation leases.
+      linked.dispose();
     }
-    if (!isActive()) return;
-    this.warmOpeningBgm();
-    this.state.loading = false;
-    this.state.ready = true;
-    this.state.commandCount = this.story?.commands?.length || 0;
-    this.captureCheckpoint(0, true);
   }
 
   warmOpeningBgm() {
@@ -1928,6 +1978,7 @@ export class AdvPlayer {
     this.PlayableDirector.deactivate();
     this.commandGroupScheduler.cancelAll();
     this.abortController.abort();
+    this.Loader.dispose();
     this.cancelMotionWaitTasks();
     this.cancelDoFCommandOwners();
     this.cancelShakeWait();
