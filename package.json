@@ -114,7 +114,7 @@
     "typecheck": "pnpm --filter @haneoka/vega-protocol run typecheck && pnpm run typecheck:core && pnpm --filter @haneoka/vega-react run typecheck && pnpm --filter @haneoka/vega-web-component run typecheck",
     "typecheck:core": "vue-tsc -p tsconfig.json --noEmit",
     "verify:distribution": "node scripts/verify-distribution.mjs",
-    "check": "pnpm run typecheck && pnpm run verify:distribution",
+    "check": "pnpm run typecheck && pnpm run build && pnpm run verify:distribution",
     "prepack": "pnpm run check"
   },
   "publishConfig": {
