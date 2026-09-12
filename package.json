@@ -127,7 +127,7 @@
   "packageManager": "pnpm@11.14.0",
   "dependencies": {
     "@haneoka/vega-protocol": "workspace:*",
-    "@lucide/vue": "^1.27.0"
+    "@lucide/vue": "^1.43.0"
   },
   "peerDependencies": {
     "howler": ">=2.2.0 <3",
