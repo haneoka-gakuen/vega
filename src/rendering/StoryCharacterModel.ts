@@ -49,6 +49,12 @@ export interface StoryCharacterModel {
   readonly isOperational: boolean;
   setPaused(paused: boolean): void;
   setPlaybackSpeed(rate: number): void;
+  /** Decode/parse one authored motion without selecting it for playback. */
+  prepareMotion?(name: string): boolean | Promise<boolean>;
+  /** Decode/parse one authored expression without selecting it. */
+  prepareExpression?(name: string): boolean | Promise<boolean>;
+  /** Submit one renderer-ready frame while the model is still off screen. */
+  prepareFirstFrame?(): void | Promise<void>;
   playMotion?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
   playExpression?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
   /**
@@ -94,6 +100,10 @@ export interface StoryCharacterRendererModelContext<
 > extends StoryCharacterModelContext {
   readonly renderer: TRendererId;
   readonly rendererContext: TRendererContext;
+  readonly children?: {
+    create(id: string, entry: AdvCharacterModelEntry): Promise<StoryCharacterRendererModel>;
+    dispose(model: StoryCharacterRendererModel): void | Promise<void>;
+  };
 }
 
 export interface StoryCharacterDescriptorPreparationContext {
@@ -132,6 +142,10 @@ export interface StoryCharacterResourceEnumerationContext {
   readonly animationUsage?: StoryCharacterAnimationResourceUsage;
   readonly resources: StoryResourceResolver;
   readonly signal: AbortSignal;
+  readonly enumerateChildResources?: (
+    entry: AdvCharacterModelEntry,
+    animationUsage?: StoryCharacterAnimationResourceUsage,
+  ) => Promise<readonly StoryCharacterResource[]>;
 }
 
 export interface StoryCharacterProvider<
@@ -145,9 +159,7 @@ export interface StoryCharacterProvider<
    * Optional story-level warmup. Providers may prepare shared runtimes from
    * the accepted descriptors before the scene allocates graphics resources.
    */
-  prepareDescriptors?(
-    context: StoryCharacterDescriptorPreparationContext,
-  ): void | Promise<void>;
+  prepareDescriptors?(context: StoryCharacterDescriptorPreparationContext): void | Promise<void>;
   /**
    * Enumerates directly addressable files without the ADV core interpreting
    * provider payload fields. Nested manifest discovery may instead happen in
@@ -155,9 +167,7 @@ export interface StoryCharacterProvider<
    */
   enumerateResources?(
     context: StoryCharacterResourceEnumerationContext,
-  ):
-    | readonly StoryCharacterResource[]
-    | Promise<readonly StoryCharacterResource[]>;
+  ): readonly StoryCharacterResource[] | Promise<readonly StoryCharacterResource[]>;
   create(context: StoryCharacterModelContext): StoryCharacterModel | Promise<StoryCharacterModel>;
   /**
    * Optional renderer-owned construction path. Existing portable providers
@@ -195,11 +205,8 @@ export const isRendererAwareCharacterProvider = <
   TRendererModel extends StoryCharacterRendererModel,
 >(
   provider: StoryCharacterProvider<TRendererId, TRendererContext, TRendererModel>,
-): provider is RendererAwareStoryCharacterProvider<
-  TRendererId,
-  TRendererContext,
-  TRendererModel
-> => typeof provider.createForRenderer === "function";
+): provider is RendererAwareStoryCharacterProvider<TRendererId, TRendererContext, TRendererModel> =>
+  typeof provider.createForRenderer === "function";
 
 const preparationAbortReason = (signal: AbortSignal): unknown => {
   if (signal.reason !== undefined) return signal.reason;
@@ -225,9 +232,7 @@ export const prepareCharacterProviderDescriptors = async (
   await Promise.all(
     providers.map(async (provider) => {
       if (!provider.prepareDescriptors) return;
-      const supported = uniqueDescriptors.filter((entry) =>
-        provider.supports(entry),
-      );
+      const supported = uniqueDescriptors.filter((entry) => provider.supports(entry));
       if (!supported.length) return;
       if (signal.aborted) throw preparationAbortReason(signal);
       await provider.prepareDescriptors({
@@ -250,57 +255,46 @@ export const prepareCharacterProviderDescriptors = async (
 export const enumerateCharacterProviderResources = async (
   providers: readonly StoryCharacterProvider[],
   context: StoryCharacterResourceEnumerationContext,
+  ancestors: readonly AdvCharacterModelEntry[] = [],
 ): Promise<readonly StoryCharacterResource[]> => {
+  if (ancestors.length >= 32 || ancestors.includes(context.entry))
+    throw new TypeError("Cyclic or excessively nested character resources");
   if (context.signal.aborted) throw preparationAbortReason(context.signal);
   const declarations = await Promise.all(
     providers.map(async (provider) => {
-      if (
-        !provider.enumerateResources ||
-        !provider.supports(context.entry)
-      ) {
+      if (!provider.enumerateResources || !provider.supports(context.entry)) {
         return [] as const;
       }
       if (context.signal.aborted) throw preparationAbortReason(context.signal);
-      const provided = await provider.enumerateResources(context);
+      const provided = await provider.enumerateResources({
+        ...context,
+        enumerateChildResources: (entry, animationUsage) =>
+          enumerateCharacterProviderResources(
+            providers,
+            {
+              entry,
+              resources: context.resources,
+              signal: context.signal,
+              ...(animationUsage ? { animationUsage } : {}),
+            },
+            [...ancestors, context.entry],
+          ),
+      });
       if (!Array.isArray(provided)) {
-        throw new TypeError(
-          `Character provider ${provider.id} returned a non-array resource declaration`,
-        );
+        throw new TypeError(`Character provider ${provider.id} returned a non-array resource declaration`);
       }
       return provided.map((resource) => {
-        if (
-          !resource ||
-          typeof resource.source !== "string" ||
-          !resource.source.trim()
-        ) {
-          throw new TypeError(
-            `Character provider ${provider.id} declared an empty resource source`,
-          );
+        if (!resource || typeof resource.source !== "string" || !resource.source.trim()) {
+          throw new TypeError(`Character provider ${provider.id} declared an empty resource source`);
         }
-        if (
-          resource.kind !== undefined &&
-          resource.kind !== "file" &&
-          resource.kind !== "texture"
-        ) {
-          throw new TypeError(
-            `Character provider ${provider.id} declared an invalid resource kind`,
-          );
+        if (resource.kind !== undefined && resource.kind !== "file" && resource.kind !== "texture") {
+          throw new TypeError(`Character provider ${provider.id} declared an invalid resource kind`);
         }
-        if (
-          resource.role !== undefined &&
-          resource.role !== "animation"
-        ) {
-          throw new TypeError(
-            `Character provider ${provider.id} declared an invalid resource role`,
-          );
+        if (resource.role !== undefined && resource.role !== "animation") {
+          throw new TypeError(`Character provider ${provider.id} declared an invalid resource role`);
         }
-        if (
-          resource.label !== undefined &&
-          (typeof resource.label !== "string" || !resource.label.trim())
-        ) {
-          throw new TypeError(
-            `Character provider ${provider.id} declared an invalid resource label`,
-          );
+        if (resource.label !== undefined && (typeof resource.label !== "string" || !resource.label.trim())) {
+          throw new TypeError(`Character provider ${provider.id} declared an invalid resource label`);
         }
         return Object.freeze({
           source: resource.source.trim(),
@@ -368,11 +362,7 @@ export const createRendererCharacterModel = async <
   TRendererContext extends object,
   TRendererModel extends StoryCharacterRendererModel,
 >(
-  provider: RendererAwareStoryCharacterProvider<
-    TRendererId,
-    TRendererContext,
-    TRendererModel
-  >,
+  provider: RendererAwareStoryCharacterProvider<TRendererId, TRendererContext, TRendererModel>,
   context: StoryCharacterRendererModelContext<TRendererId, TRendererContext>,
 ): Promise<TRendererModel> => {
   throwIfRendererAborted(context.signal);

@@ -14,10 +14,13 @@ const SEMVER_PATTERN =
 export const parseVegaSemVer = (value: string): VegaSemVer | null => {
   const match = SEMVER_PATTERN.exec(value.trim());
   if (!match) return null;
-  const prerelease = (match[4] ?? "").split(".").filter(Boolean).map((part) => {
-    if (/^(0|[1-9]\d*)$/.test(part)) return Number(part);
-    return part;
-  });
+  const prerelease = (match[4] ?? "")
+    .split(".")
+    .filter(Boolean)
+    .map((part) => {
+      if (/^(0|[1-9]\d*)$/.test(part)) return Number(part);
+      return part;
+    });
   const build = (match[5] ?? "").split(".").filter(Boolean);
   return Object.freeze({
     major: Number(match[1]),
@@ -37,8 +40,7 @@ export const compareVegaSemVer = (left: string, right: string): number => {
   return compareParsed(a, b);
 };
 
-export const isValidVegaSemVerRange = (range: string): boolean =>
-  compileRange(range) !== null;
+export const isValidVegaSemVerRange = (range: string): boolean => compileRange(range) !== null;
 
 export const satisfiesVegaSemVer = (version: string, range: string): boolean => {
   const parsed = parseVegaSemVer(version);
@@ -82,9 +84,7 @@ const compileRange = (range: string): readonly ComparatorSet[] | null => {
   return result;
 };
 
-const compileToken = (
-  token: string,
-): { comparators: readonly Comparator[]; prereleaseCore?: string } | null => {
+const compileToken = (token: string): { comparators: readonly Comparator[]; prereleaseCore?: string } | null => {
   if (token === "*" || /^x$/i.test(token)) return { comparators: [] };
   const operatorMatch = /^(<=|>=|<|>|=|\^|~)?(.+)$/.exec(token);
   if (!operatorMatch) return null;
@@ -92,12 +92,7 @@ const compileToken = (
   const value = operatorMatch[2]!;
 
   const wildcard = parseWildcard(value);
-  if (
-    wildcard &&
-    (wildcard.major === null ||
-      wildcard.minor === null ||
-      wildcard.patch === null)
-  ) {
+  if (wildcard && (wildcard.major === null || wildcard.minor === null || wildcard.patch === null)) {
     const lower = makeVersion(wildcard.major ?? 0, wildcard.minor ?? 0, 0);
     if ((operator === "~" || operator === "^") && wildcard.major !== null) {
       const upper =
@@ -179,9 +174,7 @@ const compileToken = (
   }
 };
 
-const parseWildcard = (
-  value: string,
-): { major: number | null; minor: number | null; patch: number | null } | null => {
+const parseWildcard = (value: string): { major: number | null; minor: number | null; patch: number | null } | null => {
   const parts = value.replace(/^[v=]/, "").split(".");
   if (parts.length > 3) return null;
   const result: Array<number | null> = [];
@@ -216,10 +209,14 @@ const makeVersion = (major: number, minor: number, patch: number): VegaSemVer =>
   build: [],
 });
 
-const gte = (minimum: VegaSemVer): Comparator =>
-  (version) => compareParsed(version, minimum) >= 0;
-const lt = (maximum: VegaSemVer): Comparator =>
-  (version) => compareParsed(version, maximum) < 0;
+const gte =
+  (minimum: VegaSemVer): Comparator =>
+  (version) =>
+    compareParsed(version, minimum) >= 0;
+const lt =
+  (maximum: VegaSemVer): Comparator =>
+  (version) =>
+    compareParsed(version, maximum) < 0;
 
 const compareParsed = (left: VegaSemVer, right: VegaSemVer): number => {
   for (const key of ["major", "minor", "patch"] as const) {
@@ -244,5 +241,4 @@ const compareParsed = (left: VegaSemVer, right: VegaSemVer): number => {
   return 0;
 };
 
-const coreKey = (version: VegaSemVer): string =>
-  `${version.major}.${version.minor}.${version.patch}`;
+const coreKey = (version: VegaSemVer): string => `${version.major}.${version.minor}.${version.patch}`;

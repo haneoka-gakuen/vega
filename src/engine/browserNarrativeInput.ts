@@ -1,7 +1,4 @@
-import type {
-  VegaNarrativeInputProvider,
-  VegaNarrativeInputRequest,
-} from "../narrative/commands";
+import type { VegaNarrativeInputProvider, VegaNarrativeInputRequest } from "../narrative/commands";
 import type { VegaJsonValue } from "@haneoka/vega-protocol";
 
 export interface VegaBrowserNarrativeInput {

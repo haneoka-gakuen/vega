@@ -19,6 +19,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: source("index.ts"),
+        audio: source("audio-entry.ts"),
         engine: source("engine-entry.ts"),
         marketplace: source("marketplace-entry.ts"),
         plugin: source("plugin-entry.ts"),

@@ -81,7 +81,10 @@ export const estimateVegaVisemeFrame = (
     e: openness * (0.2 + mid * 0.65 + high * 0.45),
     o: openness * (0.25 + low * 0.75 + mid * 0.25),
   };
-  const total = Math.max(0.000001, Object.values(raw).reduce((sum, value) => sum + value, 0));
+  const total = Math.max(
+    0.000001,
+    Object.values(raw).reduce((sum, value) => sum + value, 0),
+  );
   const weights = frozenWeights({
     silence: raw.silence / total,
     a: raw.a / total,
@@ -90,8 +93,8 @@ export const estimateVegaVisemeFrame = (
     e: raw.e / total,
     o: raw.o / total,
   });
-  const dominant = (Object.entries(weights) as [VegaViseme, number][]).reduce(
-    (best, current) => (current[1] > best[1] ? current : best),
+  const dominant = (Object.entries(weights) as [VegaViseme, number][]).reduce((best, current) =>
+    current[1] > best[1] ? current : best,
   )[0];
   return Object.freeze({
     ...(pcm ? pcmPosition(pcm) : {}),
@@ -107,12 +110,10 @@ const pcmPosition = (pcm: VegaVoicePcmFrame) => ({
   samplePosition: pcm.samplePosition,
 });
 
-const frozenWeights = (
-  weights: Record<VegaViseme, number>,
-): Readonly<Record<VegaViseme, number>> => Object.freeze(weights);
+const frozenWeights = (weights: Record<VegaViseme, number>): Readonly<Record<VegaViseme, number>> =>
+  Object.freeze(weights);
 
-const clamp01 = (value: number): number =>
-  Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+const clamp01 = (value: number): number => (Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0);
 
 /** @deprecated Use `VegaVoiceAnalyzer`. */
 export type AdvVoiceAnalyzer = VegaVoiceAnalyzer;

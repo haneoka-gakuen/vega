@@ -4,13 +4,11 @@ import type {
   AdvCharacterVariant,
   AdvCommand,
   AdvRuleTransitionEntry,
+  AdvSoundEntry,
   AdvStory,
 } from "../types/AdvRuntime";
-import type {
-  StoryResourceBackend,
-  StoryResourceLease,
-  StoryResourceResolver,
-} from "../rendering/StorySceneBackend";
+import type { AdvSoundCategory, AdvSoundManager } from "../sound/AdvSoundManager";
+import type { StoryResourceBackend, StoryResourceLease, StoryResourceResolver } from "../rendering/StorySceneBackend";
 import {
   enumerateCharacterProviderResources,
   type StoryCharacterResourceRole,
@@ -18,12 +16,21 @@ import {
 } from "../rendering/StoryCharacterModel";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import {
-  isCanonicalStoryResourceUrl,
-  requireCanonicalStoryResourceUrl,
-} from "../runtime";
+  collectStoryResourceDeclarations,
+  normalizeStoryResourceDeclarations,
+  prepareDeclaredStoryFonts,
+  prepareStoryCommandResourcePreparers,
+  prepareStoryResourcePreparers,
+  runtimeStoryResourcePreparer,
+  type StoryCommandResourceRegistration,
+  type StoryResourceDeclaration,
+  type StoryResourcePreparationContext,
+  type StoryResourcePreparer,
+} from "../resources/StoryResourcePreparation";
+import { isCanonicalStoryResourceUrl, requireCanonicalStoryResourceUrl } from "../runtime";
 import { advCommandGroupCommands } from "./AdvCommandGroup";
 import { splitAdvTargetNames } from "./AdvCommandText";
-import { ADV_COMMAND } from "./AdvConstants";
+import { ADV_COMMAND, mergeAdvRuntime } from "./AdvConstants";
 import { sortAdvTimelineSignals } from "./AdvPlayableDirector";
 
 interface SharedFetch {
@@ -33,10 +40,7 @@ interface SharedFetch {
   waiters: number;
 }
 
-const sharedFetchedUrls = new WeakMap<
-  StoryResourceResolver,
-  Map<string, SharedFetch>
->();
+const sharedFetchedUrls = new WeakMap<StoryResourceResolver, Map<string, SharedFetch>>();
 const MAX_SHARED_FETCH_KEYS = 512;
 
 function resourceRequestError(name: "AbortError", message: string): Error {
@@ -68,10 +72,7 @@ async function runWithConcurrency<Value>(
       await visit(values[index]!);
     }
   };
-  const workerCount = Math.min(
-    values.length,
-    Math.max(1, Math.floor(Number(concurrency) || 1)),
-  );
+  const workerCount = Math.min(values.length, Math.max(1, Math.floor(Number(concurrency) || 1)));
   await Promise.all(Array.from({ length: workerCount }, runWorker));
   throwIfPreloadAborted(signal);
 }
@@ -88,9 +89,7 @@ function waitForSharedFetch(
       void shared.pending.catch(() => undefined);
       shared.controller.abort();
     }
-    return Promise.reject(
-      resourceRequestError("AbortError", `Loading was aborted: ${url}`),
-    );
+    return Promise.reject(resourceRequestError("AbortError", `Loading was aborted: ${url}`));
   }
   shared.waiters += 1;
   return new Promise<void>((resolve, reject) => {
@@ -106,12 +105,7 @@ function waitForSharedFetch(
       }
       callback();
     };
-    const abort = (): void =>
-      finish(() =>
-        reject(
-          resourceRequestError("AbortError", `Loading was aborted: ${url}`),
-        ),
-      );
+    const abort = (): void => finish(() => reject(resourceRequestError("AbortError", `Loading was aborted: ${url}`)));
     signal?.addEventListener("abort", abort, { once: true });
     shared.pending.then(
       () => finish(resolve),
@@ -120,9 +114,7 @@ function waitForSharedFetch(
   });
 }
 
-const fetchedUrlsFor = (
-  resources: StoryResourceResolver,
-): Map<string, SharedFetch> => {
+const fetchedUrlsFor = (resources: StoryResourceResolver): Map<string, SharedFetch> => {
   let fetched = sharedFetchedUrls.get(resources);
   if (!fetched) {
     fetched = new Map();
@@ -131,11 +123,7 @@ const fetchedUrlsFor = (
   return fetched;
 };
 
-const rememberSharedFetch = (
-  fetched: Map<string, SharedFetch>,
-  url: string,
-  request: SharedFetch,
-) => {
+const rememberSharedFetch = (fetched: Map<string, SharedFetch>, url: string, request: SharedFetch) => {
   fetched.delete(url);
   fetched.set(url, request);
   while (fetched.size > MAX_SHARED_FETCH_KEYS) {
@@ -172,6 +160,13 @@ export interface AdvEpisodeResourceSnapshot {
   readonly playbackIndex: number;
 }
 
+export interface AdvEpisodeResourceLoaderOptions {
+  readonly resolveLocalizedText?: StoryResourcePreparationContext["resolveLocalizedText"];
+  readonly resourcePreparers?: readonly StoryResourcePreparer[];
+  readonly commandResourcePreparers?: readonly StoryCommandResourceRegistration[];
+  readonly document?: Document;
+}
+
 export class AdvEpisodeResourceLoader {
   sceneRoot: StoryResourceBackend;
   state: Record<string, unknown>;
@@ -187,23 +182,33 @@ export class AdvEpisodeResourceLoader {
   private preloadController: AbortController | null;
   private preloadSourceSignal?: AbortSignal;
   private preloadSourceAbort?: () => void;
-  private readonly animationLeases = new Map<string, StoryResourceLease>();
-  private preloadAheadCommands: number;
-  private preloadBehindCommands: number;
+  private readonly episodeResourceLeases = new Map<string, StoryResourceLease>();
   private backgroundConcurrency: number;
   private playbackIndex: number;
   private readonly resources: StoryResourceResolver;
   private readonly characterProviders: readonly StoryCharacterProvider[];
+  private readonly sounds?: Pick<AdvSoundManager, "preloadSound">;
+  private readonly resourcePreparers: readonly StoryResourcePreparer[];
+  private readonly commandResourcePreparers: readonly StoryCommandResourceRegistration[];
+  private readonly ownerDocument?: Document;
+  private readonly resolveLocalizedText: StoryResourcePreparationContext["resolveLocalizedText"];
   constructor(
     sceneRoot: StoryResourceBackend,
     state: Record<string, unknown>,
     resources: StoryResourceResolver = new DefaultStoryResourceResolver(),
     characterProviders: readonly StoryCharacterProvider[] = [],
+    sounds?: Pick<AdvSoundManager, "preloadSound">,
+    options: AdvEpisodeResourceLoaderOptions = {},
   ) {
     this.sceneRoot = sceneRoot;
     this.state = state;
     this.resources = resources;
     this.characterProviders = Object.freeze([...characterProviders]);
+    this.sounds = sounds;
+    this.resolveLocalizedText = options.resolveLocalizedText;
+    this.resourcePreparers = Object.freeze([runtimeStoryResourcePreparer, ...(options.resourcePreparers ?? [])]);
+    this.commandResourcePreparers = Object.freeze([...(options.commandResourcePreparers ?? [])]);
+    this.ownerDocument = options.document;
     this.characterVariants = new Map<string, AdvCharacterVariant>();
     this.characterAssetIndices = new Map<string, number>();
     this.backgroundWarm = null;
@@ -213,21 +218,31 @@ export class AdvEpisodeResourceLoader {
     this.completedTaskKeys = new Set();
     this.scheduledTaskKeys = new Set();
     this.preloadController = null;
-    this.preloadAheadCommands = 192;
-    this.preloadBehindCommands = 24;
     this.backgroundConcurrency = 6;
     this.playbackIndex = 0;
   }
 
-  async preload(
-    story: AdvStory | null | undefined,
-    signal: AbortSignal,
-  ): Promise<void> {
+  async preload(story: AdvStory | null | undefined, signal: AbortSignal): Promise<void> {
     // A newly constructed Loader may already own leases handed off by the
     // preceding player during seek/restart. With no active lifetime to cancel,
     // preserve those leases and validate/reuse them during this full scan.
     this.stopEpisodeLifetime(this.preloadController !== null);
     throwIfPreloadAborted(signal);
+    const preloadState = this.state.preload as Record<string, unknown> | undefined;
+    // Every attempt owns a fresh loading state. In particular, a retry must
+    // never inherit completed work or an error from the preceding attempt.
+    this.state.error = "";
+    if (preloadState) {
+      // This phase counts only concrete resource-preparation work. Command
+      // boundaries belong to the later seek-index phase and must not be
+      // presented as thousands of "resources" on the loading screen.
+      preloadState.total = 0;
+      preloadState.done = 0;
+      preloadState.error = "";
+      preloadState.total = preloadProgressValue(preloadState.total) + 1;
+      preloadState.failures = [];
+      preloadState.label = "resources";
+    }
     const controller = new AbortController();
     this.preloadController = controller;
     this.preloadSourceSignal = signal;
@@ -239,11 +254,7 @@ export class AdvEpisodeResourceLoader {
     };
     this.preloadSourceAbort = forwardAbort;
     signal.addEventListener("abort", forwardAbort, { once: true });
-    controller.signal.addEventListener(
-      "abort",
-      () => this.releaseAnimationLeases(),
-      { once: true },
-    );
+    controller.signal.addEventListener("abort", () => this.releaseResourceLeases(), { once: true });
     try {
       await this.preloadEpisode(story, controller.signal);
     } catch (error) {
@@ -256,39 +267,32 @@ export class AdvEpisodeResourceLoader {
     }
   }
 
-  private async preloadEpisode(
-    story: AdvStory | null | undefined,
-    signal: AbortSignal,
-  ): Promise<void> {
+  private async preloadEpisode(story: AdvStory | null | undefined, signal: AbortSignal): Promise<void> {
     throwIfPreloadAborted(signal);
     this.preloadSignal = signal;
     const providerSignal = signal;
     assertNestedCanonicalResourceUrls(story);
     const commands = story?.commands || [];
-    const animationUsage = collectReferencedCharacterAnimations(
-      commands,
-      story?.runtime?.targetNameSplitKey,
-    );
-    const supportsRenderReadyCharacters =
-      typeof this.sceneRoot.preloadCharacter === "function";
+    const animationUsage = collectReferencedCharacterAnimations(commands, story?.runtime?.targetNameSplitKey);
+    const supportsRenderReadyCharacters = typeof this.sceneRoot.preloadCharacter === "function";
     const workerCount = preloadConcurrency(story?.runtime?.preloadConcurrency);
     const characterWarmups = supportsRenderReadyCharacters
-      ? collectCharacterWarmupRequests(
-          commands,
-          story?.runtime?.targetNameSplitKey,
-        )
+      ? collectCharacterWarmupRequests(commands, story?.runtime?.targetNameSplitKey)
       : [];
     const textureUrls = new Set<string>();
     const fileUrls = new Map<string, string>();
-    const retainedAnimationUrls = new Set<string>();
+    const retainedFileUrls = new Set<string>();
+    const audioRequests = new Map<string, Array<{ sound: AdvSoundEntry; category: AdvSoundCategory }>>();
+    const videoUrls = new Set<string>();
     const firstCmdIndex = new Map<string, number>();
     const noteIndex = (url: string, index: number) => {
       if (!firstCmdIndex.has(url)) firstCmdIndex.set(url, index);
     };
-    const addFile = (label: string, url: string, index: number) => {
+    const addFile = (label: string, url: string, index: number, retainBytes = true) => {
       assertLocalRuntimeUrl(label, url);
       if (!isLocalRuntimeUrl(url)) return;
       fileUrls.set(url, label);
+      if (retainBytes) retainedFileUrls.add(url);
       noteIndex(url, index);
     };
     const addTexture = (url: string, index: number) => {
@@ -298,33 +302,138 @@ export class AdvEpisodeResourceLoader {
       fileUrls.set(url, "image");
       noteIndex(url, index);
     };
-    const defaultRule = story?.runtime?.defaultRuleTransition as
-      AdvRuleTransitionEntry | undefined;
+    const addAudio = (sound: AdvSoundEntry | null | undefined, category: AdvSoundCategory, index: number) => {
+      const url = sound?.playableUrl || "";
+      addFile(category.toLocaleLowerCase(), url, index, false);
+      if (!url || !isLocalRuntimeUrl(url)) return;
+      const requests = audioRequests.get(url) || [];
+      if (!requests.some((request) => request.category === category)) {
+        requests.push({ sound: sound!, category });
+        audioRequests.set(url, requests);
+      }
+    };
+    const addVideo = (url: string, index: number) => {
+      addFile("video", url, index, false);
+      if (url && isLocalRuntimeUrl(url)) videoUrls.add(url);
+    };
+    let preparationContext: StoryResourcePreparationContext | undefined;
+    let declaredResources: readonly StoryResourceDeclaration[] = [];
+    if (story) {
+      const usedOpcodes = new Set<number>();
+      for (const command of commands) {
+        for (const nested of commandsIncludingTimelineEpisodes(command)) {
+          usedOpcodes.add(Number(nested.command));
+        }
+      }
+      const usedCommandResourcePreparers = this.commandResourcePreparers.filter((registration) =>
+        usedOpcodes.has(Number(registration.opcode)),
+      );
+      preparationContext = {
+        ...(this.resolveLocalizedText ? { resolveLocalizedText: this.resolveLocalizedText } : {}),
+        story,
+        runtime: mergeAdvRuntime(story.runtime),
+        resources: this.resources,
+        signal: providerSignal,
+        ...(this.ownerDocument ? { document: this.ownerDocument } : {}),
+      };
+      const preparationTasks: PreloadTask[] = [];
+      if (this.resourcePreparers.some((preparer) => typeof preparer.prepareStoryResources === "function")) {
+        preparationTasks.push({
+          key: "prepare:story",
+          label: "plugins",
+          index: 0,
+          run: () => prepareStoryResourcePreparers(this.resourcePreparers, preparationContext!),
+        });
+      }
+      if (usedCommandResourcePreparers.some((preparer) => typeof preparer.prepareStoryResources === "function")) {
+        preparationTasks.push({
+          key: "prepare:commands",
+          label: "plugins",
+          index: 0,
+          run: () => prepareStoryCommandResourcePreparers(usedCommandResourcePreparers, preparationContext!),
+        });
+      }
+      if (this.sceneRoot.prepareStoryResources) {
+        preparationTasks.push({
+          key: "prepare:renderer",
+          label: "effects",
+          index: 0,
+          run: async () => {
+            await this.sceneRoot.prepareStoryResources!(story, providerSignal);
+          },
+        });
+      }
+      if (preparationTasks.length) {
+        const preloadState = this.state.preload as Record<string, unknown> | undefined;
+        if (preloadState) {
+          preloadState.total = preloadProgressValue(preloadState.total) + preparationTasks.length;
+        }
+        const prepared = await this.runPreloadTasks(preparationTasks, providerSignal, preparationTasks.length, true);
+        if (!prepared) {
+          const failures = Array.isArray(preloadState?.failures)
+            ? preloadState.failures.join("\n")
+            : "Story resource preparation failed";
+          throw new Error(`ADV preload failed:\n${failures}`);
+        }
+      }
+      const [pluginResources, rendererResources] = await Promise.all([
+        collectStoryResourceDeclarations(this.resourcePreparers, usedCommandResourcePreparers, preparationContext),
+        this.sceneRoot.enumerateStoryResources
+          ? this.sceneRoot.enumerateStoryResources(story, providerSignal)
+          : Promise.resolve([] as const),
+      ]);
+      declaredResources = Object.freeze([
+        ...pluginResources,
+        ...normalizeStoryResourceDeclarations(rendererResources, "story scene backend"),
+      ]);
+      for (const declaration of declaredResources) {
+        const label = declaration.label || declaration.kind || "asset";
+        switch (declaration.kind) {
+          case "texture":
+            addTexture(declaration.source, 0);
+            break;
+          case "video":
+            addVideo(declaration.source, 0);
+            break;
+          case "audio":
+            addAudio(
+              {
+                playableUrl: declaration.source,
+                categoryName: declaration.audioCategory ?? "Se",
+              },
+              declaration.audioCategory ?? "Se",
+              0,
+            );
+            break;
+          case "font":
+            addFile(label, declaration.source, 0, false);
+            break;
+          case "file":
+          default:
+            addFile(label, declaration.source, 0);
+            break;
+        }
+      }
+    }
+    const defaultRule = story?.runtime?.defaultRuleTransition as AdvRuleTransitionEntry | undefined;
     if (defaultRule?.texture) addTexture(defaultRule.texture, 0);
-    else if (defaultRule?.maskTexture) addTexture(defaultRule.maskTexture, 0);
+    if (defaultRule?.maskTexture) addTexture(defaultRule.maskTexture, 0);
     for (let i = 0; i < commands.length; i += 1) {
       for (const cmd of commandsIncludingTimelineEpisodes(commands[i])) {
         addTexture(cmd.background?.url || "", i);
         addTexture(cmd.still?.url || "", i);
         addTexture(cmd.frame?.texture || "", i);
-        for (const url of Object.values(cmd.frame?.textures || {}))
-          addTexture(String(url), i);
-        for (const edge of cmd.frame?.edges || [])
-          addTexture(edge?.texture || "", i);
-        for (const element of cmd.frame?.elements || [])
-          addTexture(element?.texture || "", i);
-        for (const url of Object.values(cmd.effect?.textures || {}))
-          addTexture(String(url), i);
-        if (cmd.ruleTransition?.texture)
-          addTexture(cmd.ruleTransition.texture, i);
-        if (cmd.ruleTransition?.maskTexture)
-          addTexture(cmd.ruleTransition.maskTexture, i);
-        addFile("bgm", cmd.bgm?.playableUrl || "", i);
-        addFile("se", cmd.se?.playableUrl || "", i);
-        for (const voice of cmd.voices || [])
-          addFile("voice", voice?.playableUrl || "", i);
-        addFile(
-          "video",
+        for (const url of Object.values(cmd.frame?.textures || {})) addTexture(String(url), i);
+        for (const edge of cmd.frame?.edges || []) addTexture(edge?.texture || "", i);
+        for (const element of cmd.frame?.elements || []) addTexture(element?.texture || "", i);
+        for (const url of Object.values(cmd.effect?.textures || {})) addTexture(String(url), i);
+        if (cmd.ruleTransition?.texture) addTexture(cmd.ruleTransition.texture, i);
+        if (cmd.ruleTransition?.maskTexture) addTexture(cmd.ruleTransition.maskTexture, i);
+        addAudio(cmd.bgm, "Bgm", i);
+        addAudio(cmd.se, "Se", i);
+        addAudio(cmd.chatSound, "Se", i);
+        for (const voice of cmd.voices || []) addAudio(voice, "Voice", i);
+        addVideo(
           cmd.video?.playableUrl ||
             cmd.video?.src ||
             cmd.video?.url ||
@@ -346,7 +455,7 @@ export class AdvEpisodeResourceLoader {
             await this.collectCharacterProviderResources(
               cmd.characterModel,
               (label, url) => addFile(label, url, i),
-              (url) => addTexture(url, i),
+              (_label, url) => addTexture(url, i),
               usage,
               providerSignal,
             );
@@ -354,23 +463,26 @@ export class AdvEpisodeResourceLoader {
         }
       }
     }
-    // Some story exports keep assets in metadata or opcode-specific extension
-    // fields. Include every declared canonical resource URL, not only the
-    // fields understood by the current renderer.
-    collectDeclaredResourceUrls(
-      story,
-      (url) => addFile("asset", url, 0),
-      "",
-      false,
-      new WeakSet<object>(),
-      STORY_RESOURCE_FIELD,
-      true,
-    );
+    // Asset catalogues and cover metadata on the story object are lookup data,
+    // not runtime dependencies. Scanning them as command zero would preload
+    // every exported model, motion, expression, and thumbnail even when no
+    // command uses it. Opcode-specific extension fields are still discovered
+    // below at their authored command index.
+    for (let index = 0; index < commands.length; index += 1) {
+      collectDeclaredResourceUrls(
+        commands[index],
+        (url) => addFile("asset", url, index, !audioRequests.has(url) && !videoUrls.has(url)),
+        "",
+        false,
+        new WeakSet<object>(),
+        STORY_RESOURCE_FIELD,
+        true,
+      );
+    }
     if (supportsRenderReadyCharacters) {
-      // Scan the complete episode up front and cache every animation payload
-      // that an authored controller can actually use. Controller/GPU creation
-      // stays rolling and bounded, but later motions and expressions no longer
-      // incur their first network request when the character is already due.
+      // Scan every descriptor that reaches an authored In and enumerate its
+      // complete base payload plus only the motions/expressions selected by the
+      // story. Controller creation below then reuses these resident resources.
       const groups = new Map<
         AdvCharacterModelEntry,
         {
@@ -402,33 +514,34 @@ export class AdvEpisodeResourceLoader {
           group.animationUsage.expressions.add(name);
         }
       }
-      await runWithConcurrency(
-        [...groups.values()],
-        workerCount,
-        providerSignal,
-        (group) =>
-          this.collectCharacterProviderResources(
-            group.command.characterModel,
-            (label, url) => {
-              addFile(label, url, group.index);
-              retainedAnimationUrls.add(url);
-            },
-            (url) => addTexture(url, group.index),
-            group.animationUsage,
-            providerSignal,
-            "animation",
-          ),
+      await runWithConcurrency([...groups.values()], workerCount, providerSignal, (group) =>
+        this.collectCharacterProviderResources(
+          group.command.characterModel,
+          (label, url) => addFile(label, url, group.index),
+          (label, url) => addFile(label, url, group.index),
+          group.animationUsage,
+          providerSignal,
+        ),
       );
     }
+    const fontTasks: PreloadTask[] =
+      preparationContext && declaredResources.some((declaration) => declaration.kind === "font")
+        ? [
+            {
+              key: "prepare:fonts",
+              label: "fonts",
+              index: 0,
+              run: () => prepareDeclaredStoryFonts(declaredResources, preparationContext!),
+            },
+          ]
+        : [];
     const tasks: PreloadTask[] = [
       ...[...textureUrls].map((url) => ({
         key: `texture:${url}`,
         label: "image",
         index: firstCmdIndex.get(url) ?? 0,
         run: async () => {
-          if (retainedAnimationUrls.has(url)) {
-            await this.retainAnimationResource(url, providerSignal);
-          }
+          await this.retainEpisodeResource(url, providerSignal);
           if (typeof this.sceneRoot.preloadTexture === "function") {
             await this.sceneRoot.preloadTexture(url, signal);
           } else {
@@ -442,98 +555,82 @@ export class AdvEpisodeResourceLoader {
           key: `file:${url}`,
           label,
           index: firstCmdIndex.get(url) ?? 0,
-          run: () =>
-            retainedAnimationUrls.has(url)
-              ? this.retainAnimationResource(url, providerSignal)
-              : this.fetchUrl(url),
+          run: async () => {
+            if (retainedFileUrls.has(url)) {
+              await this.retainEpisodeResource(url, providerSignal);
+            }
+            if (this.sounds) {
+              await Promise.all(
+                (audioRequests.get(url) || []).map(({ sound, category }) =>
+                  this.sounds!.preloadSound(sound, category, providerSignal),
+                ),
+              );
+            }
+            if (videoUrls.has(url)) {
+              await this.sceneRoot.preloadVideo?.(url, providerSignal);
+            }
+          },
         })),
     ];
-    this.preloadAheadCommands = preloadWindow(
-      supportsRenderReadyCharacters
-        ? story?.runtime?.characterPreloadAheadCommands
-        : story?.runtime?.preloadAheadCommands,
-      supportsRenderReadyCharacters ? 96 : 192,
-      8,
-      384,
-    );
-    this.preloadBehindCommands = preloadWindow(
-      story?.runtime?.preloadBehindCommands,
-      24,
-      0,
-      64,
-    );
+    this.sceneRoot.reservePreloadedTextures?.(textureUrls.size);
     this.backgroundConcurrency = preloadConcurrency(
-      supportsRenderReadyCharacters
-        ? story?.runtime?.characterPreloadConcurrency
-        : story?.runtime?.preloadBackgroundConcurrency,
-      supportsRenderReadyCharacters ? 2 : 6,
+      supportsRenderReadyCharacters ? story?.runtime?.characterPreloadConcurrency : story?.runtime?.preloadConcurrency,
+      supportsRenderReadyCharacters ? 2 : workerCount,
       supportsRenderReadyCharacters ? 4 : 8,
     );
     const characterTasks: PreloadTask[] = characterWarmups.map((warmup) => ({
       key: `character:${warmup.identity}`,
       label: "character",
       index: warmup.index,
-      run: () =>
-        this.sceneRoot.preloadCharacter!(
+      run: async () => {
+        const prepared = await this.sceneRoot.preloadCharacter!(
           {
             command: warmup.command,
             commandIndex: warmup.index,
+            episodeControllerCount: characterWarmups.length,
             positionType: warmup.positionType,
             motions: Object.freeze([...warmup.animationUsage.motions]),
             expressions: Object.freeze([...warmup.animationUsage.expressions]),
           },
           signal,
-        ),
+        );
+        if (prepared === false) {
+          throw new Error(`The scene renderer could not preload character ${warmup.target}`);
+        }
+      },
     }));
-    const initialCharacterCount = supportsRenderReadyCharacters
-      ? preloadWindow(
-          story?.runtime?.characterPreloadInitialCount,
-          6,
-          1,
-          12,
-        )
-      : 0;
-    const initialCharacterTasks = characterTasks.slice(0, initialCharacterCount);
-    // Renderer-aware warmup is deliberately rolling: the opening controllers
-    // are a blocking first-frame guarantee, while later controllers are built
-    // only as their authored commands approach. This avoids allocating every
-    // model and texture in a long episode up front.
-    // Keep the complete task list for seek/context-loss invalidation. Initial
-    // tasks are already marked completed by the blocking pass, so the rolling
-    // pump skips them until the renderer explicitly reports their controller
-    // was discarded.
-    this.backgroundTasks = characterTasks;
+    // Keep the full task catalogue only for lifecycle recovery. Every entry is
+    // completed before ready, so ordinary playback and seeking do not start a
+    // second, command-window preload phase.
+    const episodeTasks = [...characterTasks, ...tasks].sort((left, right) => left.index - right.index);
+    this.backgroundTasks = episodeTasks;
     this.completedTaskKeys.clear();
     this.scheduledTaskKeys.clear();
 
-    // Every directly declared task is blocking. A failure prevents entry.
-    const preloadState = this.state.preload as
-      Record<string, unknown> | undefined;
+    // The loading screen owns the whole episode dependency set: all referenced
+    // bytes/textures and every controller's first renderer frame must be ready
+    // before the player reports ready. The two bounded pools run concurrently;
+    // the shared resolver and texture caches collapse overlapping work.
+    const preloadState = this.state.preload as Record<string, unknown> | undefined;
     if (preloadState) {
-      preloadState.total = tasks.length + initialCharacterTasks.length;
-      preloadState.done = 0;
-      preloadState.failures = [];
-    }
-    await this.runPreloadTasks(tasks, signal, workerCount, true);
-    await this.runPreloadTasks(
-      initialCharacterTasks,
-      signal,
-      this.backgroundConcurrency,
-      true,
-    );
-    throwIfPreloadAborted(signal);
-    if (
-      !signal?.aborted &&
-      preloadState &&
-      Array.isArray(preloadState.failures) &&
-      preloadState.failures.length
-    ) {
-      throw new Error(
-        `ADV preload failed:\n${preloadState.failures.join("\n")}`,
+      const episodeTaskCount = tasks.length + characterTasks.length + fontTasks.length;
+      preloadState.total = Math.max(
+        preloadProgressValue(preloadState.done),
+        preloadProgressValue(preloadState.total) + episodeTaskCount,
       );
+      preloadState.done = preloadProgressValue(preloadState.done) + 1;
+    }
+    await Promise.all([
+      this.runPreloadTasks(tasks, signal, workerCount, true),
+      this.runPreloadTasks(fontTasks, signal, fontTasks.length || 1, true),
+      this.runPreloadTasks(characterTasks, signal, this.backgroundConcurrency, true),
+    ]);
+    throwIfPreloadAborted(signal);
+    if (!signal?.aborted && preloadState && Array.isArray(preloadState.failures) && preloadState.failures.length) {
+      throw new Error(`ADV preload failed:\n${preloadState.failures.join("\n")}`);
     }
 
-    if (!this.backgroundWarm) this.backgroundWarm = Promise.resolve();
+    this.backgroundWarm = Promise.resolve();
   }
 
   private async runPreloadTasks(
@@ -553,8 +650,7 @@ export class AdvEpisodeResourceLoader {
         nextTaskIndex += 1;
         if (!task) return;
         if (tracked) {
-          const preloadState = this.state.preload as
-            Record<string, unknown> | undefined;
+          const preloadState = this.state.preload as Record<string, unknown> | undefined;
           if (preloadState) preloadState.label = task.label;
         }
         let completed = true;
@@ -566,31 +662,21 @@ export class AdvEpisodeResourceLoader {
           allCompleted = false;
           failure = err;
           if (!signal?.aborted && tracked) {
-            const preloadState = this.state.preload as
-              Record<string, unknown> | undefined;
-            if (preloadState && Array.isArray(preloadState.failures)) {
-              preloadState.failures.push(errorMessage(err));
-            }
+            const preloadState = this.state.preload as Record<string, unknown> | undefined;
+            recordPreloadFailure(preloadState, errorMessage(err));
           }
         }
         if (!completed && failure == null && !signal?.aborted && tracked) {
-          const preloadState = this.state.preload as
-            Record<string, unknown> | undefined;
-          if (preloadState && Array.isArray(preloadState.failures)) {
-            preloadState.failures.push(
-              `Renderer did not make ${task.key} ready`,
-            );
-          }
+          const preloadState = this.state.preload as Record<string, unknown> | undefined;
+          recordPreloadFailure(preloadState, `Renderer did not make ${task.key} ready`);
         }
         if (completed) this.completedTaskKeys.add(task.key);
         else allCompleted = false;
         this.scheduledTaskKeys.delete(task.key);
         if (tracked) {
-          const preloadState = this.state.preload as
-            Record<string, unknown> | undefined;
+          const preloadState = this.state.preload as Record<string, unknown> | undefined;
           if (preloadState)
-            (preloadState as Record<string, number>).done =
-              ((preloadState as Record<string, number>).done || 0) + 1;
+            (preloadState as Record<string, number>).done = ((preloadState as Record<string, number>).done || 0) + 1;
         }
       }
     };
@@ -601,10 +687,7 @@ export class AdvEpisodeResourceLoader {
 
   advanceTo(commandIndex: number) {
     this.playbackIndex = Math.max(0, Math.floor(Number(commandIndex) || 0));
-    const discarded = this.sceneRoot.advanceCharacterPreload?.(
-      this.playbackIndex,
-      this.preloadBehindCommands,
-    );
+    const discarded = this.sceneRoot.advanceCharacterPreload?.(this.playbackIndex, Number.MAX_SAFE_INTEGER);
     for (const identity of discarded ?? []) {
       this.completedTaskKeys.delete(`character:${identity}`);
     }
@@ -638,40 +721,22 @@ export class AdvEpisodeResourceLoader {
 
   private async runBackgroundPump() {
     while (!this.preloadSignal?.aborted) {
-      const minIndex = Math.max(
-        0,
-        this.playbackIndex - this.preloadBehindCommands,
-      );
-      const maxIndex = this.playbackIndex + this.preloadAheadCommands;
       const tasks = this.backgroundTasks.filter(
-        (task) =>
-          task.index >= minIndex &&
-          task.index <= maxIndex &&
-          !this.completedTaskKeys.has(task.key) &&
-          !this.scheduledTaskKeys.has(task.key),
+        (task) => !this.completedTaskKeys.has(task.key) && !this.scheduledTaskKeys.has(task.key),
       );
       if (!tasks.length) return;
       for (const task of tasks) this.scheduledTaskKeys.add(task.key);
-      const allCompleted = await this.runPreloadTasks(
-        tasks,
-        this.preloadSignal,
-        this.backgroundConcurrency,
-        false,
-      );
-      // A renderer can refuse a speculative model while its bounded warm pool
-      // is full. Leave that task incomplete and retry after playback advances
-      // (normally immediately after an earlier warm controller is consumed).
+      const allCompleted = await this.runPreloadTasks(tasks, this.preloadSignal, this.backgroundConcurrency, false);
+      // A transient renderer lifecycle event may make a controller unavailable.
+      // Leave it incomplete and retry when the renderer reports another change.
       if (!allCompleted) return;
     }
   }
 
   /**
-   * Warm every Phase-2 resource whose command index falls in [startIndex, endIndex]
-   * at background concurrency, independently of the rolling playback pump. Used by
-   * seek so resources load in parallel while the deterministic replay loop re-applies
-   * command state serially. Safe to fire without awaiting: it shares the pump's
-   * completed/scheduled key sets, so nothing double-loads and the pump picks up any
-   * tasks this pass did not finish.
+   * Repair renderer-owned resources discarded after the blocking episode
+   * preload (for example after WebGL context loss). Under normal playback every
+   * task is already complete, so ordinary playback does not schedule it again.
    */
   warmRange(startIndex: number, endIndex: number): Promise<void> {
     const min = Math.max(0, Math.floor(Number(startIndex) || 0));
@@ -685,15 +750,10 @@ export class AdvEpisodeResourceLoader {
     );
     if (!tasks.length) return Promise.resolve();
     for (const task of tasks) this.scheduledTaskKeys.add(task.key);
-    return this.runPreloadTasks(
-      tasks,
-      this.preloadSignal,
-      this.backgroundConcurrency,
-      false,
-    ).then(() => undefined);
+    return this.runPreloadTasks(tasks, this.preloadSignal, this.backgroundConcurrency, false).then(() => undefined);
   }
 
-  /** Release episode-owned resource leases and cancel speculative warmup. */
+  /** Release episode-owned resource leases and cancel lifecycle recovery. */
   dispose(): void {
     this.stopEpisodeLifetime();
   }
@@ -702,34 +762,29 @@ export class AdvEpisodeResourceLoader {
    * Transfers selected-animation ownership to a sequential player instance.
    * The returned leases remain active until adopted or explicitly released.
    */
-  takeAnimationLeases(): Map<string, StoryResourceLease> {
-    const handoff = new Map(this.animationLeases);
-    this.animationLeases.clear();
+  takeResourceLeases(): Map<string, StoryResourceLease> {
+    const handoff = new Map(this.episodeResourceLeases);
+    this.episodeResourceLeases.clear();
     return handoff;
   }
 
   /** Adopt leases previously detached from a player using the same cache. */
-  adoptAnimationLeases(
-    leases: Iterable<readonly [string, StoryResourceLease]>,
-  ): void {
+  adoptResourceLeases(leases: Iterable<readonly [string, StoryResourceLease]>): void {
     for (const [url, lease] of leases) {
-      if (this.animationLeases.has(url)) lease.release();
-      else this.animationLeases.set(url, lease);
+      if (this.episodeResourceLeases.has(url)) lease.release();
+      else this.episodeResourceLeases.set(url, lease);
     }
   }
 
-  private async retainAnimationResource(
-    url: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    if (this.animationLeases.has(url)) return;
+  private async retainEpisodeResource(url: string, signal: AbortSignal): Promise<void> {
+    if (this.episodeResourceLeases.has(url)) return;
     const lease = await this.resources.retain(url, signal);
     try {
       throwIfPreloadAborted(signal);
-      if (this.animationLeases.has(url)) {
+      if (this.episodeResourceLeases.has(url)) {
         lease.release();
       } else {
-        this.animationLeases.set(url, lease);
+        this.episodeResourceLeases.set(url, lease);
       }
     } catch (error) {
       lease.release();
@@ -737,9 +792,9 @@ export class AdvEpisodeResourceLoader {
     }
   }
 
-  private releaseAnimationLeases(): void {
-    for (const lease of this.animationLeases.values()) lease.release();
-    this.animationLeases.clear();
+  private releaseResourceLeases(): void {
+    for (const lease of this.episodeResourceLeases.values()) lease.release();
+    this.episodeResourceLeases.clear();
   }
 
   private stopEpisodeLifetime(releaseLeases = true): void {
@@ -754,7 +809,7 @@ export class AdvEpisodeResourceLoader {
     this.preloadController = null;
     controller?.abort();
     this.preloadSignal = undefined;
-    if (releaseLeases) this.releaseAnimationLeases();
+    if (releaseLeases) this.releaseResourceLeases();
     this.backgroundTasks = [];
     this.backgroundRepumpRequested = false;
     this.backgroundPump = null;
@@ -766,56 +821,41 @@ export class AdvEpisodeResourceLoader {
   /** Collect provider-declared character assets before playback starts. */
   private async collectCharacterProviderResources(
     character: AdvCommand["characterModel"],
-    addFile: (label: string, url: string) => void,
-    addTexture: (url: string) => void,
+    addFile: (label: string, url: string, role?: StoryCharacterResourceRole) => void,
+    addTexture: (label: string, url: string, role?: StoryCharacterResourceRole) => void,
     animationUsage?: CharacterAnimationUsage,
     signal: AbortSignal = new AbortController().signal,
-    onlyRole?: StoryCharacterResourceRole,
   ): Promise<void> {
     if (!character) return;
-    const acceptedProviders = this.characterProviders.filter((provider) =>
-      provider.supports(character),
-    );
-    const declarations = await enumerateCharacterProviderResources(
-      acceptedProviders,
-      {
-        entry: character,
-        ...(animationUsage
-          ? {
-              animationUsage: Object.freeze({
-                motions: Object.freeze([...animationUsage.motions]),
-                expressions: Object.freeze([...animationUsage.expressions]),
-              }),
-            }
-          : {}),
-        resources: this.resources,
-        signal,
-      },
-    );
+    const acceptedProviders = this.characterProviders.filter((provider) => provider.supports(character));
+    const declarations = await enumerateCharacterProviderResources(acceptedProviders, {
+      entry: character,
+      ...(animationUsage
+        ? {
+            animationUsage: Object.freeze({
+              motions: Object.freeze([...animationUsage.motions]),
+              expressions: Object.freeze([...animationUsage.expressions]),
+            }),
+          }
+        : {}),
+      resources: this.resources,
+      signal,
+    });
     for (const declaration of declarations) {
-      if (onlyRole && declaration.role !== onlyRole) continue;
-      if (onlyRole) {
-        // Animation resources are pinned as canonical bytes. Texture-shaped
-        // declarations are also decoded/uploaded through the scene's normal
-        // texture warmup path; both operations still cover only authored use.
-        addFile(declaration.label || "character animation", declaration.source);
-        if (declaration.kind === "texture") addTexture(declaration.source);
-      } else if (declaration.kind === "texture") {
-        addTexture(declaration.source);
+      if (declaration.kind === "texture") {
+        addTexture(declaration.label || "character texture", declaration.source, declaration.role);
       } else {
-        addFile(declaration.label || "character", declaration.source);
+        addFile(declaration.label || "character", declaration.source, declaration.role);
       }
     }
     if (acceptedProviders.length) return;
     const portrait = staticPortraitSource(character);
-    if (portrait) addTexture(portrait);
+    if (portrait) addTexture("character portrait", portrait);
   }
 
   fetchUrl(url: string) {
     if (this.preloadSignal?.aborted) {
-      return Promise.reject(
-        resourceRequestError("AbortError", `Loading was aborted: ${url}`),
-      );
+      return Promise.reject(resourceRequestError("AbortError", `Loading was aborted: ${url}`));
     }
     const fetched = fetchedUrlsFor(this.resources);
     let shared = fetched.get(url);
@@ -829,7 +869,14 @@ export class AdvEpisodeResourceLoader {
       };
       const request = shared;
       shared.pending = Promise.resolve()
-        .then(() => this.resources.load(url, controller.signal))
+        // Preload only establishes the canonical resident bytes. It never
+        // mutates or returns them, so avoid allocating a disposable copy of
+        // every episode asset when the resolver exposes its trusted fast path.
+        .then(() =>
+          this.resources.loadSharedBytes
+            ? this.resources.loadSharedBytes(url, controller.signal)
+            : this.resources.load(url, controller.signal),
+        )
         .then(() => undefined)
         .catch((err) => {
           if (fetched.get(url) === request) fetched.delete(url);
@@ -859,9 +906,7 @@ export class AdvEpisodeResourceLoader {
   }
 
   resolveCharacterForTarget(target: string, index = 0) {
-    return (
-      this.characterVariants.get(`${target}\u0000${Number(index) || 0}`) || null
-    );
+    return this.characterVariants.get(`${target}\u0000${Number(index) || 0}`) || null;
   }
 
   setCharacterAssetIndex(target: string, index = 0) {
@@ -894,17 +939,9 @@ export class AdvEpisodeResourceLoader {
 
   restoreSnapshot(snapshot: AdvEpisodeResourceSnapshot | null) {
     if (!snapshot) return;
-    this.characterVariants = new Map(
-      (snapshot.characterVariants as Array<[string, AdvCharacterVariant]>) ||
-        [],
-    );
-    this.characterAssetIndices = new Map(
-      (snapshot.characterAssetIndices as Array<[string, number]>) || [],
-    );
-    this.playbackIndex = Math.max(
-      0,
-      Math.trunc(Number(snapshot.playbackIndex) || 0),
-    );
+    this.characterVariants = new Map((snapshot.characterVariants as Array<[string, AdvCharacterVariant]>) || []);
+    this.characterAssetIndices = new Map((snapshot.characterAssetIndices as Array<[string, number]>) || []);
+    this.playbackIndex = Math.max(0, Math.trunc(Number(snapshot.playbackIndex) || 0));
   }
 }
 
@@ -917,8 +954,7 @@ function assertLocalRuntimeUrl(label: string, value: string) {
   if (url) requireCanonicalStoryResourceUrl(url, `${label} resource`);
 }
 
-const STORY_RESOURCE_FIELD =
-  /(?:url$|^(?:src|source|runtime|model)$|textures?$)/i;
+const STORY_RESOURCE_FIELD = /(?:url$|^(?:src|source|runtime|model)$|textures?$)/i;
 const STORY_RESOURCE_COLLECTION = /textures$/i;
 const PROVIDER_OWNED_STORY_FIELD = /^characterModel$/iu;
 function assertNestedCanonicalResourceUrls(
@@ -931,11 +967,7 @@ function assertNestedCanonicalResourceUrls(
 ) {
   if (typeof value === "string") {
     if (!value || (!directResource && !resourceField.test(field))) return;
-    if (
-      field.toLocaleLowerCase() === "source" &&
-      !/^(?:\/|[a-z][a-z0-9+.-]*:)/i.test(value)
-    )
-      return;
+    if (field.toLocaleLowerCase() === "source" && !/^(?:\/|[a-z][a-z0-9+.-]*:)/i.test(value)) return;
     requireCanonicalStoryResourceUrl(value, label);
     return;
   }
@@ -944,27 +976,13 @@ function assertNestedCanonicalResourceUrls(
   const valuesAreResources = STORY_RESOURCE_COLLECTION.test(field);
   if (Array.isArray(value)) {
     value.forEach((entry, index) => {
-      assertNestedCanonicalResourceUrls(
-        entry,
-        `${label}[${index}]`,
-        "",
-        valuesAreResources,
-        seen,
-        resourceField,
-      );
+      assertNestedCanonicalResourceUrls(entry, `${label}[${index}]`, "", valuesAreResources, seen, resourceField);
     });
     return;
   }
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (PROVIDER_OWNED_STORY_FIELD.test(key)) continue;
-    assertNestedCanonicalResourceUrls(
-      entry,
-      `${label}.${key}`,
-      key,
-      valuesAreResources,
-      seen,
-      resourceField,
-    );
+    assertNestedCanonicalResourceUrls(entry, `${label}.${key}`, key, valuesAreResources, seen, resourceField);
   }
 }
 
@@ -979,11 +997,7 @@ function collectDeclaredResourceUrls(
 ) {
   if (typeof value === "string") {
     if (!value || (!directResource && !resourceField.test(field))) return;
-    if (
-      field.toLocaleLowerCase() === "source" &&
-      !/^(?:\/|[a-z][a-z0-9+.-]*:)/i.test(value)
-    )
-      return;
+    if (field.toLocaleLowerCase() === "source" && !/^(?:\/|[a-z][a-z0-9+.-]*:)/i.test(value)) return;
     if (isCanonicalStoryResourceUrl(value)) add(value);
     return;
   }
@@ -992,30 +1006,14 @@ function collectDeclaredResourceUrls(
   const valuesAreResources = STORY_RESOURCE_COLLECTION.test(field);
   if (Array.isArray(value)) {
     value.forEach((entry) =>
-      collectDeclaredResourceUrls(
-        entry,
-        add,
-        "",
-        valuesAreResources,
-        seen,
-        resourceField,
-        skipAnimationCatalogs,
-      ),
+      collectDeclaredResourceUrls(entry, add, "", valuesAreResources, seen, resourceField, skipAnimationCatalogs),
     );
     return;
   }
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (PROVIDER_OWNED_STORY_FIELD.test(key)) continue;
     if (skipAnimationCatalogs && ANIMATION_CATALOG_FIELD.test(key)) continue;
-    collectDeclaredResourceUrls(
-      entry,
-      add,
-      key,
-      valuesAreResources,
-      seen,
-      resourceField,
-      skipAnimationCatalogs,
-    );
+    collectDeclaredResourceUrls(entry, add, key, valuesAreResources, seen, resourceField, skipAnimationCatalogs);
   }
 }
 
@@ -1029,11 +1027,8 @@ function collectReferencedCharacterAnimations(
   const variants = new Map<string, Map<number, AdvCharacterModelEntry>>();
   const selectedIndices = new Map<string, number>();
   const activeModels = new Map<string, AdvCharacterModelEntry>();
-  const separator =
-    typeof targetNameSplitKey === "string" ? targetNameSplitKey : "・";
-  const ensureUsage = (
-    model: AdvCharacterModelEntry,
-  ): CharacterAnimationUsage => {
+  const separator = typeof targetNameSplitKey === "string" ? targetNameSplitKey : "・";
+  const ensureUsage = (model: AdvCharacterModelEntry): CharacterAnimationUsage => {
     let entry = usage.get(model);
     if (!entry) {
       entry = { motions: new Set(), expressions: new Set() };
@@ -1041,36 +1036,21 @@ function collectReferencedCharacterAnimations(
     }
     return entry;
   };
-  const recordInAnimations = (
-    command: AdvCommand,
-    model: AdvCharacterModelEntry,
-  ) => {
+  const recordInAnimations = (command: AdvCommand, model: AdvCharacterModelEntry) => {
     const entry = ensureUsage(model);
-    const motionName = firstStringValue(
-      command.characterPresentation?.motionName,
-      command.motionName,
-    );
-    const expressionName = firstStringValue(
-      command.characterPresentation?.expressionName,
-      command.expressionName,
-    );
+    const motionName = firstStringValue(command.characterPresentation?.motionName, command.motionName);
+    const expressionName = firstStringValue(command.characterPresentation?.expressionName, command.expressionName);
     if (motionName) entry.motions.add(motionName);
     if (expressionName) entry.expressions.add(expressionName);
     const defaults = characterDefaultPresentation(model);
-    if (
-      (!motionName || defaults.playDefaultMotionBeforePresentation) &&
-      defaults.motionName
-    ) {
+    if ((!motionName || defaults.playDefaultMotionBeforePresentation) && defaults.motionName) {
       entry.motions.add(defaults.motionName);
     }
     if (!expressionName && defaults.expressionName) {
       entry.expressions.add(defaults.expressionName);
     }
   };
-  const recordAnimationCommand = (
-    command: AdvCommand,
-    model: AdvCharacterModelEntry,
-  ) => {
+  const recordAnimationCommand = (command: AdvCommand, model: AdvCharacterModelEntry) => {
     const entry = ensureUsage(model);
     recordAnimationCommandUsage(entry, command);
   };
@@ -1079,9 +1059,7 @@ function collectReferencedCharacterAnimations(
     for (const command of commandsIncludingTimelineEpisodes(root)) {
       const opcode = Number(command.command);
       const targets = commandTargetNames(command, separator);
-      const model = hasAdvCharacterModel(command.characterModel)
-        ? command.characterModel
-        : undefined;
+      const model = hasAdvCharacterModel(command.characterModel) ? command.characterModel : undefined;
       const assetIndex = finiteAssetIndex(command.targetAssetIndex);
 
       if (opcode === ADV_COMMAND.Character && model) {
@@ -1117,8 +1095,7 @@ function collectReferencedCharacterAnimations(
             : selectedIndices.has(target)
               ? selectedIndices.get(target)!
               : assetIndex;
-          const selected =
-            model || variants.get(target)?.get(selectedIndex);
+          const selected = model || variants.get(target)?.get(selectedIndex);
           if (!selected) continue;
           if (model) {
             let targetVariants = variants.get(target);
@@ -1155,17 +1132,10 @@ function collectReferencedCharacterAnimations(
  * resolved model; provider catalogue entries that never appear in the story
  * are intentionally absent.
  */
-function collectCharacterWarmupRequests(
-  commands: AdvCommand[],
-  targetNameSplitKey: unknown,
-): CharacterWarmupRequest[] {
-  const separator =
-    typeof targetNameSplitKey === "string" ? targetNameSplitKey : "・";
+function collectCharacterWarmupRequests(commands: AdvCommand[], targetNameSplitKey: unknown): CharacterWarmupRequest[] {
+  const separator = typeof targetNameSplitKey === "string" ? targetNameSplitKey : "・";
   const variants = new Map<string, Map<number, AdvCharacterVariant>>();
-  const asynchronousVariants = new Map<
-    string,
-    Map<number, AdvCharacterVariant>
-  >();
+  const asynchronousVariants = new Map<string, Map<number, AdvCharacterVariant>>();
   const selectedIndices = new Map<string, number>();
   const activeIdentities = new Map<string, string>();
   const warmups = new Map<string, CharacterWarmupRequest>();
@@ -1175,22 +1145,16 @@ function collectCharacterWarmupRequests(
   }> = [];
 
   for (let index = 0; index < commands.length; index += 1) {
-    for (const traversed of commandsIncludingTimelineEpisodesWithContext(
-      commands[index],
-    )) {
+    for (const traversed of commandsIncludingTimelineEpisodesWithContext(commands[index])) {
       const command = traversed.command;
       const opcode = Number(command.command);
       const targets = commandTargetNames(command, separator);
       const assetIndex = finiteAssetIndex(command.targetAssetIndex);
-      const inlineModel = hasAdvCharacterModel(command.characterModel)
-        ? command.characterModel
-        : undefined;
+      const inlineModel = hasAdvCharacterModel(command.characterModel) ? command.characterModel : undefined;
 
       if (opcode === ADV_COMMAND.Character && inlineModel) {
         for (const target of targets) {
-          const registry = traversed.asynchronous
-            ? asynchronousVariants
-            : variants;
+          const registry = traversed.asynchronous ? asynchronousVariants : variants;
           let byIndex = registry.get(target);
           if (!byIndex) {
             byIndex = new Map();
@@ -1218,9 +1182,7 @@ function collectCharacterWarmupRequests(
 
       if (opcode === ADV_COMMAND.In) {
         for (const target of targets) {
-          const selectedIndex = inlineModel
-            ? assetIndex
-            : selectedIndices.get(target) ?? assetIndex;
+          const selectedIndex = inlineModel ? assetIndex : (selectedIndices.get(target) ?? assetIndex);
           const variant = inlineModel
             ? {
                 characterModel: inlineModel,
@@ -1228,8 +1190,7 @@ function collectCharacterWarmupRequests(
                 targetAssetIndex: selectedIndex,
               }
             : traversed.asynchronous
-              ? asynchronousVariants.get(target)?.get(selectedIndex) ??
-                variants.get(target)?.get(selectedIndex)
+              ? (asynchronousVariants.get(target)?.get(selectedIndex) ?? variants.get(target)?.get(selectedIndex))
               : variants.get(target)?.get(selectedIndex);
           if (!variant) continue;
           if (inlineModel && !traversed.asynchronous) {
@@ -1264,11 +1225,7 @@ function collectCharacterWarmupRequests(
             };
             warmups.set(identity, warmup);
           }
-          recordInAnimationUsage(
-            warmup.animationUsage,
-            command,
-            variant.characterModel,
-          );
+          recordInAnimationUsage(warmup.animationUsage, command, variant.characterModel);
           if (!traversed.asynchronous) {
             activeIdentities.set(target, identity);
           }
@@ -1313,21 +1270,12 @@ function collectCharacterWarmupRequests(
     }
   }
 
-  return [...warmups.values()].sort(
-    (left, right) => left.index - right.index,
-  );
+  return [...warmups.values()].sort((left, right) => left.index - right.index);
 }
 
-function commandTargetNames(
-  command: AdvCommand,
-  separator: string,
-): string[] {
-  const explicit = (command.targets || [])
-    .map((entry) => stringValue(entry?.target))
-    .filter(Boolean);
-  return explicit.length
-    ? [...new Set(explicit)]
-    : splitAdvTargetNames(command.targetName, separator);
+function commandTargetNames(command: AdvCommand, separator: string): string[] {
+  const explicit = (command.targets || []).map((entry) => stringValue(entry?.target)).filter(Boolean);
+  return explicit.length ? [...new Set(explicit)] : splitAdvTargetNames(command.targetName, separator);
 }
 
 function finiteAssetIndex(value: unknown): number {
@@ -1348,9 +1296,7 @@ function firstStringValue(...values: unknown[]): string {
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 function characterDefaultPresentation(model: AdvCharacterModelEntry): {
@@ -1362,18 +1308,13 @@ function characterDefaultPresentation(model: AdvCharacterModelEntry): {
   const runtime = objectValue(source.runtime);
   const profile = objectValue(source.profile);
   return {
-    motionName: firstStringValue(
-      profile.defaultMotionName,
-      runtime.defaultMotionName,
-      source.defaultMotionName,
-    ),
+    motionName: firstStringValue(profile.defaultMotionName, runtime.defaultMotionName, source.defaultMotionName),
     expressionName: firstStringValue(
       profile.defaultExpressionName,
       runtime.defaultExpressionName,
       source.defaultExpressionName,
     ),
-    playDefaultMotionBeforePresentation:
-      profile.playDefaultMotionBeforePresentation === true,
+    playDefaultMotionBeforePresentation: profile.playDefaultMotionBeforePresentation === true,
   };
 }
 
@@ -1382,21 +1323,12 @@ function recordInAnimationUsage(
   command: AdvCommand,
   model: AdvCharacterModelEntry,
 ): void {
-  const motionName = firstStringValue(
-    command.characterPresentation?.motionName,
-    command.motionName,
-  );
-  const expressionName = firstStringValue(
-    command.characterPresentation?.expressionName,
-    command.expressionName,
-  );
+  const motionName = firstStringValue(command.characterPresentation?.motionName, command.motionName);
+  const expressionName = firstStringValue(command.characterPresentation?.expressionName, command.expressionName);
   if (motionName) usage.motions.add(motionName);
   if (expressionName) usage.expressions.add(expressionName);
   const defaults = characterDefaultPresentation(model);
-  if (
-    (!motionName || defaults.playDefaultMotionBeforePresentation) &&
-    defaults.motionName
-  ) {
+  if ((!motionName || defaults.playDefaultMotionBeforePresentation) && defaults.motionName) {
     usage.motions.add(defaults.motionName);
   }
   if (!expressionName && defaults.expressionName) {
@@ -1404,10 +1336,7 @@ function recordInAnimationUsage(
   }
 }
 
-function recordAnimationCommandUsage(
-  usage: CharacterAnimationUsage,
-  command: AdvCommand,
-): void {
+function recordAnimationCommandUsage(usage: CharacterAnimationUsage, command: AdvCommand): void {
   const opcode = Number(command.command);
   if (opcode === ADV_COMMAND.Motion) {
     const motionName = firstStringValue(command.motionName);
@@ -1419,12 +1348,8 @@ function recordAnimationCommandUsage(
     if (expressionName) usage.expressions.add(expressionName);
   }
   if (commandInvokesCharacterPresentation(command)) {
-    const motionName = firstStringValue(
-      command.characterPresentation?.motionName,
-    );
-    const expressionName = firstStringValue(
-      command.characterPresentation?.expressionName,
-    );
+    const motionName = firstStringValue(command.characterPresentation?.motionName);
+    const expressionName = firstStringValue(command.characterPresentation?.expressionName);
     if (motionName) usage.motions.add(motionName);
     if (expressionName) usage.expressions.add(expressionName);
   }
@@ -1442,35 +1367,25 @@ function commandInvokesCharacterPresentation(command: AdvCommand): boolean {
     ADV_COMMAND.MoveToBack,
     ADV_COMMAND.MoveToDirection,
   ]);
-  return (
-    movementOpcodes.has(opcode) &&
-    Boolean(command.characterWorldTransition || command.characterWorldPosition)
-  );
+  return movementOpcodes.has(opcode) && Boolean(command.characterWorldTransition || command.characterWorldPosition);
 }
 
 function commandHasCharacterAnimation(command: AdvCommand): boolean {
   const opcode = Number(command.command);
   return (
-    opcode === ADV_COMMAND.Motion ||
-    opcode === ADV_COMMAND.Expression ||
-    commandInvokesCharacterPresentation(command)
+    opcode === ADV_COMMAND.Motion || opcode === ADV_COMMAND.Expression || commandInvokesCharacterPresentation(command)
   );
 }
 
 function staticPortraitSource(character: AdvCharacterModelEntry): string {
   const source = character as Record<string, unknown>;
   const runtime =
-    source.runtime &&
-    typeof source.runtime === "object" &&
-    !Array.isArray(source.runtime)
+    source.runtime && typeof source.runtime === "object" && !Array.isArray(source.runtime)
       ? (source.runtime as Record<string, unknown>)
       : {};
   const explicitImage = firstStringValue(runtime.imageUrl, source.imageUrl);
   if (explicitImage) return explicitImage;
-  if (
-    firstStringValue(runtime.format, source.format).toLowerCase() !==
-    "static-portrait"
-  ) {
+  if (firstStringValue(runtime.format, source.format).toLowerCase() !== "static-portrait") {
     return "";
   }
   return firstStringValue(
@@ -1491,21 +1406,22 @@ function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
 }
 
+function recordPreloadFailure(preloadState: Record<string, unknown> | undefined, message: string): void {
+  if (!Array.isArray(preloadState?.failures)) return;
+  if (!preloadState.failures.includes(message)) {
+    preloadState.failures.push(message);
+  }
+}
+
 function preloadConcurrency(value: unknown, fallback = 8, max = 16) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(1, Math.min(max, Math.floor(number)));
 }
 
-function preloadWindow(
-  value: unknown,
-  fallback: number,
-  min: number,
-  max: number,
-) {
+function preloadProgressValue(value: unknown): number {
   const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(number)));
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)) : 0;
 }
 
 /**
@@ -1514,9 +1430,7 @@ function preloadWindow(
  * position. Recursive Timeline episodes are rejected by the native helper.
  */
 function commandsIncludingTimelineEpisodes(command: AdvCommand): AdvCommand[] {
-  return commandsIncludingTimelineEpisodesWithContext(command).map(
-    ({ command: entry }) => entry,
-  );
+  return commandsIncludingTimelineEpisodesWithContext(command).map(({ command: entry }) => entry);
 }
 
 function commandsIncludingTimelineEpisodesWithContext(
@@ -1532,9 +1446,7 @@ function commandsIncludingTimelineEpisodesWithContext(
     seen.add(entry);
     commands.push({ command: entry, asynchronous });
     for (const nested of advCommandGroupCommands(entry)) visit(nested, true);
-    for (const signal of sortAdvTimelineSignals(
-      entry.timeline?.signals || [],
-    )) {
+    for (const signal of sortAdvTimelineSignals(entry.timeline?.signals || [])) {
       if (Number(signal.episode?.command) !== 45) visit(signal.episode, true);
     }
   };

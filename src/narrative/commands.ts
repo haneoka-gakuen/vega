@@ -39,12 +39,21 @@ export interface VegaSystemCommandRegistration {
 
 export const createVegaSystemCommands = (host: VegaNarrativeCommandHost): readonly VegaSystemCommandRegistration[] => [
   {
+    opcode: VEGA_SYSTEM_OPCODE.SetDialogueVisibility,
+    execute(command, context) {
+      if (typeof command.enabled !== "boolean") throw new TypeError("SetDialogueVisibility.enabled must be a boolean");
+      context.state.talk.enabled = command.enabled;
+    },
+  },
+  {
     opcode: VEGA_SYSTEM_OPCODE.SetVariable,
     execute(command) {
       const variable = requiredString(command.variable ?? command.name, "SetVariable.variable");
       const operation = variableOperation(command.operation);
       const value = toJsonValue(command.value ?? command.params?.[0] ?? null);
-      host.store.setVariable(variable, value, operation, { expression: Boolean(command.expression) });
+      host.store.setVariable(variable, value, operation, {
+        expression: Boolean(command.expression),
+      });
     },
   },
   {
@@ -61,7 +70,7 @@ export const createVegaSystemCommands = (host: VegaNarrativeCommandHost): readon
   {
     opcode: VEGA_SYSTEM_OPCODE.JumpScene,
     execute(command) {
-      host.navigateToKey(sceneTarget(command.sceneId, true));
+      host.navigateToKey(optionalString(command.targetKey) || sceneTarget(command.sceneId, true));
     },
   },
   {
@@ -69,8 +78,12 @@ export const createVegaSystemCommands = (host: VegaNarrativeCommandHost): readon
     execute(command) {
       const returnKey = requiredString(command.returnKey, "CallScene.returnKey");
       const currentScene = optionalString(command.currentScene) || optionalString(command.sceneSource) || "";
-      host.store.pushScene({ sceneId: currentScene || "unknown", returnKey });
-      host.navigateToKey(sceneTarget(command.sceneId, true));
+      host.store.pushScene({
+        sceneId: currentScene || "unknown",
+        returnKey,
+        ...(currentScene && optionalString(command.commandId) ? { callerId: optionalString(command.commandId)! } : {}),
+      });
+      host.navigateToKey(optionalString(command.targetKey) || sceneTarget(command.sceneId, true));
     },
   },
   {
@@ -165,10 +178,7 @@ export const interpolateNarrativeCommand = (command: AdvCommand, store: VegaNarr
  * Portable `-when` compatibility gate. It is evaluated by the same bounded
  * expression VM used by branches and never invokes JavaScript.
  */
-export const matchesNarrativeCommandCondition = (
-  command: AdvCommand,
-  store: VegaNarrativeStore,
-): boolean => {
+export const matchesNarrativeCommandCondition = (command: AdvCommand, store: VegaNarrativeStore): boolean => {
   if (command.condition == null || command.condition === "") return true;
   if (typeof command.condition !== "string") {
     throw new TypeError("Vega command condition must be a string");

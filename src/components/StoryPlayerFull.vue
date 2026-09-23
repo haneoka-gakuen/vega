@@ -1,53 +1,20 @@
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  reactive,
-  ref,
-  watch,
-} from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { AdvPlayer } from "../core/AdvPlayer";
 import { mergeAdvRuntime } from "../core/AdvConstants";
 import { createVegaPlayerState } from "../engine/VegaEngine";
-import {
-  resolveVegaOfficialPlayerPlugins,
-  type VegaOfficialPlayerPluginPreset,
-} from "../engine/playerPluginPreset";
-import {
-  createVegaPlayerPresentation,
-  isVegaUiSlotEventTarget,
-  mountVegaUiSlots,
-} from "../engine/playerPresentation";
-import type {
-  VegaInputEvent,
-  VegaPlugin,
-  VegaServiceKey,
-} from "../engine/plugins";
+import { resolveVegaOfficialPlayerPlugins, type VegaOfficialPlayerPluginPreset } from "../engine/playerPluginPreset";
+import { createVegaPlayerPresentation, isVegaUiSlotEventTarget, mountVegaUiSlots } from "../engine/playerPresentation";
+import type { VegaInputEvent, VegaPlugin, VegaServiceKey } from "../engine/plugins";
 import { VegaNarrativeStore } from "../narrative/state";
-import {
-  VegaLocalStorageSaveStorage,
-  VegaMemorySaveStorage,
-  type VegaSaveStorage,
-} from "../narrative/save";
-import type {
-  StoryResourceLease,
-  StorySceneBackend,
-} from "../rendering/StorySceneBackend";
+import { VegaLocalStorageSaveStorage, VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
+import type { StoryResourceLease, StorySceneBackend } from "../rendering/StorySceneBackend";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { StoryResourceScope } from "../runtime";
 import { createVegaShellController } from "../shell/controller";
-import {
-  VEGA_SHELL_CONTROLLER,
-  type VegaShellController,
-} from "../shell/contracts";
-import type {
-  AdvChoiceRecord,
-  AdvPlayerState,
-  AdvStory,
-  StoryUiSprites,
-} from "../types/AdvRuntime";
+import { VEGA_SHELL_CONTROLLER, type VegaShellController } from "../shell/contracts";
+import type { AdvPlayerState, AdvStory, StoryUiSprites } from "../types/AdvRuntime";
+import { prepareStoryAudio } from "../sound/StoryAudioPrimer";
 
 defineOptions({ name: "StoryPlayerFull" });
 
@@ -89,35 +56,32 @@ const state = reactive(createVegaPlayerState());
 const story = computed(() => props.storyData ?? props.story);
 const runtime = computed(() => mergeAdvRuntime(story.value?.runtime));
 const activePluginUiSlots = ref<ReadonlySet<string>>(new Set());
-const canStart = computed(
-  () => state.ready && !state.playing && !state.finished,
-);
-const canReplay = computed(
-  () => state.ready && !state.playing && state.finished,
-);
-const progressLabel = computed(() =>
-  state.commandCount
-    ? `${Math.min(state.commandIndex, state.commandCount)} / ${state.commandCount}`
-    : "",
-);
+const canStart = computed(() => state.ready && !state.playing && !state.finished);
+const canReplay = computed(() => state.ready && !state.playing && state.finished);
+const pathProgress = computed(() => {
+  // Keep Vue subscribed while the player's path index itself remains an
+  // intentionally non-reactive command-boundary cache.
+  void state.commandIndex;
+  void state.seeking;
+  return (
+    player?.currentSeekProgress() ?? {
+      ratio: 0,
+      label: state.commandCount ? "0 / 0" : "",
+    }
+  );
+});
 const progress = computed(() => ({
   visible: Boolean(state.ready && state.commandCount),
-  label: progressLabel.value,
-  ratio: state.commandCount
-    ? clamp01(Number(state.commandIndex) / Number(state.commandCount))
-    : 0,
+  label: pathProgress.value.label,
+  ratio: pathProgress.value.ratio,
   seeking: state.seeking,
   videoVisible: state.video.visible,
   canStart: canStart.value,
   canReplay: canReplay.value,
   playing: state.playing,
 }));
-const showCoreFault = computed(
-  () => Boolean(state.error) && activePluginUiSlots.value.size === 0,
-);
-const resourceScopeId = computed(() =>
-  String(props.resourceScope?.id || "").trim(),
-);
+const showCoreFault = computed(() => Boolean(state.error) && activePluginUiSlots.value.size === 0);
+const resourceScopeId = computed(() => String(props.resourceScope?.id || "").trim());
 
 let player: AdvPlayer | null = null;
 let playerPluginPreset: VegaOfficialPlayerPluginPreset | null = null;
@@ -127,12 +91,11 @@ let bootController: AbortController | null = null;
 let componentUnmounted = false;
 let playerOperationGeneration = 0;
 let playerOperationTail: Promise<void> = Promise.resolve();
-const seekDecisionHistory = new Map<number, AdvChoiceRecord>();
 let resourceCacheKey: object = {};
 let portableResources = new DefaultStoryResourceResolver([], {
   sharedKey: resourceCacheKey,
 });
-const animationLeaseHandoff = new Map<string, StoryResourceLease>();
+const resourceLeaseHandoff = new Map<string, StoryResourceLease>();
 const anonymousStoryKeys = new WeakMap<object, string>();
 let anonymousStorySequence = 0;
 
@@ -148,9 +111,7 @@ class PluginContributionSaveStorage implements VegaSaveStorage {
 
   constructor(
     private readonly preset: VegaOfficialPlayerPluginPreset,
-    private readonly storage: NonNullable<
-      VegaOfficialPlayerPluginPreset["storageContribution"]
-    >,
+    private readonly storage: NonNullable<VegaOfficialPlayerPluginPreset["storageContribution"]>,
   ) {}
 
   async read(key: string): Promise<string | null> {
@@ -182,26 +143,17 @@ class PluginContributionSaveStorage implements VegaSaveStorage {
 
   async list(prefix: string): Promise<readonly string[]> {
     await this.operationTail;
-    return (await this.readIndex())
-      .filter((key) => key.startsWith(prefix))
-      .sort();
+    return (await this.readIndex()).filter((key) => key.startsWith(prefix)).sort();
   }
 
   private async readIndex(): Promise<string[]> {
-    const value = await this.storage.get(
-      PLUGIN_SAVE_INDEX_KEY,
-      this.preset.lifetime.signal,
-    );
+    const value = await this.storage.get(PLUGIN_SAVE_INDEX_KEY, this.preset.lifetime.signal);
     if (!Array.isArray(value)) return [];
     return value.filter((key): key is string => typeof key === "string");
   }
 
   private writeIndex(keys: ReadonlySet<string>): Promise<void> {
-    return this.storage.set(
-      PLUGIN_SAVE_INDEX_KEY,
-      [...keys].sort(),
-      this.preset.lifetime.signal,
-    );
+    return this.storage.set(PLUGIN_SAVE_INDEX_KEY, [...keys].sort(), this.preset.lifetime.signal);
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
@@ -213,12 +165,7 @@ class PluginContributionSaveStorage implements VegaSaveStorage {
 
 const storyCacheKey = (value: AdvStory | undefined | null): string => {
   if (!value) return "";
-  const authored =
-    value.storyKey ||
-    value.storyId ||
-    value.id ||
-    value.advId ||
-    value.scriptAsset;
+  const authored = value.storyKey || value.storyId || value.id || value.advId || value.scriptAsset;
   if (authored != null && String(authored)) return String(authored);
   let key = anonymousStoryKeys.get(value);
   if (!key) {
@@ -235,17 +182,17 @@ const resetResourceCache = (): void => {
   });
 };
 
-const releaseAnimationLeaseHandoff = (): void => {
-  for (const lease of animationLeaseHandoff.values()) lease.release();
-  animationLeaseHandoff.clear();
+const releaseResourceLeaseHandoff = (): void => {
+  for (const lease of resourceLeaseHandoff.values()) lease.release();
+  resourceLeaseHandoff.clear();
 };
 
-const preserveAnimationLeases = (current: AdvPlayer | null): void => {
+const preserveResourceLeases = (current: AdvPlayer | null): void => {
   if (!current) return;
-  for (const [url, lease] of current.Loader.takeAnimationLeases()) {
-    const existing = animationLeaseHandoff.get(url);
+  for (const [url, lease] of current.Loader.takeResourceLeases()) {
+    const existing = resourceLeaseHandoff.get(url);
     if (existing) lease.release();
-    else animationLeaseHandoff.set(url, lease);
+    else resourceLeaseHandoff.set(url, lease);
   }
 };
 
@@ -273,13 +220,14 @@ const isPlayerOperationActive = (generation: number): boolean =>
 
 const enqueuePlayerOperation = (
   operation: (generation: number) => Promise<void>,
+  options: { cancelBoot?: boolean } = {},
 ): Promise<void> => {
   if (componentUnmounted) return Promise.resolve();
   const generation = ++playerOperationGeneration;
   // Cancel an active boot immediately. The serialized operation waits for its
   // cleanup before it mutates ownership, preventing an older restart/seek from
   // becoming current again after a newer request (the async ABA case).
-  invalidateBootAttempt();
+  if (options.cancelBoot !== false) invalidateBootAttempt();
   if (progressSeekTimer) {
     clearTimeout(progressSeekTimer);
     progressSeekTimer = null;
@@ -300,14 +248,9 @@ const enqueuePlayerOperation = (
   return result;
 };
 
-const saveStorageForPreset = (
-  preset: VegaOfficialPlayerPluginPreset,
-): VegaSaveStorage => {
+const saveStorageForPreset = (preset: VegaOfficialPlayerPluginPreset): VegaSaveStorage => {
   if (preset.storageContribution) {
-    return new PluginContributionSaveStorage(
-      preset,
-      preset.storageContribution,
-    );
+    return new PluginContributionSaveStorage(preset, preset.storageContribution);
   }
   try {
     if (globalThis.localStorage) {
@@ -319,13 +262,9 @@ const saveStorageForPreset = (
   return new VegaMemorySaveStorage();
 };
 
-const requiresShellController = (
-  preset: VegaOfficialPlayerPluginPreset,
-): boolean =>
+const requiresShellController = (preset: VegaOfficialPlayerPluginPreset): boolean =>
   preset.uiSlots.some((contribution) =>
-    contribution.requiredServices?.some(
-      ({ id }) => id === VEGA_SHELL_CONTROLLER.id,
-    ),
+    contribution.requiredServices?.some(({ id }) => id === VEGA_SHELL_CONTROLLER.id),
   );
 
 async function disposePlayerInstance(
@@ -346,18 +285,11 @@ async function disposePlayerInstance(
   }
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) {
-    throw new AggregateError(
-      errors,
-      "Failed to dispose the framework player and its plugin preset",
-    );
+    throw new AggregateError(errors, "Failed to dispose the framework player and its plugin preset");
   }
 }
 
-function handlePluginInput(
-  event: VegaInputEvent,
-  current: AdvPlayer,
-  shell?: VegaShellController,
-): void {
+function handlePluginInput(event: VegaInputEvent, current: AdvPlayer, shell?: VegaShellController): void {
   if (player !== current) return;
   switch (event.action) {
     case "advance":
@@ -411,11 +343,7 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
     // them rejects. Treat the pair as claimed before awaiting so neither is
     // invoked twice by the outer catch path.
     playerDisposalClaimed = true;
-    await disposePlayerInstance(
-      current,
-      unownedPluginPreset ?? ownedPluginPreset,
-      true,
-    );
+    await disposePlayerInstance(current, unownedPluginPreset ?? ownedPluginPreset, true);
   };
   try {
     state.instantText = props.instantText === 0;
@@ -431,13 +359,8 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
       return null;
     }
 
-    const activeResources =
-      props.officialPlugins === undefined
-        ? portableResources
-        : unownedPluginPreset.resources;
-    const presentationLifetime = unownedPluginPreset.lifetime.child(
-      `presentation-${attempt.generation}`,
-    );
+    const activeResources = props.officialPlugins === undefined ? portableResources : unownedPluginPreset.resources;
+    const presentationLifetime = unownedPluginPreset.lifetime.child(`presentation-${attempt.generation}`);
     const presentation = createVegaPlayerPresentation({
       engineId: "vega-vue",
       playerId: `vega-vue/player-${attempt.generation}`,
@@ -465,9 +388,7 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
         typeof unownedSceneBackend.setup !== "function" ||
         typeof unownedSceneBackend.destroy !== "function"
       ) {
-        throw new TypeError(
-          `Vega render contribution ${renderContribution.id} did not create a scene backend`,
-        );
+        throw new TypeError(`Vega render contribution ${renderContribution.id} did not create a scene backend`);
       }
     }
     if (!isBootAttemptActive(attempt)) {
@@ -486,6 +407,7 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
       narrativeStore,
       characterProviders: unownedPluginPreset.characterProviders,
       commandExtensions: unownedPluginPreset.commandExtensions,
+      resourcePreparers: presentation.theme ? [presentation.theme] : [],
     });
     unownedSceneBackend = null;
     if (!isBootAttemptActive(attempt)) {
@@ -493,8 +415,8 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
       return null;
     }
 
-    current.Loader.adoptAnimationLeases(animationLeaseHandoff);
-    animationLeaseHandoff.clear();
+    current.Loader.adoptResourceLeases(resourceLeaseHandoff);
+    resourceLeaseHandoff.clear();
 
     player = current;
     ownedPluginPreset = unownedPluginPreset;
@@ -507,9 +429,7 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
     debugHost.__advState = state;
     debugHost.__advPlayer = current;
 
-    const contributedShell = ownedPluginPreset.service(
-      VEGA_SHELL_CONTROLLER,
-    );
+    const contributedShell = ownedPluginPreset.service(VEGA_SHELL_CONTROLLER);
     const shell =
       contributedShell ??
       (requiresShellController(ownedPluginPreset)
@@ -541,9 +461,7 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
       player: current,
       state,
       service: <T,>(key: VegaServiceKey<T>): T | undefined =>
-        playerServices.has(key.id)
-          ? (playerServices.get(key.id) as T)
-            : ownedPluginPreset?.service(key),
+        playerServices.has(key.id) ? (playerServices.get(key.id) as T) : ownedPluginPreset?.service(key),
     });
     if (!isBootAttemptActive(attempt) || player !== current) {
       if (player === current) clearOwnedPlayer(current, ownedPluginPreset);
@@ -552,19 +470,12 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
     }
     for (const input of ownedPluginPreset.inputContributions) {
       presentationLifetime.use(
-        input.subscribe(
-          (event) => handlePluginInput(event, current!, shell),
-          presentationLifetime.signal,
-        ),
+        input.subscribe((event) => handlePluginInput(event, current!, shell), presentationLifetime.signal),
       );
     }
-    activePluginUiSlots.value = new Set(
-      ownedPluginPreset.uiSlots.map(({ slot }) => slot),
-    );
-    // A restart/seek gets a fresh renderer and Loader, but reuses the mounted
-    // player's canonical byte cache. Re-running preload reacquires explicit
-    // animation leases without network work and never relies on a stale
-    // boolean that outlives the resolver which actually owned the bytes.
+    activePluginUiSlots.value = new Set(ownedPluginPreset.uiSlots.map(({ slot }) => slot));
+    // Progress seeks stay on this player so its renderer-ready episode cache
+    // and command-boundary scene index remain valid.
     await current.boot({ signal: attempt.controller.signal });
 
     if (!isBootAttemptActive(attempt) || player !== current) {
@@ -577,18 +488,12 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
     try {
       await disposeUnownedSceneBackend();
     } catch (cleanupError) {
-      console.error(
-        "[Vega] failed to dispose an unowned scene backend",
-        cleanupError,
-      );
+      console.error("[Vega] failed to dispose an unowned scene backend", cleanupError);
     }
     try {
       await disposeBootPlayer();
     } catch (cleanupError) {
-      console.error(
-        "[Vega] failed to dispose an aborted framework player",
-        cleanupError,
-      );
+      console.error("[Vega] failed to dispose an aborted framework player", cleanupError);
     }
     if (player === current) clearOwnedPlayer(current, ownedPluginPreset);
     if (!isBootAttemptActive(attempt) || attempt.controller.signal.aborted) {
@@ -598,17 +503,14 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
     // player before plugin or renderer creation fails. With no superseding
     // operation and no new player to own them, this terminal failure must
     // release the handoff explicitly.
-    releaseAnimationLeaseHandoff();
+    releaseResourceLeaseHandoff();
     state.error = error instanceof Error ? error.message : String(error);
     state.loading = false;
     return null;
   }
 }
 
-function clearOwnedPlayer(
-  current: AdvPlayer | null,
-  preset: VegaOfficialPlayerPluginPreset | null,
-): void {
+function clearOwnedPlayer(current: AdvPlayer | null, preset: VegaOfficialPlayerPluginPreset | null): void {
   if (player !== current) return;
   player = null;
   if (playerPluginPreset === preset) playerPluginPreset = null;
@@ -618,9 +520,7 @@ function clearOwnedPlayer(
   if (debugHost.__advState === state) debugHost.__advState = null;
 }
 
-async function destroy(
-  options: { releaseTextures?: boolean } = {},
-): Promise<void> {
+async function destroy(options: { releaseTextures?: boolean } = {}): Promise<void> {
   invalidateBootAttempt();
   if (progressSeekTimer) {
     clearTimeout(progressSeekTimer);
@@ -629,14 +529,10 @@ async function destroy(
   const current = player;
   const preset = playerPluginPreset;
   const preserveLeases = options.releaseTextures === false;
-  if (preserveLeases) preserveAnimationLeases(current);
-  else releaseAnimationLeaseHandoff();
+  if (preserveLeases) preserveResourceLeases(current);
+  else releaseResourceLeaseHandoff();
   clearOwnedPlayer(current, preset);
-  await disposePlayerInstance(
-    current,
-    preset,
-    options.releaseTextures !== false,
-  );
+  await disposePlayerInstance(current, preset, options.releaseTextures !== false);
 }
 
 function playCurrentPlayer(): void {
@@ -650,6 +546,7 @@ function playCurrentPlayer(): void {
 }
 
 function startOrAdvance(): void {
+  prepareStoryAudio();
   if (!player || state.loading) return;
   if (canStart.value) {
     playCurrentPlayer();
@@ -666,7 +563,6 @@ function startOrAdvance(): void {
 
 async function restart(): Promise<void> {
   return enqueuePlayerOperation(async (generation) => {
-    seekDecisionHistory.clear();
     await destroy({ releaseTextures: false });
     if (!isPlayerOperationActive(generation)) return;
     Object.assign(state, createVegaPlayerState());
@@ -674,12 +570,7 @@ async function restart(): Promise<void> {
     if (!isPlayerOperationActive(generation)) return;
     const attempt = beginBootAttempt();
     const current = await boot(attempt);
-    if (
-      isPlayerOperationActive(generation) &&
-      current &&
-      isBootAttemptActive(attempt) &&
-      player === current
-    ) {
+    if (isPlayerOperationActive(generation) && current && isBootAttemptActive(attempt) && player === current) {
       playCurrentPlayer();
     }
   });
@@ -701,41 +592,11 @@ function seekProgress(ratio: number, delayMs = 0): void {
 }
 
 async function seekStoryProgress(ratio: number): Promise<void> {
-  return enqueuePlayerOperation(async (generation) => {
-    if (!story.value || !state.commandCount) return;
-    const targetIndex = Math.max(
-      0,
-      Math.min(state.commandCount, Math.round(ratio * state.commandCount)),
-    );
-    const current = player;
-    for (const [key, value] of current?.exportSeekDecisions() ?? []) {
-      seekDecisionHistory.set(key, value);
-    }
-    await destroy({ releaseTextures: false });
-    if (!isPlayerOperationActive(generation)) return;
-    Object.assign(state, createVegaPlayerState());
-    await nextTick();
-    if (!isPlayerOperationActive(generation)) return;
-    const attempt = beginBootAttempt();
-    const restored = await boot(attempt);
-    if (
-      !isPlayerOperationActive(generation) ||
-      !restored ||
-      player !== restored ||
-      !isBootAttemptActive(attempt)
-    ) {
-      return;
-    }
-    restored.importSeekDecisions(seekDecisionHistory);
-    await restored.replayFromStartTo(targetIndex);
-    if (
-      isPlayerOperationActive(generation) &&
-      player === restored &&
-      isBootAttemptActive(attempt)
-    ) {
-      playCurrentPlayer();
-    }
-  });
+  if (!story.value || !state.commandCount) return;
+  const current = player;
+  if (!current) return;
+  const targetIndex = current.resolveSeekRatio(clamp01(ratio));
+  await current.seekTo(targetIndex);
 }
 
 function resize(): void {
@@ -767,10 +628,7 @@ const clampVolume = (value: unknown): number => {
 function syncPlayerAudioSettings(): void {
   if (!player?.SoundManager) return;
   player.SoundManager.setMasterVolume(clampVolume(props.volume));
-  player.SoundManager.setUserCategoryVolume(
-    "Bgm",
-    props.enableBgm === 0 ? clampVolume(props.volumeBgm) : 0,
-  );
+  player.SoundManager.setUserCategoryVolume("Bgm", props.enableBgm === 0 ? clampVolume(props.volumeBgm) : 0);
 }
 
 function syncPlayerAutoPlay(): void {
@@ -806,9 +664,7 @@ onBeforeUnmount(() => {
     clearTimeout(progressSeekTimer);
     progressSeekTimer = null;
   }
-  const cleanup = playerOperationTail
-    .catch(() => undefined)
-    .then(() => destroy({ releaseTextures: true }));
+  const cleanup = playerOperationTail.catch(() => undefined).then(() => destroy({ releaseTextures: true }));
   playerOperationTail = cleanup.catch(() => undefined);
   void cleanup.catch((error) => {
     console.error("[Vega] failed to dispose framework player plugins", error);
@@ -826,7 +682,6 @@ watch(
     ] as const,
   () => {
     void enqueuePlayerOperation(async (generation) => {
-      seekDecisionHistory.clear();
       await destroy({ releaseTextures: true });
       if (!isPlayerOperationActive(generation)) return;
       resetResourceCache();
@@ -849,11 +704,7 @@ watch(
   },
   { immediate: true },
 );
-watch(
-  () => [props.volume, props.volumeBgm, props.enableBgm],
-  syncPlayerAudioSettings,
-  { immediate: true },
-);
+watch(() => [props.volume, props.volumeBgm, props.enableBgm], syncPlayerAudioSettings, { immediate: true });
 watch(() => [props.autoPlay, props.autoPlayInterval], syncPlayerAutoPlay, {
   immediate: true,
 });
@@ -878,12 +729,10 @@ defineExpose({
     :data-vega-loading="state.loading || undefined"
     :data-vega-playing="state.playing || undefined"
     :data-vega-finished="state.finished || undefined"
+    @pointerdown.capture="prepareStoryAudio"
+    @keydown.capture="prepareStoryAudio"
   >
-    <div
-      ref="stageHost"
-      class="adv-canvas-host vega-stage-host"
-      @click="onStageClick"
-    />
+    <div ref="stageHost" class="adv-canvas-host vega-stage-host" @click="onStageClick" />
     <output v-if="showCoreFault" role="alert" data-vega-runtime-fault>
       {{ state.error }}
     </output>

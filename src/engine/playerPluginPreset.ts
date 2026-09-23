@@ -1,9 +1,7 @@
 import type { AdvCommandExtensionRegistration } from "../core/AdvPlayer";
+import type { StoryCommandResourceRegistration } from "../resources/StoryResourcePreparation";
 import type { StoryCharacterProvider } from "../rendering/StoryCharacterModel";
-import type {
-  StoryRendererExtensionRegistry,
-  StoryRendererServiceKey,
-} from "../rendering/StoryRendererExtensions";
+import type { StoryRendererExtensionRegistry, StoryRendererServiceKey } from "../rendering/StoryRendererExtensions";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { VegaLifetime } from "./lifecycle";
 import type {
@@ -21,7 +19,7 @@ export interface VegaOfficialPlayerPluginPreset {
   readonly resources: DefaultStoryResourceResolver;
   readonly characterProviders: readonly StoryCharacterProvider[];
   readonly rendererExtensions: StoryRendererExtensionRegistry;
-  readonly commandExtensions: readonly AdvCommandExtensionRegistration[];
+  readonly commandExtensions: readonly VegaPlayerCommandExtensionRegistration[];
   readonly themes: readonly VegaThemeContribution[];
   readonly uiSlots: readonly VegaUiSlotContribution[];
   readonly inputContributions: readonly VegaInputContribution[];
@@ -31,6 +29,9 @@ export interface VegaOfficialPlayerPluginPreset {
   service<T>(key: VegaServiceKey<T>): T | undefined;
   dispose(): Promise<void>;
 }
+
+export interface VegaPlayerCommandExtensionRegistration
+  extends AdvCommandExtensionRegistration, StoryCommandResourceRegistration {}
 
 export interface ResolveVegaOfficialPlayerPluginsOptions {
   readonly plugins: readonly VegaPlugin[];
@@ -56,9 +57,7 @@ export const selectVegaRenderContribution = (
   selector?: string,
 ): VegaRenderContribution | undefined => {
   if (selector) {
-    const selected = contributions.find(
-      ({ id, backend }) => id === selector || backend === selector,
-    );
+    const selected = contributions.find(({ id, backend }) => id === selector || backend === selector);
     if (!selected) {
       throw new Error(`Vega render backend is not installed: ${selector}`);
     }
@@ -103,15 +102,29 @@ export const resolveVegaOfficialPlayerPlugins = async ({
     });
     const commandExtensions = Object.freeze(
       [...host.commandExtensions.values()].map(
-        ({ opcode, execute, authority }) => ({ opcode, execute, authority }),
+        ({
+          opcode,
+          commandType,
+          execute,
+          authority,
+          replaySafe,
+          prepareStoryResources,
+          enumerateCommandResources,
+        }) => ({
+          opcode,
+          commandType,
+          execute,
+          authority,
+          replaySafe,
+          prepareStoryResources,
+          enumerateCommandResources,
+        }),
       ),
     );
     const themes = Object.freeze([...host.contributions("theme")]);
     const uiSlots = Object.freeze([...host.contributions("ui-slot")]);
     const inputContributions = Object.freeze([...host.contributions("input")]);
-    const storageContributions = Object.freeze([
-      ...host.contributions("storage"),
-    ]);
+    const storageContributions = Object.freeze([...host.contributions("storage")]);
     const storageContribution = selectVegaStorageContribution(host);
     const preset: VegaOfficialPlayerPluginPreset = Object.freeze({
       lifetime: host.lifetime,
@@ -119,9 +132,7 @@ export const resolveVegaOfficialPlayerPlugins = async ({
         host.contributions("resource"),
         resourceCacheKey ? { sharedKey: resourceCacheKey } : {},
       ),
-      characterProviders: Object.freeze([
-        ...host.contributions("character"),
-      ]),
+      characterProviders: Object.freeze([...host.contributions("character")]),
       rendererExtensions,
       commandExtensions,
       themes,
@@ -129,10 +140,7 @@ export const resolveVegaOfficialPlayerPlugins = async ({
       inputContributions,
       storageContributions,
       ...(storageContribution ? { storageContribution } : {}),
-      renderContribution: selectVegaRenderContribution(
-        host.contributions("render"),
-        renderBackend,
-      ),
+      renderContribution: selectVegaRenderContribution(host.contributions("render"), renderBackend),
       service: <T>(key: VegaServiceKey<T>) => host.service(key),
       dispose: () => host.dispose(),
     });
@@ -146,18 +154,10 @@ export const resolveVegaOfficialPlayerPlugins = async ({
   }
 };
 
-const selectVegaStorageContribution = (
-  host: VegaPluginHost,
-): VegaStorageContribution | undefined => {
-  const active = host
-    .contributionSelections("storage")
-    .filter(({ active }) => active);
-  const explicit = active.filter(
-    ({ singletonPort }) => singletonPort === VEGA_STORAGE_PORT,
-  );
-  const compatible = explicit.length
-    ? explicit
-    : active.filter(({ singletonPort }) => singletonPort === undefined);
+const selectVegaStorageContribution = (host: VegaPluginHost): VegaStorageContribution | undefined => {
+  const active = host.contributionSelections("storage").filter(({ active }) => active);
+  const explicit = active.filter(({ singletonPort }) => singletonPort === VEGA_STORAGE_PORT);
+  const compatible = explicit.length ? explicit : active.filter(({ singletonPort }) => singletonPort === undefined);
   return [...compatible].sort((left, right) => {
     if (left.priority !== right.priority) {
       return right.priority - left.priority;

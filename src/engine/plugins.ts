@@ -1,30 +1,21 @@
-import {
-  isVegaOfficialExtensionOpcode,
-  isVegaThirdPartyOpcode,
-  VEGA_OFFICIAL_EXTENSION_RANGE,
-  VEGA_THIRD_PARTY_OPCODE_MINIMUM,
-} from "@haneoka/vega-protocol";
+import { VEGA_EXTENSION_OPCODE_MINIMUM, vegaCommandType } from "@haneoka/vega-protocol";
 import type { AdvCommandExecutor } from "../core/AdvCommandService";
 import type { AdvPlayer } from "../core/AdvPlayer";
 import type {
   StorySceneBackend,
   StorySceneBackendContext,
+  StoryResourceResolver,
 } from "../rendering/StorySceneBackend";
 import type { StoryCharacterProvider } from "../rendering/StoryCharacterModel";
-import type {
-  StoryRendererEffectContribution,
-  StoryRendererServiceKey,
-} from "../rendering/StoryRendererExtensions";
+import type { StoryRendererEffectContribution, StoryRendererServiceKey } from "../rendering/StoryRendererExtensions";
 import type { AdvPlayerState } from "../types/AdvRuntime";
+import type { StoryCommandResourcePreparer, StoryResourcePreparer } from "../resources/StoryResourcePreparation";
 import { VegaEventBus, type VegaEventMap } from "./events";
 import { VegaLifetime, type VegaDisposable } from "./lifecycle";
 
 export type { VegaDisposable } from "./lifecycle";
 
 export const VEGA_PLUGIN_API_VERSION = 1;
-export const VEGA_FIRST_EXTENSION_OPCODE = VEGA_OFFICIAL_EXTENSION_RANGE.minimum;
-export const VEGA_LAST_OFFICIAL_EXTENSION_OPCODE = VEGA_OFFICIAL_EXTENSION_RANGE.maximum;
-export const VEGA_FIRST_THIRD_PARTY_OPCODE = VEGA_THIRD_PARTY_OPCODE_MINIMUM;
 /** Standard singleton selection group for equivalent host-input adapters. */
 export const VEGA_INPUT_PORT = "vega.engine.input";
 /** Default singleton port consumed by `VegaEngine.storage`. */
@@ -56,14 +47,16 @@ export type VegaPluginCapability =
   | "storage"
   | "diagnostics";
 
-export interface VegaCommandExtension {
-  readonly opcode: number;
+export interface VegaCommandExtension extends StoryCommandResourcePreparer {
+  readonly schemaVersion: number;
   readonly name: string;
   readonly execute: AdvCommandExecutor;
   readonly replaySafe?: boolean;
 }
 
 export interface VegaRegisteredCommandExtension extends VegaCommandExtension {
+  readonly opcode: number;
+  readonly commandType: string;
   readonly owner: string;
   readonly authority: VegaPluginAuthority;
 }
@@ -96,7 +89,7 @@ export interface VegaContributionSelection<T extends VegaContribution = VegaCont
   readonly suppressedBy?: string;
 }
 
-export interface VegaThemeContribution extends VegaContribution {
+export interface VegaThemeContribution extends VegaContribution, StoryResourcePreparer {
   /** Select this contribution when a player does not request a theme id. */
   readonly default?: boolean;
   readonly tokens?: Readonly<Record<string, string | number>>;
@@ -105,6 +98,7 @@ export interface VegaThemeContribution extends VegaContribution {
 }
 
 export interface VegaUiSlotContext {
+  readonly resources?: StoryResourceResolver;
   readonly engineId: string;
   readonly playerId: string;
   readonly player: AdvPlayer;
@@ -137,23 +131,16 @@ export interface VegaUiSlotContribution extends VegaContribution {
 export interface VegaRenderContribution extends VegaContribution {
   /** Stable backend selector exposed through `VegaPlayerOptions.renderBackend`. */
   readonly backend: string;
-  create(
-    context: StorySceneBackendContext,
-    signal: AbortSignal,
-  ): StorySceneBackend | Promise<StorySceneBackend>;
+  create(context: StorySceneBackendContext, signal: AbortSignal): StorySceneBackend | Promise<StorySceneBackend>;
 }
 
 /**
  * A host-owned model-format adapter. Vega never imports the adapter's SDK or
  * redistributes its model assets.
  */
-export interface VegaCharacterContribution
-  extends VegaContribution,
-    StoryCharacterProvider {}
+export interface VegaCharacterContribution extends VegaContribution, StoryCharacterProvider {}
 
-export interface VegaEffectContribution
-  extends VegaContribution,
-    StoryRendererEffectContribution {}
+export interface VegaEffectContribution extends VegaContribution, StoryRendererEffectContribution {}
 
 export interface VegaResourceContribution extends VegaContribution {
   /** URL schemes handled by this adapter, without the trailing colon. */
@@ -258,7 +245,7 @@ export class VegaPluginHost {
   readonly lifetime: VegaLifetime;
   readonly events: VegaEventBus<VegaEventMap>;
   private readonly ownsEvents: boolean;
-  private readonly commands = new Map<number, VegaRegisteredCommandExtension>();
+  private readonly commands = new Map<string, Omit<VegaRegisteredCommandExtension, "opcode">>();
   private readonly services = new Map<string, unknown>();
   private readonly contributionRegistry = new Map<
     keyof VegaContributionMap,
@@ -276,7 +263,14 @@ export class VegaPluginHost {
   }
 
   get commandExtensions(): ReadonlyMap<number, VegaRegisteredCommandExtension> {
-    return new Map(this.commands);
+    return new Map(
+      [...this.commands]
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([, registration], index) => {
+          const opcode = VEGA_EXTENSION_OPCODE_MINIMUM + index;
+          return [opcode, Object.freeze({ ...registration, opcode })];
+        }),
+    );
   }
 
   list(): readonly VegaPluginManifest[] {
@@ -305,13 +299,9 @@ export class VegaPluginHost {
           contribution: record.value as VegaContributionMap[K],
           priority: record.priority,
           overrides: record.overrides,
-          ...(record.singletonPort !== undefined
-            ? { singletonPort: record.singletonPort }
-            : {}),
+          ...(record.singletonPort !== undefined ? { singletonPort: record.singletonPort } : {}),
           active: winner === record,
-          ...(winner && winner !== record
-            ? { suppressedBy: qualifiedContributionId(winner) }
-            : {}),
+          ...(winner && winner !== record ? { suppressedBy: qualifiedContributionId(winner) } : {}),
         });
       }),
     );
@@ -464,26 +454,13 @@ export class VegaPluginHost {
     lifetime: VegaLifetime,
     extension: VegaCommandExtension,
   ): () => void {
-    const opcode = Number(extension.opcode);
-    const allowed =
-      authority === "official" ? isVegaOfficialExtensionOpcode(opcode) : isVegaThirdPartyOpcode(opcode);
-    if (!allowed) {
-      const expected =
-        authority === "official"
-          ? `${VEGA_OFFICIAL_EXTENSION_RANGE.minimum}-${VEGA_OFFICIAL_EXTENSION_RANGE.maximum}`
-          : `>=${VEGA_THIRD_PARTY_OPCODE_MINIMUM}`;
-      throw new RangeError(
-        `${authority === "official" ? "Official" : "Third-party"} plugin ${owner} cannot register opcode ${
-          extension.opcode
-        }; expected ${expected}`,
-      );
-    }
-    if (!extension.name.trim()) throw new TypeError(`Vega command ${opcode} from ${owner} has no name`);
-    if (this.commands.has(opcode)) throw new Error(`Vega opcode ${opcode} is already registered`);
-    const value = Object.freeze({ ...extension, opcode, owner, authority });
-    this.commands.set(opcode, value);
+    if ("opcode" in extension) throw new TypeError(`Plugin ${owner} must register a named command, not an opcode`);
+    const commandType = vegaCommandType(owner, extension.name, extension.schemaVersion);
+    if (this.commands.has(commandType)) throw new Error(`Vega command type ${commandType} is already registered`);
+    const value = Object.freeze({ ...extension, commandType, owner, authority });
+    this.commands.set(commandType, value);
     const remove = () => {
-      if (this.commands.get(opcode) === value) this.commands.delete(opcode);
+      if (this.commands.get(commandType) === value) this.commands.delete(commandType);
     };
     lifetime.defer(remove);
     return remove;
@@ -508,8 +485,7 @@ export class VegaPluginHost {
     options: VegaContributionOptions | undefined,
   ): () => void {
     if (!contribution.id?.trim()) throw new TypeError(`Plugin ${owner} contributed ${kind} without an id`);
-    const registry =
-      this.contributionRegistry.get(kind) ?? new Map<string, RegisteredContribution<VegaContribution>>();
+    const registry = this.contributionRegistry.get(kind) ?? new Map<string, RegisteredContribution<VegaContribution>>();
     if (registry.has(contribution.id)) {
       throw new Error(`Vega ${kind} contribution already registered: ${contribution.id}`);
     }
@@ -535,64 +511,39 @@ const normalizeContributionOptions = (
   owner: string,
   kind: keyof VegaContributionMap,
   options: VegaContributionOptions | undefined,
-): Pick<
-  RegisteredContribution<VegaContribution>,
-  "priority" | "overrides" | "singletonPort"
-> => {
+): Pick<RegisteredContribution<VegaContribution>, "priority" | "overrides" | "singletonPort"> => {
   if (options !== undefined && (!options || typeof options !== "object")) {
     throw new TypeError(`Plugin ${owner} supplied invalid ${kind} contribution options`);
   }
   const priority = options?.priority ?? 0;
   if (!Number.isSafeInteger(priority)) {
-    throw new TypeError(
-      `Plugin ${owner} supplied a non-integer ${kind} contribution priority`,
-    );
+    throw new TypeError(`Plugin ${owner} supplied a non-integer ${kind} contribution priority`);
   }
-  const rawOverrides =
-    typeof options?.override === "string"
-      ? [options.override]
-      : options?.override ?? [];
+  const rawOverrides = typeof options?.override === "string" ? [options.override] : (options?.override ?? []);
   if (
     !Array.isArray(rawOverrides) ||
     rawOverrides.some((selector) => typeof selector !== "string" || !selector.trim())
   ) {
-    throw new TypeError(
-      `Plugin ${owner} supplied invalid ${kind} contribution overrides`,
-    );
+    throw new TypeError(`Plugin ${owner} supplied invalid ${kind} contribution overrides`);
   }
   if (
     options?.singletonPort !== undefined &&
     (typeof options.singletonPort !== "string" || !options.singletonPort.trim())
   ) {
-    throw new TypeError(
-      `Plugin ${owner} supplied an invalid ${kind} singleton port`,
-    );
+    throw new TypeError(`Plugin ${owner} supplied an invalid ${kind} singleton port`);
   }
   return {
     priority,
-    overrides: Object.freeze(
-      [...new Set(rawOverrides.map((selector) => selector.trim()))].sort(
-        compareStableText,
-      ),
-    ),
-    ...(options?.singletonPort !== undefined
-      ? { singletonPort: options.singletonPort.trim() }
-      : {}),
+    overrides: Object.freeze([...new Set(rawOverrides.map((selector) => selector.trim()))].sort(compareStableText)),
+    ...(options?.singletonPort !== undefined ? { singletonPort: options.singletonPort.trim() } : {}),
   };
 };
 
 const selectContributionWinners = (
   records: readonly RegisteredContribution<VegaContribution>[],
-): ReadonlyMap<
-  RegisteredContribution<VegaContribution>,
-  RegisteredContribution<VegaContribution>
-> => {
-  const parent = new Map(
-    records.map((record) => [record, record] as const),
-  );
-  const find = (
-    record: RegisteredContribution<VegaContribution>,
-  ): RegisteredContribution<VegaContribution> => {
+): ReadonlyMap<RegisteredContribution<VegaContribution>, RegisteredContribution<VegaContribution>> => {
+  const parent = new Map(records.map((record) => [record, record] as const));
+  const find = (record: RegisteredContribution<VegaContribution>): RegisteredContribution<VegaContribution> => {
     const current = parent.get(record)!;
     if (current === record) return record;
     const root = find(current);
@@ -606,17 +557,11 @@ const selectContributionWinners = (
     const a = find(left);
     const b = find(right);
     if (a === b) return;
-    const first =
-      compareStableText(qualifiedContributionId(a), qualifiedContributionId(b)) <= 0
-        ? a
-        : b;
+    const first = compareStableText(qualifiedContributionId(a), qualifiedContributionId(b)) <= 0 ? a : b;
     parent.set(a === first ? b : a, first);
   };
 
-  const singletonOwners = new Map<
-    string,
-    RegisteredContribution<VegaContribution>
-  >();
+  const singletonOwners = new Map<string, RegisteredContribution<VegaContribution>>();
   for (const record of records) {
     if (!record.singletonPort) continue;
     const existing = singletonOwners.get(record.singletonPort);
@@ -626,31 +571,21 @@ const selectContributionWinners = (
   for (const record of records) {
     for (const selector of record.overrides) {
       for (const target of records) {
-        if (
-          target !== record &&
-          (selector === target.value.id ||
-            selector === qualifiedContributionId(target))
-        ) {
+        if (target !== record && (selector === target.value.id || selector === qualifiedContributionId(target))) {
           union(record, target);
         }
       }
     }
   }
 
-  const groups = new Map<
-    RegisteredContribution<VegaContribution>,
-    RegisteredContribution<VegaContribution>[]
-  >();
+  const groups = new Map<RegisteredContribution<VegaContribution>, RegisteredContribution<VegaContribution>[]>();
   for (const record of records) {
     const root = find(record);
     const group = groups.get(root) ?? [];
     group.push(record);
     groups.set(root, group);
   }
-  const winners = new Map<
-    RegisteredContribution<VegaContribution>,
-    RegisteredContribution<VegaContribution>
-  >();
+  const winners = new Map<RegisteredContribution<VegaContribution>, RegisteredContribution<VegaContribution>>();
   for (const group of groups.values()) {
     const winner = group.reduce(preferredContribution);
     for (const record of group) winners.set(record, winner);
@@ -668,27 +603,19 @@ const preferredContribution = (
   const leftOverrides = contributionOverrides(left, right);
   const rightOverrides = contributionOverrides(right, left);
   if (leftOverrides !== rightOverrides) return leftOverrides ? left : right;
-  return compareStableText(
-    qualifiedContributionId(left),
-    qualifiedContributionId(right),
-  ) <= 0
-    ? left
-    : right;
+  return compareStableText(qualifiedContributionId(left), qualifiedContributionId(right)) <= 0 ? left : right;
 };
 
 const contributionOverrides = (
   candidate: RegisteredContribution<VegaContribution>,
   target: RegisteredContribution<VegaContribution>,
 ): boolean =>
-  candidate.overrides.includes(target.value.id) ||
-  candidate.overrides.includes(qualifiedContributionId(target));
+  candidate.overrides.includes(target.value.id) || candidate.overrides.includes(qualifiedContributionId(target));
 
-const qualifiedContributionId = (
-  contribution: RegisteredContribution<VegaContribution>,
-): string => `${contribution.owner}:${contribution.value.id}`;
+const qualifiedContributionId = (contribution: RegisteredContribution<VegaContribution>): string =>
+  `${contribution.owner}:${contribution.value.id}`;
 
-const compareStableText = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
+const compareStableText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 const PLUGIN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/i;
 const PLUGIN_CAPABILITIES = new Set<VegaPluginCapability>([
@@ -725,11 +652,7 @@ const validateManifest = (candidate: VegaPluginManifest): VegaPluginManifest => 
   }
   let dependencies: Readonly<Record<string, string>> | undefined;
   if (manifest.dependencies !== undefined) {
-    if (
-      !manifest.dependencies ||
-      typeof manifest.dependencies !== "object" ||
-      Array.isArray(manifest.dependencies)
-    ) {
+    if (!manifest.dependencies || typeof manifest.dependencies !== "object" || Array.isArray(manifest.dependencies)) {
       throw new TypeError(`Vega plugin ${manifest.id} dependencies must be an object`);
     }
     const entries = Object.entries(manifest.dependencies);
@@ -746,9 +669,7 @@ const validateManifest = (candidate: VegaPluginManifest): VegaPluginManifest => 
       throw new TypeError(`Vega plugin ${manifest.id} capabilities must be an array`);
     }
     const values = manifest.capabilities as readonly unknown[];
-    if (
-      values.some((value) => typeof value !== "string" || !PLUGIN_CAPABILITIES.has(value as VegaPluginCapability))
-    ) {
+    if (values.some((value) => typeof value !== "string" || !PLUGIN_CAPABILITIES.has(value as VegaPluginCapability))) {
       throw new TypeError(`Vega plugin ${manifest.id} declares an unknown capability`);
     }
     capabilities = Object.freeze([...new Set(values as readonly VegaPluginCapability[])]);

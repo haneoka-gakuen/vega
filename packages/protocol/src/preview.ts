@@ -221,14 +221,11 @@ export type VegaPreviewMessage = VegaPreviewRequest | VegaPreviewResponse | Vega
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
-const isNonEmptyString = (value: unknown): value is string =>
-  typeof value === "string" && value.trim().length > 0;
+const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 
-const isCommandIndex = (value: unknown): value is number =>
-  Number.isSafeInteger(value) && Number(value) >= 0;
+const isCommandIndex = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 
-const isFiniteNumber = (value: unknown): value is number =>
-  typeof value === "number" && Number.isFinite(value);
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
 const isPoint2 = (value: unknown): value is VegaPreviewPoint2 =>
   isRecord(value) && isFiniteNumber(value.x) && isFiniteNumber(value.y);
@@ -236,10 +233,7 @@ const isPoint2 = (value: unknown): value is VegaPreviewPoint2 =>
 const isTransform = (value: unknown): value is VegaPreviewTransform => {
   if (!isRecord(value)) return false;
   if (value.position !== undefined && !isPoint2(value.position)) return false;
-  if (
-    value.scale !== undefined &&
-    (!isPoint2(value.scale) || value.scale.x <= 0 || value.scale.y <= 0)
-  ) {
+  if (value.scale !== undefined && (!isPoint2(value.scale) || value.scale.x <= 0 || value.scale.y <= 0)) {
     return false;
   }
   if (value.rotationDegrees !== undefined && !isFiniteNumber(value.rotationDegrees)) return false;
@@ -264,8 +258,8 @@ const isJsonPatch = (value: unknown): value is VegaJsonPatch => {
 
 export const isVegaPreviewIdentity = (value: unknown): value is VegaPreviewIdentity => {
   if (!isRecord(value)) return false;
-  return ["workspaceId", "projectId", "editorSessionId", "runtimeInstanceId"].every(
-    (key) => isNonEmptyString(value[key]),
+  return ["workspaceId", "projectId", "editorSessionId", "runtimeInstanceId"].every((key) =>
+    isNonEmptyString(value[key]),
   );
 };
 
@@ -344,11 +338,7 @@ export const isVegaPreviewMessage = (value: unknown): value is VegaPreviewMessag
       return false;
     }
     if (value.error !== undefined) {
-      if (
-        !isRecord(value.error) ||
-        !isNonEmptyString(value.error.code) ||
-        typeof value.error.message !== "string"
-      ) {
+      if (!isRecord(value.error) || !isNonEmptyString(value.error.code) || typeof value.error.message !== "string") {
         return false;
       }
     }

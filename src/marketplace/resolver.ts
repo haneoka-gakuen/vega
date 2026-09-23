@@ -6,17 +6,8 @@ import {
   type VegaPluginMarketplaceEntry,
   type VegaProjectPlugin,
 } from "@haneoka/vega-protocol";
-import {
-  isVegaPluginTargetCompatible,
-  normalizeVegaPluginCatalog,
-  vegaPluginSourceKey,
-} from "./catalog";
-import {
-  compareVegaSemVer,
-  isValidVegaSemVerRange,
-  parseVegaSemVer,
-  satisfiesVegaSemVer,
-} from "./semver";
+import { isVegaPluginTargetCompatible, normalizeVegaPluginCatalog, vegaPluginSourceKey } from "./catalog";
+import { compareVegaSemVer, isValidVegaSemVerRange, parseVegaSemVer, satisfiesVegaSemVer } from "./semver";
 
 export type VegaPluginResolutionDiagnosticCode =
   | "plugin-not-found"
@@ -71,20 +62,12 @@ interface SolverState {
 
 interface SolveFailure {
   readonly id: string;
-  readonly reason:
-    | "missing"
-    | "invalid-range"
-    | "invalid-version"
-    | "version"
-    | "source"
-    | "target"
-    | "capability";
+  readonly reason: "missing" | "invalid-range" | "invalid-version" | "version" | "source" | "target" | "capability";
   readonly constraints: readonly Constraint[];
 }
 
 type SolveResult =
-  | { readonly ok: true; readonly state: SolverState }
-  | { readonly ok: false; readonly failure: SolveFailure };
+  { readonly ok: true; readonly state: SolverState } | { readonly ok: false; readonly failure: SolveFailure };
 
 export class VegaPluginDependencyResolver {
   private readonly catalog: readonly VegaPluginMarketplaceEntry[];
@@ -104,9 +87,7 @@ export const resolveVegaPluginDependencies = (
 ): VegaPluginResolutionResult => {
   const normalizedCatalog = normalizeVegaPluginCatalog(catalog);
   const diagnostics: VegaPluginResolutionDiagnostic[] = [];
-  const requests = [...request.plugins].sort((left, right) =>
-    compareStableText(left.id, right.id),
-  );
+  const requests = [...request.plugins].sort((left, right) => compareStableText(left.id, right.id));
   const requestById = new Map<string, VegaProjectPlugin>();
   for (const plugin of requests) {
     if (requestById.has(plugin.id)) {
@@ -114,9 +95,7 @@ export const resolveVegaPluginDependencies = (
         code: "version-conflict",
         severity: "error",
         pluginId: plugin.id,
-        ranges: requests
-          .filter(({ id }) => id === plugin.id)
-          .map(({ version }) => version),
+        ranges: requests.filter(({ id }) => id === plugin.id).map(({ version }) => version),
         message: `Project declares plugin ${plugin.id} more than once`,
       });
       continue;
@@ -157,18 +136,10 @@ export const resolveVegaPluginDependencies = (
   state = solved.state;
 
   for (const plugin of requests.filter(({ required }) => required === false)) {
-    if (
-      !isValidVegaSemVerRange(plugin.version) ||
-      !isVegaPluginTargetCompatible(plugin.targets, request.target)
-    ) {
+    if (!isValidVegaSemVerRange(plugin.version) || !isVegaPluginTargetCompatible(plugin.targets, request.target)) {
       continue;
     }
-    const candidateState = addConstraint(
-      cloneState(state),
-      plugin.id,
-      plugin.version,
-      "project (optional)",
-    );
+    const candidateState = addConstraint(cloneState(state), plugin.id, plugin.version, "project (optional)");
     solved = solve(normalizedCatalog, candidateState, request.target, requestById);
     if (solved.ok) {
       state = solved.state;
@@ -190,12 +161,7 @@ export const resolveVegaPluginDependencies = (
             range,
           })),
         )
-        .sort((left, right) =>
-          compareStableText(
-            `${left.owner}\0${left.id}`,
-            `${right.owner}\0${right.id}`,
-          ),
-        );
+        .sort((left, right) => compareStableText(`${left.owner}\0${left.id}`, `${right.owner}\0${right.id}`));
       for (const dependency of optional) {
         const attemptKey = `${dependency.owner}\0${dependency.id}\0${dependency.range}`;
         if (attempted.has(attemptKey)) continue;
@@ -206,12 +172,7 @@ export const resolveVegaPluginDependencies = (
           dependency.range,
           `${dependency.owner} (optional)`,
         );
-        const optionalResult = solve(
-          normalizedCatalog,
-          candidateState,
-          request.target,
-          requestById,
-        );
+        const optionalResult = solve(normalizedCatalog, candidateState, request.target, requestById);
         if (optionalResult.ok) {
           if (optionalResult.state.selected.size > state.selected.size) changed = true;
           state = optionalResult.state;
@@ -242,9 +203,7 @@ export const resolveVegaPluginDependencies = (
   for (const entry of selectedEntries) {
     const projectRequest = requestById.get(entry.id);
     const expectedCapabilities = projectRequest?.capabilities ?? [];
-    const missingCapabilities = expectedCapabilities.filter(
-      (capability) => !entry.capabilities?.includes(capability),
-    );
+    const missingCapabilities = expectedCapabilities.filter((capability) => !entry.capabilities?.includes(capability));
     if (missingCapabilities.length) {
       diagnostics.push({
         code: "capability-missing",
@@ -257,13 +216,7 @@ export const resolveVegaPluginDependencies = (
 
   diagnosePermissions(selectedEntries, request, requestById, diagnostics);
   const hasErrors = diagnostics.some(({ severity }) => severity === "error");
-  const lock = hasErrors
-    ? null
-    : createVegaPluginLock(
-        selectedEntries,
-        request.target,
-        projectDependencies,
-      );
+  const lock = hasErrors ? null : createVegaPluginLock(selectedEntries, request.target, projectDependencies);
   return Object.freeze({
     ok: !hasErrors,
     entries: Object.freeze(selectedEntries),
@@ -275,9 +228,7 @@ export const resolveVegaPluginDependencies = (
 export const createVegaPluginLock = (
   entries: readonly VegaPluginMarketplaceEntry[],
   target?: VegaPluginLockTarget,
-  additionalDependencies: Readonly<
-    Record<string, Readonly<Record<string, string>>>
-  > = {},
+  additionalDependencies: Readonly<Record<string, Readonly<Record<string, string>>>> = {},
 ): VegaPluginLock => {
   const sorted = sortEntries([...entries]);
   const selected = new Map(sorted.map((entry) => [entry.id, entry]));
@@ -286,9 +237,7 @@ export const createVegaPluginLock = (
       const dependencies = Object.fromEntries(
         [
           ...Object.keys(entry.dependencies ?? {}),
-          ...Object.keys(entry.optionalDependencies ?? {}).filter((id) =>
-            selected.has(id),
-          ),
+          ...Object.keys(entry.optionalDependencies ?? {}).filter((id) => selected.has(id)),
           ...Object.keys(additionalDependencies[entry.id] ?? {}),
         ]
           .filter((id, index, values) => values.indexOf(id) === index)
@@ -302,12 +251,8 @@ export const createVegaPluginLock = (
         source: cloneSource(entry.source),
         ...(entry.integrity !== undefined ? { integrity: entry.integrity } : {}),
         dependencies: Object.freeze(dependencies),
-        ...(entry.capabilities?.length
-          ? { capabilities: sortedUnique(entry.capabilities) }
-          : {}),
-        ...(entry.permissions?.length
-          ? { permissions: sortedUnique(entry.permissions) }
-          : {}),
+        ...(entry.capabilities?.length ? { capabilities: sortedUnique(entry.capabilities) } : {}),
+        ...(entry.permissions?.length ? { permissions: sortedUnique(entry.permissions) } : {}),
         ...(entry.externalRuntimes?.length
           ? {
               externalRuntimes: Object.freeze(
@@ -340,10 +285,9 @@ const solve = (
   target: VegaPluginLockTarget | undefined,
   requests: ReadonlyMap<string, VegaProjectPlugin>,
 ): SolveResult => {
-  const invalidSelected = [...initial.selected.entries()].find(([id, entry]) =>
-    !(initial.constraints.get(id) ?? []).every(({ range }) =>
-      satisfiesVegaSemVer(entry.version, range),
-    ),
+  const invalidSelected = [...initial.selected.entries()].find(
+    ([id, entry]) =>
+      !(initial.constraints.get(id) ?? []).every(({ range }) => satisfiesVegaSemVer(entry.version, range)),
   );
   if (invalidSelected) {
     return {
@@ -356,26 +300,17 @@ const solve = (
     };
   }
 
-  const unresolved = [...initial.constraints.keys()].filter(
-    (id) => !initial.selected.has(id),
-  );
+  const unresolved = [...initial.constraints.keys()].filter((id) => !initial.selected.has(id));
   if (!unresolved.length) return { ok: true, state: initial };
 
   const choices = unresolved
     .map((id) => ({
       id,
-      candidates: candidatesFor(
-        catalog,
-        id,
-        initial.constraints.get(id) ?? [],
-        target,
-        requests.get(id),
-      ),
+      candidates: candidatesFor(catalog, id, initial.constraints.get(id) ?? [], target, requests.get(id)),
     }))
     .sort(
       (left, right) =>
-        left.candidates.entries.length - right.candidates.entries.length ||
-        compareStableText(left.id, right.id),
+        left.candidates.entries.length - right.candidates.entries.length || compareStableText(left.id, right.id),
     );
   const choice = choices[0]!;
   if (!choice.candidates.entries.length) {
@@ -406,12 +341,11 @@ const solve = (
   }
   return {
     ok: false,
-    failure:
-      firstFailure ?? {
-        id: choice.id,
-        reason: "version",
-        constraints: initial.constraints.get(choice.id) ?? [],
-      },
+    failure: firstFailure ?? {
+      id: choice.id,
+      reason: "version",
+      constraints: initial.constraints.get(choice.id) ?? [],
+    },
   };
 };
 
@@ -437,31 +371,20 @@ const candidatesFor = (
   );
   if (!byVersion.length) return { entries: [], reason: "version" };
   const bySource = request?.source
-    ? byVersion.filter(
-        (entry) =>
-          vegaPluginSourceKey(entry.source) ===
-          vegaPluginSourceKey(request.source!),
-      )
+    ? byVersion.filter((entry) => vegaPluginSourceKey(entry.source) === vegaPluginSourceKey(request.source!))
     : byVersion;
   if (!bySource.length) return { entries: [], reason: "source" };
-  const byTarget = bySource.filter((entry) =>
-    isVegaPluginTargetCompatible(entry.targets, target),
-  );
+  const byTarget = bySource.filter((entry) => isVegaPluginTargetCompatible(entry.targets, target));
   if (!byTarget.length) return { entries: [], reason: "target" };
   const expectedCapabilities = request?.capabilities ?? [];
   const byCapability = byTarget.filter((entry) =>
-    expectedCapabilities.every((capability) =>
-      entry.capabilities?.includes(capability),
-    ),
+    expectedCapabilities.every((capability) => entry.capabilities?.includes(capability)),
   );
   if (!byCapability.length) return { entries: [], reason: "capability" };
   return { entries: sortEntries(byCapability), reason: "version" };
 };
 
-const failureDiagnostic = (
-  failure: SolveFailure,
-  optional: boolean,
-): VegaPluginResolutionDiagnostic => {
+const failureDiagnostic = (failure: SolveFailure, optional: boolean): VegaPluginResolutionDiagnostic => {
   const ranges = failure.constraints.map(({ range }) => range);
   const sources = failure.constraints.map(({ from }) => from);
   const severity = optional ? "warning" : "error";
@@ -548,10 +471,7 @@ const diagnosePermissions = (
       });
     }
     const unreviewed = required.filter(
-      (permission) =>
-        !denied.has(permission) &&
-        !globallyGranted.has(permission) &&
-        !locallyGranted.has(permission),
+      (permission) => !denied.has(permission) && !globallyGranted.has(permission) && !locallyGranted.has(permission),
     );
     if (unreviewed.length) {
       diagnostics.push({
@@ -567,9 +487,7 @@ const diagnosePermissions = (
 
 const dependencyCycles = (
   entries: readonly VegaPluginMarketplaceEntry[],
-  additionalDependencies: Readonly<
-    Record<string, Readonly<Record<string, string>>>
-  > = {},
+  additionalDependencies: Readonly<Record<string, Readonly<Record<string, string>>>> = {},
 ): readonly (readonly string[])[] => {
   const selected = new Set(entries.map(({ id }) => id));
   const graph = new Map(
@@ -613,27 +531,17 @@ const dependencyCycles = (
   for (const id of [...graph.keys()].sort(compareStableText)) {
     visit(id);
   }
-  return cycles.sort((left, right) =>
-    compareStableText(left.join("\0"), right.join("\0")),
-  );
+  return cycles.sort((left, right) => compareStableText(left.join("\0"), right.join("\0")));
 };
 
 const canonicalCycle = (cycle: readonly string[]): string[] => {
   const body = cycle.slice(0, -1);
-  const start = body.reduce(
-    (best, value, index) => (value < body[best]! ? index : best),
-    0,
-  );
+  const start = body.reduce((best, value, index) => (value < body[best]! ? index : best), 0);
   const rotated = [...body.slice(start), ...body.slice(0, start)];
   return [...rotated, rotated[0]!];
 };
 
-const addConstraint = (
-  state: SolverState,
-  id: string,
-  range: string,
-  from: string,
-): SolverState => {
+const addConstraint = (state: SolverState, id: string, range: string, from: string): SolverState => {
   const constraints = new Map(state.constraints);
   constraints.set(id, [...(constraints.get(id) ?? []), { range, from }]);
   return { selected: state.selected, constraints };
@@ -641,14 +549,10 @@ const addConstraint = (
 
 const cloneState = (state: SolverState): SolverState => ({
   selected: new Map(state.selected),
-  constraints: new Map(
-    [...state.constraints].map(([id, constraints]) => [id, [...constraints]]),
-  ),
+  constraints: new Map([...state.constraints].map(([id, constraints]) => [id, [...constraints]])),
 });
 
-const sortEntries = (
-  entries: VegaPluginMarketplaceEntry[],
-): VegaPluginMarketplaceEntry[] =>
+const sortEntries = (entries: VegaPluginMarketplaceEntry[]): VegaPluginMarketplaceEntry[] =>
   entries.sort((left, right) => {
     const id = compareStableText(left.id, right.id);
     if (id) return id;
@@ -658,18 +562,10 @@ const sortEntries = (
     } catch {
       version = compareStableText(right.version, left.version);
     }
-    return (
-      version ||
-      compareStableText(
-        vegaPluginSourceKey(left.source),
-        vegaPluginSourceKey(right.source),
-      )
-    );
+    return version || compareStableText(vegaPluginSourceKey(left.source), vegaPluginSourceKey(right.source));
   });
 
-const cloneSource = (
-  source: VegaPluginMarketplaceEntry["source"],
-): VegaPluginMarketplaceEntry["source"] => {
+const cloneSource = (source: VegaPluginMarketplaceEntry["source"]): VegaPluginMarketplaceEntry["source"] => {
   switch (source.type) {
     case "registry":
       return Object.freeze({
@@ -694,21 +590,15 @@ const cloneTarget = (target: VegaPluginLockTarget): VegaPluginLockTarget =>
   Object.freeze({
     ...(target.runtime !== undefined ? { runtime: target.runtime } : {}),
     ...(target.platform !== undefined ? { platform: target.platform } : {}),
-    ...(target.architecture !== undefined
-      ? { architecture: target.architecture }
-      : {}),
-    ...(target.engineVersion !== undefined
-      ? { engineVersion: target.engineVersion }
-      : {}),
+    ...(target.architecture !== undefined ? { architecture: target.architecture } : {}),
+    ...(target.engineVersion !== undefined ? { engineVersion: target.engineVersion } : {}),
     ...(target.apiVersion !== undefined ? { apiVersion: target.apiVersion } : {}),
   });
 
 const sortedUnique = (values: readonly string[]): readonly string[] =>
   Object.freeze([...new Set(values)].sort(compareStableText));
 
-const failureResult = (
-  diagnostics: VegaPluginResolutionDiagnostic[],
-): VegaPluginResolutionResult =>
+const failureResult = (diagnostics: VegaPluginResolutionDiagnostic[]): VegaPluginResolutionResult =>
   Object.freeze({
     ok: false,
     entries: Object.freeze([]),
@@ -716,5 +606,4 @@ const failureResult = (
     diagnostics: Object.freeze(diagnostics),
   });
 
-const compareStableText = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
+const compareStableText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);

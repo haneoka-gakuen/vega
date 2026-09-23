@@ -39,16 +39,15 @@ export { VegaEventBus } from "./engine/events";
 export type { VegaDiagnosticEvent, VegaEventMap } from "./engine/events";
 export { VegaLifetime } from "./engine/lifecycle";
 export type { VegaDisposable } from "./engine/lifecycle";
-export {
-  resolveVegaOfficialPlayerPlugins,
-  selectVegaRenderContribution,
-} from "./engine/playerPluginPreset";
+export { resolveVegaOfficialPlayerPlugins, selectVegaRenderContribution } from "./engine/playerPluginPreset";
 export type {
   ResolveVegaOfficialPlayerPluginsOptions,
   VegaOfficialPlayerPluginPreset,
+  VegaPlayerCommandExtensionRegistration,
 } from "./engine/playerPluginPreset";
 export * from "./engine/plugins";
 export * from "./marketplace";
+export * from "./resources/StoryResourcePreparation";
 export { GenericStoryScene } from "./rendering/dom/GenericStoryScene";
 export type { GenericStorySceneOptions } from "./rendering/dom/GenericStoryScene";
 export type {

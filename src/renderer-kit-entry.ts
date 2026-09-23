@@ -13,10 +13,7 @@ export {
   unityCharacterFadeDuration,
   type UnityCharacterFadeOptions,
 } from "./rendering/AdvCharacterLifecycle";
-export {
-  AdaptiveRenderQuality,
-  type AdaptiveRenderQualityOptions,
-} from "./rendering/AdaptiveRenderQuality";
+export { AdaptiveRenderQuality, type AdaptiveRenderQualityOptions } from "./rendering/AdaptiveRenderQuality";
 export {
   createRendererCharacterModel,
   disposeRendererCharacterModel,
@@ -36,11 +33,14 @@ export {
   type StoryCharacterRendererModelContext,
 } from "./rendering/StoryCharacterModel";
 export type * from "./rendering/StoryRendererExtensions";
+export * from "./rendering/StoryScreenFilters";
 export type * from "./rendering/StorySceneBackend";
 export {
   DefaultStoryResourceResolver,
+  storyResourceContentType,
   type StoryResourceAdapter,
 } from "./resources/StoryResourceResolver";
+export * from "./resources/StoryResourcePreparation";
 
 export { AdvQualityConfig } from "./core/AdvQualityConfig";
 export * from "./types/AdvQuality";
@@ -56,11 +56,13 @@ export {
   type AdvTimelineClock,
 } from "./core/AdvPlayableDirector";
 export { VegaLifetime, type VegaDisposable } from "./engine/lifecycle";
+export { flattenAdvCommands, iterateAdvCommands } from "./core/AdvCommandTraversal";
 export {
   resolveVegaOfficialPlayerPlugins,
   selectVegaRenderContribution,
   type ResolveVegaOfficialPlayerPluginsOptions,
   type VegaOfficialPlayerPluginPreset,
+  type VegaPlayerCommandExtensionRegistration,
 } from "./engine/playerPluginPreset";
 
 export * from "./rendering/neutral/AdvDotweenShake";
@@ -79,3 +81,10 @@ export {
   type VegaVoicePcmFrame,
   type VegaVoiceSpectrumFrame,
 } from "./sound/VoiceAnalysis";
+
+export * from "./rendering/StoryScreenEffects";
+export * from "./rendering/StoryFrameLayout";
+export * from "./rendering/StoryStillPresentation";
+export * from "./rendering/StoryPlaneLayout";
+
+export * from "@haneoka/vega-protocol/coordinates";

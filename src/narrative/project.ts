@@ -136,7 +136,8 @@ export const analyzeVegaProjectFlow = (project: VegaProject): VegaProjectFlow =>
         const thenScene = commandString(command, "thenScene");
         const elseScene = commandString(command, "elseScene");
         const condition = commandString(command, "condition");
-        if (thenScene) edges.push({ from: sceneId, to: thenScene, kind: "branch", ...(condition ? { condition } : {}) });
+        if (thenScene)
+          edges.push({ from: sceneId, to: thenScene, kind: "branch", ...(condition ? { condition } : {}) });
         if (elseScene) {
           edges.push({
             from: sceneId,

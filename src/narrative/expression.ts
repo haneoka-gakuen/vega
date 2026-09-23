@@ -2,14 +2,7 @@ import type { VegaJsonValue } from "@haneoka/vega-protocol";
 
 export type VegaExpressionScope = Readonly<Record<string, VegaJsonValue>>;
 
-type TokenKind =
-  | "number"
-  | "string"
-  | "identifier"
-  | "operator"
-  | "left-parenthesis"
-  | "right-parenthesis"
-  | "eof";
+type TokenKind = "number" | "string" | "identifier" | "operator" | "left-parenthesis" | "right-parenthesis" | "eof";
 
 interface Token {
   readonly kind: TokenKind;
@@ -33,10 +26,7 @@ export class VegaExpressionError extends SyntaxError {
   }
 }
 
-export const evaluateVegaExpression = (
-  source: string,
-  scope: VegaExpressionScope,
-): VegaJsonValue => {
+export const evaluateVegaExpression = (source: string, scope: VegaExpressionScope): VegaJsonValue => {
   if (typeof source !== "string") throw new TypeError("Vega expression must be a string");
   if (source.length > MAX_EXPRESSION_LENGTH) {
     throw new VegaExpressionError(`Expression exceeds ${MAX_EXPRESSION_LENGTH} characters`, MAX_EXPRESSION_LENGTH);

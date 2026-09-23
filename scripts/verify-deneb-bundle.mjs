@@ -7,11 +7,7 @@ const packageUrl = new URL("../package.json", import.meta.url);
 const runtimeUrl = new URL("deneb-runtime.js", outputDirectory);
 const manifestUrl = new URL("deneb-runtime.json", outputDirectory);
 const sourceMapUrl = new URL("deneb-runtime.js.map", outputDirectory);
-const legalFiles = [
-  "LICENSE",
-  "LICENSE-SCOPE.md",
-  "THIRD_PARTY_NOTICES.md",
-];
+const legalFiles = ["LICENSE", "LICENSE-SCOPE.md", "THIRD_PARTY_NOTICES.md"];
 
 for (const file of ["deneb-runtime.js", "deneb-runtime.json", ...legalFiles]) {
   const url = new URL(file, outputDirectory);
@@ -57,17 +53,10 @@ if (
 ) {
   throw new Error("Deneb runtime ESM exports do not satisfy ABI v1");
 }
-if (
-  JSON.stringify(manifest.capabilities) !==
-  JSON.stringify(runtimeModule.DENEB_RUNTIME_CAPABILITIES)
-) {
+if (JSON.stringify(manifest.capabilities) !== JSON.stringify(runtimeModule.DENEB_RUNTIME_CAPABILITIES)) {
   throw new Error("Deneb runtime manifest capabilities do not match the bundled runtime");
 }
-for (const marker of [
-  "haneoka.vega-shell-default",
-  "haneoka.vega-portable-ui",
-  "vega-default-toolbar__menu",
-]) {
+for (const marker of ["haneoka.vega-shell-default", "haneoka.vega-portable-ui", "vega-default-toolbar__menu"]) {
   if (!runtimeText.includes(marker)) {
     continue;
   }
@@ -78,9 +67,7 @@ const uncompressedBudget = 4 * 1024 * 1024;
 const gzipBudget = 2 * 1024 * 1024;
 const gzipBytes = gzipSync(runtime, { level: 9 }).byteLength;
 if (runtime.byteLength > uncompressedBudget || gzipBytes > gzipBudget) {
-  throw new Error(
-    `Deneb runtime exceeds its budget: ${runtime.byteLength} bytes raw, ${gzipBytes} bytes gzip`,
-  );
+  throw new Error(`Deneb runtime exceeds its budget: ${runtime.byteLength} bytes raw, ${gzipBytes} bytes gzip`);
 }
 
 console.log(`Deneb bundle verified: ${runtime.byteLength} bytes raw, ${gzipBytes} bytes gzip`);

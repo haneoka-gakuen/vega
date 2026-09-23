@@ -1,7 +1,4 @@
-import type {
-  StoryResourceLease,
-  StoryResourceResolver,
-} from "../rendering/StorySceneBackend";
+import type { StoryResourceLease, StoryResourceResolver } from "../rendering/StorySceneBackend";
 
 export interface StoryResourceAdapter {
   readonly schemes: readonly string[];
@@ -96,7 +93,9 @@ const waitForSharedBytes = (
   });
 };
 
-const contentTypeFor = (source: string): string => {
+export const storyResourceContentType = (source: string, bytes?: Readonly<Uint8Array>): string => {
+  const embedded = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+)[;,]/iu.exec(source)?.[1];
+  if (embedded) return embedded.toLowerCase();
   const pathname = source.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
   if (pathname.endsWith(".png")) return "image/png";
   if (pathname.endsWith(".webp")) return "image/webp";
@@ -108,6 +107,10 @@ const contentTypeFor = (source: string): string => {
   if (pathname.endsWith(".webm")) return "video/webm";
   if (pathname.endsWith(".ogg") || pathname.endsWith(".opus")) return "audio/ogg";
   if (pathname.endsWith(".mp3")) return "audio/mpeg";
+  if (bytes) {
+    const prefix = new TextDecoder().decode(bytes.subarray(0, 4096)).trimStart();
+    if (/^(?:<\?xml[\s\S]*?\?>\s*)?(?:<!--[\s\S]*?-->\s*)*<svg[\s>]/iu.test(prefix)) return "image/svg+xml";
+  }
   return "application/octet-stream";
 };
 
@@ -116,23 +119,12 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
   private readonly cacheState: StoryResourceCacheState;
   private readonly cacheOwner = {};
 
-  constructor(
-    adapters: readonly StoryResourceAdapter[] = [],
-    cacheOptions: StoryResourceCacheOptions = {},
-  ) {
+  constructor(adapters: readonly StoryResourceAdapter[] = [], cacheOptions: StoryResourceCacheOptions = {}) {
     this.adapters = [...adapters];
-    const maximumEntries = cacheLimit(
-      cacheOptions.maximumEntries,
-      DEFAULT_CACHE_MAXIMUM_ENTRIES,
-    );
-    const maximumBytes = cacheLimit(
-      cacheOptions.maximumBytes,
-      DEFAULT_CACHE_MAXIMUM_BYTES,
-    );
+    const maximumEntries = cacheLimit(cacheOptions.maximumEntries, DEFAULT_CACHE_MAXIMUM_ENTRIES);
+    const maximumBytes = cacheLimit(cacheOptions.maximumBytes, DEFAULT_CACHE_MAXIMUM_BYTES);
     const sharedKey = cacheOptions.sharedKey;
-    let cacheState = sharedKey
-      ? sharedResourceCaches.get(sharedKey)
-      : undefined;
+    let cacheState = sharedKey ? sharedResourceCaches.get(sharedKey) : undefined;
     if (!cacheState) {
       cacheState = {
         entries: new Map(),
@@ -142,14 +134,10 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
       };
       if (sharedKey) sharedResourceCaches.set(sharedKey, cacheState);
     } else if (
-      (cacheOptions.maximumEntries !== undefined &&
-        cacheState.maximumEntries !== maximumEntries) ||
-      (cacheOptions.maximumBytes !== undefined &&
-        cacheState.maximumBytes !== maximumBytes)
+      (cacheOptions.maximumEntries !== undefined && cacheState.maximumEntries !== maximumEntries) ||
+      (cacheOptions.maximumBytes !== undefined && cacheState.maximumBytes !== maximumBytes)
     ) {
-      throw new TypeError(
-        "Story resource resolvers sharing a cache key must use identical cache limits",
-      );
+      throw new TypeError("Story resource resolvers sharing a cache key must use identical cache limits");
     }
     this.cacheState = cacheState;
   }
@@ -182,6 +170,18 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
   }
 
   async load(source: string, signal?: AbortSignal): Promise<Uint8Array> {
+    return (await this.acquireBytes(source, signal, true)) as Uint8Array;
+  }
+
+  /**
+   * Trusted read-only path used by renderer integrations. `load` deliberately
+   * remains copy-on-read so ordinary plugin and SDK consumers keep isolation.
+   */
+  async loadSharedBytes(source: string, signal?: AbortSignal): Promise<Readonly<Uint8Array>> {
+    return this.acquireBytes(source, signal, false);
+  }
+
+  private async acquireBytes(source: string, signal: AbortSignal | undefined, copy: boolean): Promise<Uint8Array> {
     if (signal?.aborted) throw abortError(source);
     if (!this.canLoad(source)) {
       throw new TypeError(`No resource adapter can load: ${source}`);
@@ -205,17 +205,13 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     }
     entry.waiters += 1;
     try {
-      return await waitForSharedBytes(entry.pending, source, signal);
+      return await waitForSharedBytes(entry.pending, source, signal, copy);
     } finally {
       entry.waiters = Math.max(0, entry.waiters - 1);
       // Caller abort is isolated while another model still needs these bytes.
       // Once every waiter has gone away, however, continuing a multi-megabyte
       // MOC/texture request would only waste bandwidth and cache space.
-      if (
-        !entry.settled &&
-        entry.waiters === 0 &&
-        entry.retainers === 0
-      ) {
+      if (!entry.settled && entry.waiters === 0 && entry.retainers === 0) {
         // Remove the doomed single-flight before aborting it. Otherwise a new
         // caller can briefly attach to the already-aborting request and fail
         // even though it did not participate in the cancellation.
@@ -225,10 +221,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     }
   }
 
-  async retain(
-    source: string,
-    signal?: AbortSignal,
-  ): Promise<StoryResourceLease> {
+  async retain(source: string, signal?: AbortSignal): Promise<StoryResourceLease> {
     if (signal?.aborted) throw abortError(source);
     if (!this.canLoad(source)) {
       throw new TypeError(`No resource adapter can load: ${source}`);
@@ -252,11 +245,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
       if (!retained) return;
       retained = false;
       entry!.retainers = Math.max(0, entry!.retainers - 1);
-      if (
-        !entry!.settled &&
-        entry!.waiters === 0 &&
-        entry!.retainers === 0
-      ) {
+      if (!entry!.settled && entry!.waiters === 0 && entry!.retainers === 0) {
         this.deleteCacheEntry(key, entry!);
         entry!.controller.abort();
       } else {
@@ -284,9 +273,13 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     if (!this.adapterFor(url) && !this.cache.has(url.href)) {
       return { url: source, release: () => undefined };
     }
-    const bytes = await this.load(source, signal);
-    const payload = Uint8Array.from(bytes);
-    const objectUrl = URL.createObjectURL(new Blob([payload.buffer], { type: contentTypeFor(source) }));
+    const bytes = await this.loadSharedBytes(source, signal);
+    // Canonical cache entries are normalized to a full ArrayBuffer-backed
+    // Uint8Array. Passing that buffer directly avoids two JavaScript copies;
+    // Blob owns the resulting immutable payload.
+    const objectUrl = URL.createObjectURL(
+      new Blob([bytes.buffer as ArrayBuffer], { type: storyResourceContentType(source, bytes) }),
+    );
     let released = false;
     return {
       url: objectUrl,
@@ -314,11 +307,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
         // An individually oversized resource must not flush every useful entry
         // before being evicted itself. An active lease still takes precedence;
         // once released, the normal trim pass removes the oversized entry.
-        if (
-          entry.retainers === 0 &&
-          (this.maximumCacheEntries === 0 ||
-            bytes.byteLength > this.maximumCacheBytes)
-        ) {
+        if (entry.retainers === 0 && (this.maximumCacheEntries === 0 || bytes.byteLength > this.maximumCacheBytes)) {
           this.cache.delete(key);
           return bytes;
         }
@@ -348,10 +337,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     return entry;
   }
 
-  private async loadCanonical(
-    url: URL,
-    signal: AbortSignal,
-  ): Promise<Uint8Array> {
+  private async loadCanonical(url: URL, signal: AbortSignal): Promise<Uint8Array> {
     const adapter = this.adapterFor(url);
     if (adapter) return adapter.load(url, signal);
     const response = await fetch(url.href, { signal });
@@ -370,17 +356,11 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
   private deleteCacheEntry(key: string, entry: StoryResourceCacheEntry): void {
     if (this.cache.get(key) !== entry) return;
     this.cache.delete(key);
-    this.cachedByteLength = Math.max(
-      0,
-      this.cachedByteLength - entry.byteLength,
-    );
+    this.cachedByteLength = Math.max(0, this.cachedByteLength - entry.byteLength);
   }
 
   private trimCache(): void {
-    while (
-      this.cache.size > this.maximumCacheEntries ||
-      this.cachedByteLength > this.maximumCacheBytes
-    ) {
+    while (this.cache.size > this.maximumCacheEntries || this.cachedByteLength > this.maximumCacheBytes) {
       let removed = false;
       for (const [key, entry] of this.cache) {
         // Keep in-flight work addressable so every concurrent waiter shares one

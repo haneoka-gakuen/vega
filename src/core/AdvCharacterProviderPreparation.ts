@@ -1,7 +1,4 @@
-import {
-  prepareCharacterProviderDescriptors,
-  type StoryCharacterProvider,
-} from "../rendering/StoryCharacterModel";
+import { prepareCharacterProviderDescriptors, type StoryCharacterProvider } from "../rendering/StoryCharacterModel";
 import type { StoryResourceResolver } from "../rendering/StorySceneBackend";
 import type { AdvStory } from "../types/AdvRuntime";
 import { flattenAdvCommands } from "./AdvCommandTraversal";

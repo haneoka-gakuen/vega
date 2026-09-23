@@ -9,6 +9,7 @@ import {
   type VegaPlayerShellOptions,
   vegaProjectToAdvStory,
 } from "@haneoka/vega/engine";
+import { prepareStoryAudio } from "@haneoka/vega/audio";
 import type { VegaProject } from "@haneoka/vega-protocol";
 
 export type VegaPlayerElementAppearance = "light" | "system" | "dark";
@@ -23,15 +24,10 @@ export interface VegaPlayerElementErrorDetail {
   readonly error: unknown;
 }
 
-type PlayerOptions = Omit<
-  VegaPlayerOptions,
-  "mount" | "shell" | "story" | "theme"
->;
+type PlayerOptions = Omit<VegaPlayerOptions, "mount" | "shell" | "story" | "theme">;
 
 const HTMLElementBase: typeof HTMLElement =
-  typeof HTMLElement === "undefined"
-    ? (class {} as unknown as typeof HTMLElement)
-    : HTMLElement;
+  typeof HTMLElement === "undefined" ? (class {} as unknown as typeof HTMLElement) : HTMLElement;
 
 const template = `
   <section aria-label="Vega visual novel player" part="shell">
@@ -69,8 +65,7 @@ const styleSheets = new WeakMap<Document, CSSStyleSheet>();
 const adoptStyleSheet = (shadow: ShadowRoot): void => {
   if (!("adoptedStyleSheets" in shadow)) return;
   const document = shadow.ownerDocument;
-  const constructor = document.defaultView?.CSSStyleSheet as
-    CSSStyleSheetConstructor | undefined;
+  const constructor = document.defaultView?.CSSStyleSheet as CSSStyleSheetConstructor | undefined;
   if (typeof constructor !== "function") return;
   let sheet = styleSheets.get(document);
   if (!sheet) {
@@ -85,8 +80,7 @@ const adoptStyleSheet = (shadow: ShadowRoot): void => {
   shadow.adoptedStyleSheets = [...shadow.adoptedStyleSheets, sheet];
 };
 
-const uiSignature = (state: AdvPlayerState): string =>
-  JSON.stringify([state.loading, state.error]);
+const uiSignature = (state: AdvPlayerState): string => JSON.stringify([state.loading, state.error]);
 
 const abortError = (message: string): Error => {
   const error = new Error(message);
@@ -94,9 +88,7 @@ const abortError = (message: string): Error => {
   return error;
 };
 
-const isAppearance = (
-  value: string | null,
-): value is VegaPlayerElementAppearance =>
+const isAppearance = (value: string | null): value is VegaPlayerElementAppearance =>
   value === "light" || value === "system" || value === "dark";
 
 const sourceBinding = (
@@ -106,10 +98,7 @@ const sourceBinding = (
 ): { readonly story: AdvStory; readonly entryKey?: string } | null => {
   if (project) {
     const compiled = vegaProjectToAdvStory(project, sceneId);
-    const entryKey =
-      typeof compiled.vegaEntryKey === "string"
-        ? compiled.vegaEntryKey
-        : undefined;
+    const entryKey = typeof compiled.vegaEntryKey === "string" ? compiled.vegaEntryKey : undefined;
     return { story: compiled, ...(entryKey ? { entryKey } : {}) };
   }
   return story ? { story } : null;
@@ -117,13 +106,7 @@ const sourceBinding = (
 
 export class VegaPlayerElement extends HTMLElementBase {
   static get observedAttributes(): readonly string[] {
-    return [
-      "appearance",
-      "auto-play",
-      "auto-start",
-      "scene-id",
-      "theme",
-    ];
+    return ["appearance", "auto-play", "auto-start", "scene-id", "theme"];
   }
 
   private storyValue: AdvStory | null = null;
@@ -154,6 +137,7 @@ export class VegaPlayerElement extends HTMLElementBase {
   }>();
   private stageElement: HTMLDivElement | null = null;
   private errorElement: HTMLDivElement | null = null;
+  private readonly prepareAudio = (event: Event): void => prepareStoryAudio(event);
 
   get story(): AdvStory | null {
     return this.storyValue;
@@ -228,9 +212,7 @@ export class VegaPlayerElement extends HTMLElementBase {
   get ready(): Promise<VegaPlayerHandle> {
     if (this.handleValue) return Promise.resolve(this.handleValue);
     if (this.explicitlyDisposed) {
-      return Promise.reject(
-        new ReferenceError("The Vega player element is disposed"),
-      );
+      return Promise.reject(new ReferenceError("The Vega player element is disposed"));
     }
     return new Promise<VegaPlayerHandle>((resolve, reject) => {
       this.readyWaiters.add({ resolve, reject });
@@ -259,8 +241,7 @@ export class VegaPlayerElement extends HTMLElementBase {
   }
 
   set appearance(value: VegaPlayerElementAppearance) {
-    if (!isAppearance(value))
-      throw new TypeError(`Unsupported Vega appearance: ${String(value)}`);
+    if (!isAppearance(value)) throw new TypeError(`Unsupported Vega appearance: ${String(value)}`);
     this.setAttribute("appearance", value);
   }
 
@@ -285,34 +266,31 @@ export class VegaPlayerElement extends HTMLElementBase {
   connectedCallback(): void {
     this.connected = true;
     this.explicitlyDisposed = false;
+    this.addEventListener("pointerdown", this.prepareAudio, true);
+    this.addEventListener("keydown", this.prepareAudio, true);
     this.ensureDom();
-    if (!this.hasAttribute("appearance"))
-      this.setAttribute("appearance", "system");
+    if (!this.hasAttribute("appearance")) this.setAttribute("appearance", "system");
     this.requestReload();
   }
 
   disconnectedCallback(): void {
     this.connected = false;
+    this.removeEventListener("pointerdown", this.prepareAudio, true);
+    this.removeEventListener("keydown", this.prepareAudio, true);
     this.generation += 1;
     this.rejectReady(abortError("The Vega player element was disconnected"));
     void this.enqueue(() => this.releaseActive()).catch(() => undefined);
   }
 
-  attributeChangedCallback(
-    name: string,
-    oldValue: string | null,
-    newValue: string | null,
-  ): void {
+  attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void {
     if (oldValue === newValue) return;
     if (name === "auto-play") {
       const player = this.handleValue?.player;
-      if (player && player.state.autoPlay !== this.autoPlay)
-        player.toggleAuto();
+      if (player && player.state.autoPlay !== this.autoPlay) player.toggleAuto();
       return;
     }
     if (name === "auto-start") {
-      this.autoStartValue =
-        newValue === null || newValue.toLowerCase() !== "false";
+      this.autoStartValue = newValue === null || newValue.toLowerCase() !== "false";
       if (this.autoStartValue && this.handleValue && !this.started) {
         void this.start().catch((error: unknown) => this.reportError(error));
       }
@@ -325,8 +303,7 @@ export class VegaPlayerElement extends HTMLElementBase {
       return;
     }
     if (name === "theme") {
-      this.themeValue =
-        newValue === null ? undefined : newValue === "false" ? false : newValue;
+      this.themeValue = newValue === null ? undefined : newValue === "false" ? false : newValue;
     }
     this.requestReload();
   }
@@ -338,6 +315,7 @@ export class VegaPlayerElement extends HTMLElementBase {
   }
 
   async start(): Promise<void> {
+    prepareStoryAudio();
     const handle = this.handleValue ?? (await this.ready);
     if (!this.connected || this.explicitlyDisposed) {
       throw new ReferenceError("The Vega player element is not active");
@@ -387,13 +365,8 @@ export class VegaPlayerElement extends HTMLElementBase {
 
   private async replacePlayer(generation: number): Promise<void> {
     await this.releaseActive();
-    if (!this.connected || generation !== this.generation || !this.stageElement)
-      return;
-    const binding = sourceBinding(
-      this.storyValue,
-      this.projectValue,
-      this.sceneId,
-    );
+    if (!this.connected || generation !== this.generation || !this.stageElement) return;
+    const binding = sourceBinding(this.storyValue, this.projectValue, this.sceneId);
     if (!binding) return;
 
     const engine = this.engineValue ?? createVega(this.engineOptionsValue);
@@ -418,12 +391,9 @@ export class VegaPlayerElement extends HTMLElementBase {
       }
       this.handleValue = handle;
       if (this.entryKey) handle.player.navigateToKey(this.entryKey);
-      if (handle.player.state.autoPlay !== this.autoPlay)
-        handle.player.toggleAuto();
+      if (handle.player.state.autoPlay !== this.autoPlay) handle.player.toggleAuto();
       this.renderState(handle.player.state);
-      this.frame = requestAnimationFrame(() =>
-        this.updatePresentation(handle.player.state),
-      );
+      this.frame = requestAnimationFrame(() => this.updatePresentation(handle.player.state));
       this.resolveReady(handle);
       this.dispatchEvent(
         new CustomEvent<VegaPlayerElementReadyDetail>("vega-ready", {
@@ -457,21 +427,11 @@ export class VegaPlayerElement extends HTMLElementBase {
     this.handleValue = null;
     this.activeEngine = null;
     this.ownsActiveEngine = false;
-    const results = await Promise.allSettled([
-      handle?.dispose(),
-      ownsEngine ? engine?.dispose() : undefined,
-    ]);
+    const results = await Promise.allSettled([handle?.dispose(), ownsEngine ? engine?.dispose() : undefined]);
     const errors = results
-      .filter(
-        (result): result is PromiseRejectedResult =>
-          result.status === "rejected",
-      )
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map(({ reason }) => reason);
-    if (errors.length)
-      throw new AggregateError(
-        errors,
-        "Failed to dispose Vega Web Component resources",
-      );
+    if (errors.length) throw new AggregateError(errors, "Failed to dispose Vega Web Component resources");
   }
 
   private trackPlayback(operation: Promise<void>): void {
@@ -523,8 +483,7 @@ export class VegaPlayerElement extends HTMLElementBase {
     this.errorValue = error;
     if (this.errorElement) {
       this.errorElement.hidden = false;
-      this.errorElement.textContent =
-        error instanceof Error ? error.message : String(error);
+      this.errorElement.textContent = error instanceof Error ? error.message : String(error);
     }
     this.dispatchEvent(
       new CustomEvent<VegaPlayerElementErrorDetail>("vega-error", {
@@ -540,15 +499,10 @@ export const defineVegaPlayerElement = (
   tagName = "vega-player",
   registry: CustomElementRegistry | undefined = globalThis.customElements,
 ): typeof VegaPlayerElement => {
-  if (!registry)
-    throw new ReferenceError(
-      "Custom elements are not available in this environment",
-    );
+  if (!registry) throw new ReferenceError("Custom elements are not available in this environment");
   const existing = registry.get(tagName);
   if (existing && existing !== VegaPlayerElement) {
-    throw new Error(
-      `Custom element ${tagName} is already defined by another constructor`,
-    );
+    throw new Error(`Custom element ${tagName} is already defined by another constructor`);
   }
   if (!existing) registry.define(tagName, VegaPlayerElement);
   return VegaPlayerElement;

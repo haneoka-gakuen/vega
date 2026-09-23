@@ -12,6 +12,7 @@ export type AdvChatWindowSpriteRect = {
   maskTop: number;
   maskHeight: number;
   maskWidth: number;
+  maskOffsetX?: number;
 };
 
 export type AdvChatRuntimeAssets = {

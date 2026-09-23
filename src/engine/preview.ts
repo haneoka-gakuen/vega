@@ -159,7 +159,8 @@ export class VegaPreviewRuntime {
     } catch {
       return this.reject(request, "invalid-payload", "Preview payload is not serializable");
     }
-    if (payloadSize > this.maxPayloadBytes) return this.reject(request, "payload-too-large", "Preview payload too large");
+    if (payloadSize > this.maxPayloadBytes)
+      return this.reject(request, "payload-too-large", "Preview payload too large");
     if (request.revision < this.latestRevision) {
       return this.respond(request, { status: "superseded" });
     }
@@ -199,16 +200,18 @@ export class VegaPreviewRuntime {
           break;
         }
         case "editor.sync-scene": {
-          const loaded = await this.replacePlayer(
-            request,
-            request.command.story as unknown as AdvStory,
-            request.command.commandIndex,
-            {
-              sceneId: request.command.sceneId,
-              sceneRevision: request.command.sceneRevision,
-            },
-            operation.signal,
-          );
+          const loaded =
+            this.player &&
+            this.sceneId === request.command.sceneId &&
+            this.sceneRevision === request.command.sceneRevision
+              ? await this.seekPlayer(request, request.command.commandIndex ?? 0, operation.signal)
+              : await this.replacePlayer(
+                  request,
+                  request.command.story as unknown as AdvStory,
+                  request.command.commandIndex,
+                  { sceneId: request.command.sceneId, sceneRevision: request.command.sceneRevision },
+                  operation.signal,
+                );
           if (!loaded) return this.respond(request, { status: "superseded" });
           result = {
             sceneId: this.sceneId,
@@ -218,31 +221,17 @@ export class VegaPreviewRuntime {
           break;
         }
         case "editor.run-scene": {
-          const story = this.requireSyncedStory();
-          const loaded = await this.replacePlayer(
-            request,
-            story,
-            request.command.commandIndex ?? 0,
-            { sceneId: this.sceneId, sceneRevision: this.sceneRevision },
-            operation.signal,
-          );
+          const loaded = await this.seekPlayer(request, request.command.commandIndex ?? 0, operation.signal);
           if (!loaded) return this.respond(request, { status: "superseded" });
-          this.continuePlayback();
+          this.continuePlayback(false);
           result = { sceneId: this.sceneId, commandIndex: this.requirePlayer().player.currentProgressIndex() };
           break;
         }
         case "editor.run-from":
         case "runtime.seek": {
-          const story = this.requireSyncedStory();
-          const loaded = await this.replacePlayer(
-            request,
-            story,
-            request.command.commandIndex,
-            { sceneId: this.sceneId, sceneRevision: this.sceneRevision },
-            operation.signal,
-          );
+          const loaded = await this.seekPlayer(request, request.command.commandIndex, operation.signal);
           if (!loaded) return this.respond(request, { status: "superseded" });
-          if (request.command.name === "editor.run-from") this.continuePlayback();
+          if (request.command.name === "editor.run-from") this.continuePlayback(false);
           result = { sceneId: this.sceneId, commandIndex: this.requirePlayer().player.currentProgressIndex() };
           break;
         }
@@ -325,6 +314,23 @@ export class VegaPreviewRuntime {
     }
   }
 
+  private async seekPlayer(request: VegaPreviewRequest, index: number, signal: AbortSignal): Promise<boolean> {
+    const handle = this.requirePlayer(),
+      playback = this.playTask;
+    this.stepPending = false;
+    this.skipBreakpointOnce = null;
+    this.pausedBoundaryIndex = null;
+    handle.player.pause();
+    await handle.player.seekTo(index, { resume: false });
+    await playback?.catch(() => undefined);
+    if (signal.aborted || request.revision < this.latestRevision) return false;
+    handle.shell?.enterGame();
+    this.pausedBoundaryIndex = handle.player.currentProgressIndex();
+    if (this.replacingRevision === request.revision) this.replacingRevision = null;
+    this.scheduleStateEvent();
+    return true;
+  }
+
   private async replacePlayer(
     request: VegaPreviewRequest,
     story: AdvStory,
@@ -335,10 +341,7 @@ export class VegaPreviewRuntime {
     if (!story || typeof story !== "object" || Array.isArray(story)) {
       throw new TypeError("Preview story must be an object");
     }
-    const seekDecisions =
-      story === this.syncedStory && this.player
-        ? this.player.player.exportSeekDecisions()
-        : null;
+    const seekDecisions = story === this.syncedStory && this.player ? this.player.player.exportSeekDecisions() : null;
     const next = await this.engine.createPlayer({
       mount: this.mount,
       story,
@@ -351,6 +354,7 @@ export class VegaPreviewRuntime {
         await next.dispose();
         return false;
       }
+      next.shell?.enterGame();
       if (seekDecisions) next.player.importSeekDecisions(seekDecisions);
       if (commandIndex != null) await next.player.replayFromStartTo(commandIndex);
       if (signal.aborted || request.revision < this.latestRevision) {
@@ -376,7 +380,11 @@ export class VegaPreviewRuntime {
       try {
         await previous.dispose();
       } catch (error) {
-        this.emitDiagnostic("warning", "previous-player-dispose", error instanceof Error ? error.message : String(error));
+        this.emitDiagnostic(
+          "warning",
+          "previous-player-dispose",
+          error instanceof Error ? error.message : String(error),
+        );
       }
     }
     this.scheduleStateEvent();
@@ -403,10 +411,10 @@ export class VegaPreviewRuntime {
     this.scheduleStateEvent();
   }
 
-  private continuePlayback(): void {
+  private continuePlayback(skipCurrentBreakpoint = true): void {
     const handle = this.requirePlayer();
     handle.shell?.enterGame();
-    if (!handle.player.state.playing && handle.player.state.paused) {
+    if (skipCurrentBreakpoint && !handle.player.state.playing && handle.player.state.paused) {
       this.skipBreakpointOnce = handle.player.currentProgressIndex();
     }
     this.stepPending = false;
@@ -622,12 +630,7 @@ export class VegaPreviewRuntime {
     this.stateEventQueued = true;
     queueMicrotask(() => {
       this.stateEventQueued = false;
-      if (
-        this.disposed ||
-        !this.player ||
-        this.replacingRevision != null ||
-        generation !== this.stateEventGeneration
-      ) {
+      if (this.disposed || !this.player || this.replacingRevision != null || generation !== this.stateEventGeneration) {
         return;
       }
       this.port.postMessage({
@@ -692,19 +695,11 @@ export class VegaPreviewRuntime {
     return this.player;
   }
 
-  private requireSyncedStory(): AdvStory {
-    if (!this.syncedStory) throw new Error("No editor scene is synced in the Vega preview runtime");
-    return this.syncedStory;
-  }
-
   private reject(request: VegaPreviewRequest, code: string, message: string): void {
     this.respond(request, { status: "rejected", error: { code, message } });
   }
 
-  private respond(
-    request: VegaPreviewRequest,
-    value: Pick<VegaPreviewResponse, "status" | "result" | "error">,
-  ): void {
+  private respond(request: VegaPreviewRequest, value: Pick<VegaPreviewResponse, "status" | "result" | "error">): void {
     if (this.disposed) return;
     this.port.postMessage({
       protocol: VEGA_PREVIEW_PROTOCOL,

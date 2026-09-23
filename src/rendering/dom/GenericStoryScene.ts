@@ -14,23 +14,17 @@ import type {
 import { advCharacterExpressions, advCharacterMotions } from "../../types/AdvRuntime";
 import { lerp, resolveEase, tween } from "../../core/easing";
 import { StaticPortraitModel } from "../portrait/StaticPortraitModel";
-import type {
-  StoryCharacterModel,
-  StoryCharacterPresentation,
-  StoryCharacterProvider,
-} from "../StoryCharacterModel";
+import type { StoryCharacterModel, StoryCharacterPresentation, StoryCharacterProvider } from "../StoryCharacterModel";
 import type {
   StoryCameraState,
   StoryCharacterHandle,
+  StoryCharacterPreloadRequest,
   StoryPoint2,
   StoryPoint3,
   StoryResourceResolver,
   StorySceneBackend,
 } from "../StorySceneBackend";
-import {
-  createAdvDotweenShakePath,
-  sampleAdvDotweenShake,
-} from "../neutral/AdvDotweenShake";
+import { createAdvDotweenShakePath, sampleAdvDotweenShake } from "../neutral/AdvDotweenShake";
 import {
   STORY_SCENE_SEEK_SNAPSHOT_VERSION,
   type AdvStorySceneSeekSnapshot,
@@ -39,6 +33,9 @@ import {
 
 interface CharacterRecord extends StoryCharacterHandle {
   readonly identity: string;
+  readonly controllerIdentity: string;
+  readonly provider: StoryCharacterProvider | null;
+  readonly compilationOnly: boolean;
   readonly model: StoryCharacterModel;
   readonly host: HTMLDivElement;
   readonly sourceEntry: Record<string, unknown>;
@@ -70,6 +67,9 @@ interface CharacterRecord extends StoryCharacterHandle {
 interface PendingCharacterRecord extends StoryCharacterHandle {
   readonly token: number;
   readonly identity: string;
+  controllerIdentity: string;
+  readonly provider: StoryCharacterProvider | null;
+  readonly compilationOnly: boolean;
   alpha: number;
   brightness: number;
   paused: boolean;
@@ -100,6 +100,25 @@ interface MediaLease {
   release(): void;
 }
 
+interface PreloadedVideo {
+  readonly element: HTMLVideoElement;
+  readonly lease: MediaLease;
+}
+
+interface PreloadedImage {
+  readonly template: HTMLImageElement;
+  readonly lease: MediaLease;
+}
+
+interface PreloadedCharacter {
+  readonly identity: string;
+  readonly target: string;
+  readonly provider: StoryCharacterProvider;
+  readonly sourceEntry: Record<string, unknown>;
+  readonly model: StoryCharacterModel;
+  readonly host: HTMLDivElement;
+}
+
 interface CommandEffectRecord {
   readonly key: string;
   readonly asset: AdvEffectEntry | null;
@@ -121,6 +140,7 @@ interface GenericDomSeekState {
     Record<
       string,
       {
+        readonly controllerIdentity?: string;
         readonly blurIntensity: number;
         readonly currentMotionName: string;
         readonly currentMotionFadeInSeconds: number;
@@ -205,6 +225,26 @@ const abortError = (): Error => {
   const error = new Error("Story scene transition was aborted");
   error.name = "AbortError";
   return error;
+};
+
+const waitForPromiseWithAbort = <T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> => {
+  if (!signal) return pending;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", aborted);
+      callback();
+    };
+    const aborted = (): void => finish(() => reject(abortError()));
+    signal.addEventListener("abort", aborted, { once: true });
+    pending.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 };
 
 const wait = (seconds: number, signal?: AbortSignal): Promise<void> => {
@@ -322,9 +362,11 @@ const acquireGenericSceneStyles = (document: Document): (() => void) => {
     return releaseGenericSceneStyles(document, existing.sheet);
   }
   try {
-    const realm = document.defaultView as (Window & {
-      CSSStyleSheet?: CSSStyleSheetConstructor;
-    }) | null;
+    const realm = document.defaultView as
+      | (Window & {
+          CSSStyleSheet?: CSSStyleSheetConstructor;
+        })
+      | null;
     const constructor =
       realm?.CSSStyleSheet ??
       (typeof globalThis.CSSStyleSheet === "function"
@@ -343,10 +385,7 @@ const acquireGenericSceneStyles = (document: Document): (() => void) => {
   }
 };
 
-const releaseGenericSceneStyles = (
-  document: Document,
-  sheet: CSSStyleSheet,
-): (() => void) => {
+const releaseGenericSceneStyles = (document: Document, sheet: CSSStyleSheet): (() => void) => {
   let released = false;
   return () => {
     if (released) return;
@@ -356,9 +395,7 @@ const releaseGenericSceneStyles = (
     shared.references -= 1;
     if (shared.references > 0) return;
     try {
-      document.adoptedStyleSheets = Array.from(document.adoptedStyleSheets).filter(
-        (candidate) => candidate !== sheet,
-      );
+      document.adoptedStyleSheets = Array.from(document.adoptedStyleSheets).filter((candidate) => candidate !== sheet);
     } catch {
       // The owning realm may already be detached.
     }
@@ -414,6 +451,13 @@ export class GenericStoryScene implements StorySceneBackend {
   private stillImage: HTMLImageElement | null = null;
   private frameImage: HTMLImageElement | null = null;
   private video: HTMLVideoElement | null = null;
+  private readonly preloadedImages = new Map<string, PreloadedImage>();
+  private readonly imagePreloadPromises = new Map<string, Promise<HTMLImageElement>>();
+  private readonly preloadedVideos = new Map<string, PreloadedVideo>();
+  private readonly videoPreloadPromises = new Map<string, Promise<void>>();
+  private readonly episodeVideoSources = new Set<string>();
+  private readonly preloadedCharacters = new Map<string, PreloadedCharacter>();
+  private readonly characterPreloadPromises = new Map<string, Promise<PreloadedCharacter>>();
   private backgroundLease: MediaLease | null = null;
   private stillLease: MediaLease | null = null;
   private frameLease: MediaLease | null = null;
@@ -425,6 +469,7 @@ export class GenericStoryScene implements StorySceneBackend {
   private frameName = "";
   private stage: unknown = null;
   private deterministicReplay = false;
+  private seekIndexCompilationActive = false;
   private playbackSpeed = 1;
   private captureSequence = 0;
   private commandPostEffect: unknown = null;
@@ -439,6 +484,7 @@ export class GenericStoryScene implements StorySceneBackend {
   private commandPostGeneration = 0;
   private readonly characters = new Map<string, CharacterRecord>();
   private readonly pendingCharacters = new Map<string, PendingCharacterRecord>();
+  private readonly disposedCharacterModels = new WeakSet<StoryCharacterModel>();
   private characterLoadSequence = 0;
   private readonly characterAssetIndices = new Map<string, number>();
   private readonly commandEffects = new Map<string, CommandEffectRecord>();
@@ -446,10 +492,7 @@ export class GenericStoryScene implements StorySceneBackend {
   private readonly pendingLoads = new Set<Promise<unknown>>();
   private characterPriorityOrder = [4, 0, 3, 1, 2];
   private readonly cameraTweenVersions = new Map<keyof StoryCameraState, number>();
-  private readonly commandShakeControllers = new Map<
-    "background" | "character" | "still" | "talk",
-    AbortController
-  >();
+  private readonly commandShakeControllers = new Map<"background" | "character" | "still" | "talk", AbortController>();
   private backgroundShake: StoryPoint2 = { x: 0, y: 0 };
   private characterShake: StoryPoint2 = { x: 0, y: 0 };
   private cameraShake: StoryPoint2 = { x: 0, y: 0 };
@@ -553,9 +596,17 @@ export class GenericStoryScene implements StorySceneBackend {
     this.ruleTransitionActive = false;
     this.ruleTransitionGeneration += 1;
     this.commandPostGeneration += 1;
-    for (const character of this.characters.values()) await character.model.dispose();
+    await Promise.allSettled([...this.characterPreloadPromises.values()]);
+    await Promise.allSettled(
+      [...this.characters.values()].map((character) => this.disposeCharacterModel(character.model)),
+    );
     this.characters.clear();
     this.pendingCharacters.clear();
+    await Promise.allSettled(
+      [...this.preloadedCharacters.values()].map((character) => this.disposeCharacterModel(character.model)),
+    );
+    this.preloadedCharacters.clear();
+    this.characterPreloadPromises.clear();
     this.releaseLease("background");
     this.releaseLease("still");
     this.releaseLease("frame");
@@ -565,6 +616,21 @@ export class GenericStoryScene implements StorySceneBackend {
       this.video.removeAttribute("src");
       this.video.load();
     }
+    for (const prepared of this.preloadedVideos.values()) {
+      prepared.element.pause();
+      prepared.element.removeAttribute("src");
+      prepared.element.load();
+      prepared.lease.release();
+    }
+    this.preloadedVideos.clear();
+    this.videoPreloadPromises.clear();
+    this.episodeVideoSources.clear();
+    for (const prepared of this.preloadedImages.values()) {
+      prepared.template.removeAttribute("src");
+      prepared.lease.release();
+    }
+    this.preloadedImages.clear();
+    this.imagePreloadPromises.clear();
     this.releaseStyles?.();
     this.releaseStyles = null;
     this.root?.remove();
@@ -607,12 +673,156 @@ export class GenericStoryScene implements StorySceneBackend {
     for (const effect of this.commandEffects.values()) this.applyCommandEffectAnimation(effect);
   }
 
-  async preloadTexture(url: string, signal?: AbortSignal): Promise<Uint8Array> {
-    return this.track(this.resources.load(url, signal ?? this.sceneController.signal));
+  async preloadTexture(url: string, signal?: AbortSignal): Promise<unknown> {
+    return this.preloadDomImage(url, signal);
   }
 
-  loadTexture(url: string, signal?: AbortSignal): Promise<Uint8Array> {
+  private async preloadDomImage(url: string, signal?: AbortSignal): Promise<HTMLImageElement> {
+    if (signal?.aborted || this.sceneController.signal.aborted) {
+      throw abortError();
+    }
+    const resident = this.preloadedImages.get(url);
+    if (resident) {
+      return waitForPromiseWithAbort(Promise.resolve(resident.template), signal);
+    }
+    const pending = this.imagePreloadPromises.get(url);
+    if (pending) return waitForPromiseWithAbort(pending, signal);
+    const requestSignal = this.sceneController.signal;
+    const preload = (async () => {
+      const lease = await this.resources.resolveRenderable(url, requestSignal);
+      const image = document.createElement("img");
+      image.alt = "";
+      image.decoding = "async";
+      image.draggable = false;
+      image.src = lease.url;
+      try {
+        await this.waitForMedia(image, requestSignal);
+        if (typeof image.decode === "function") await image.decode();
+        if (this.destroyed || requestSignal.aborted) throw abortError();
+        const existing = this.preloadedImages.get(url);
+        if (existing) {
+          image.removeAttribute("src");
+          lease.release();
+          return existing.template;
+        }
+        this.preloadedImages.set(url, { template: image, lease });
+        return image;
+      } catch (error) {
+        image.removeAttribute("src");
+        lease.release();
+        throw error;
+      }
+    })().finally(() => {
+      if (this.imagePreloadPromises.get(url) === preload) {
+        this.imagePreloadPromises.delete(url);
+      }
+    });
+    this.imagePreloadPromises.set(url, preload);
+    this.track(preload);
+    return waitForPromiseWithAbort(preload, signal);
+  }
+
+  loadTexture(url: string, signal?: AbortSignal): Promise<unknown> {
     return this.preloadTexture(url, signal);
+  }
+
+  async preloadCharacter(request: StoryCharacterPreloadRequest, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted || this.sceneController.signal.aborted) {
+      throw abortError();
+    }
+    const cmd = request.command;
+    const target = firstString(cmd.targetName, cmd.targets?.[0]?.target, cmd.characterKey);
+    if (!target) return false;
+    const entry = record(cmd.characterModel);
+    const source = imageSource(entry);
+    const provider = this.characterProviders.find((candidate) =>
+      candidate.supports(entry as AdvCommand["characterModel"] & Record<string, unknown>),
+    );
+    if (!provider) {
+      if (!source) return false;
+      await this.preloadDomImage(source, signal);
+      return true;
+    }
+    const identity = firstString(
+      record(cmd).controllerIdentity,
+      `${target}\u0000${Math.trunc(finite(cmd.targetAssetIndex))}`,
+    );
+    const resident = this.preloadedCharacters.get(identity);
+    if (resident) {
+      if (resident.model.isOperational === false) {
+        throw new Error(`Character provider ${resident.provider.id} has a non-operational preload for ${target}`);
+      }
+      return true;
+    }
+    const active = this.characterPreloadPromises.get(identity);
+    if (active) {
+      const prepared = await waitForPromiseWithAbort(active, signal);
+      return prepared.model.isOperational !== false;
+    }
+
+    const requestSignal = this.sceneController.signal;
+    let preload!: Promise<PreloadedCharacter>;
+    preload = (async () => {
+      let model: StoryCharacterModel | null = null;
+      try {
+        model = await provider.create({
+          target,
+          entry,
+          resources: this.resources,
+          signal: requestSignal,
+        });
+        if (this.destroyed || requestSignal.aborted) throw abortError();
+        if (!model?.element || model.isOperational === false) {
+          throw new Error(`Character provider ${provider.id} failed to prepare ${target}`);
+        }
+        model.setPlaybackSpeed(this.playbackSpeed);
+        for (const motion of new Set(request.motions.map((name) => firstString(name)).filter(Boolean))) {
+          const prepared = await model.prepareMotion?.(motion);
+          if (prepared === false) {
+            throw new Error(`Character provider ${provider.id} could not prepare motion ${motion} for ${target}`);
+          }
+          if (requestSignal.aborted) throw abortError();
+        }
+        for (const expression of new Set(request.expressions.map((name) => firstString(name)).filter(Boolean))) {
+          const prepared = await model.prepareExpression?.(expression);
+          if (prepared === false) {
+            throw new Error(
+              `Character provider ${provider.id} could not prepare expression ${expression} for ${target}`,
+            );
+          }
+          if (requestSignal.aborted) throw abortError();
+        }
+        await model.prepareFirstFrame?.();
+        if (requestSignal.aborted) throw abortError();
+        model.setPaused(true);
+        const prepared: PreloadedCharacter = {
+          identity,
+          target,
+          provider,
+          sourceEntry: entry,
+          model,
+          host: this.createCharacterHost(target, provider.id, model),
+        };
+        const raced = this.preloadedCharacters.get(identity);
+        if (raced) {
+          await this.disposeCharacterModel(model);
+          return raced;
+        }
+        this.preloadedCharacters.set(identity, prepared);
+        return prepared;
+      } catch (error) {
+        await this.disposeCharacterModel(model);
+        throw error;
+      }
+    })().finally(() => {
+      if (this.characterPreloadPromises.get(identity) === preload) {
+        this.characterPreloadPromises.delete(identity);
+      }
+    });
+    this.characterPreloadPromises.set(identity, preload);
+    this.track(preload);
+    const prepared = await waitForPromiseWithAbort(preload, signal);
+    return prepared.model.isOperational !== false;
   }
 
   stagePoint(positionType: unknown): StoryPoint3 {
@@ -664,15 +874,17 @@ export class GenericStoryScene implements StorySceneBackend {
     const character = this.characters.get(target);
     const pending = this.pendingCharacters.get(target);
     return Boolean(
-      (character &&
-        character.alpha > 0 &&
-        (!expectedIdentity || character.identity === expectedIdentity)) ||
-        (pending && pending.alpha > 0 && (!expectedIdentity || pending.identity === expectedIdentity)),
+      (character && character.alpha > 0 && (!expectedIdentity || character.identity === expectedIdentity)) ||
+      (pending && pending.alpha > 0 && (!expectedIdentity || pending.identity === expectedIdentity)),
     );
   }
 
   selectCharacterAssetIndex(target: string, assetIndex: number): void {
     this.characterAssetIndices.set(target, Math.trunc(finite(assetIndex)));
+  }
+
+  setSeekIndexCompilationActive(active: boolean): void {
+    this.seekIndexCompilationActive = Boolean(active);
   }
 
   async placeCharacter(cmd: AdvCommand, positionType: number, duration = 0): Promise<void> {
@@ -693,10 +905,14 @@ export class GenericStoryScene implements StorySceneBackend {
       provider ? `${provider.id}:${target}:${this.characterAssetIndices.get(target) ?? 0}` : source,
       `${target}:${this.characterAssetIndices.get(target) ?? 0}`,
     );
+    let controllerIdentity = firstString(
+      record(cmd).controllerIdentity,
+      `${target}\u0000${Math.trunc(finite(cmd.targetAssetIndex))}`,
+    );
     const previous = this.characters.get(target);
     if (previous && previous.identity !== identity) {
-      await previous.model.dispose();
       this.characters.delete(target);
+      await this.releaseCharacter(previous);
     }
     let character = this.characters.get(target);
     let loadedFromPending = false;
@@ -707,6 +923,9 @@ export class GenericStoryScene implements StorySceneBackend {
         token,
         positionType,
         identity,
+        controllerIdentity,
+        provider: provider ?? null,
+        compilationOnly: this.seekIndexCompilationActive,
         alpha: 1,
         brightness: 1,
         paused: false,
@@ -733,47 +952,88 @@ export class GenericStoryScene implements StorySceneBackend {
       };
       this.pendingCharacters.set(target, pending);
       let model: StoryCharacterModel;
+      let host: HTMLDivElement | null = null;
       try {
-        model = provider
-          ? await provider.create({
-              target,
-              entry,
-              resources: this.resources,
-              signal: this.sceneController.signal,
-            })
-          : await StaticPortraitModel.create({
-              imageUrl: source,
-              resources: this.resources,
-              signal: this.sceneController.signal,
-              pivot: record(record(entry.runtime).pivot),
-              alt: target,
-            });
+        let prepared = this.seekIndexCompilationActive ? undefined : this.preloadedCharacters.get(controllerIdentity);
+        if (!prepared && !this.seekIndexCompilationActive && provider) {
+          const matching = [...this.preloadedCharacters.entries()].find(
+            ([, candidate]) =>
+              candidate.target === target && candidate.provider === provider && candidate.sourceEntry === entry,
+          );
+          if (matching) {
+            controllerIdentity = matching[0];
+            pending.controllerIdentity = controllerIdentity;
+            prepared = matching[1];
+          }
+        }
+        const activePreload = prepared
+          ? undefined
+          : this.seekIndexCompilationActive
+            ? undefined
+            : this.characterPreloadPromises.get(controllerIdentity);
+        if (activePreload) {
+          try {
+            prepared = await waitForPromiseWithAbort(activePreload, this.sceneController.signal);
+          } catch (error) {
+            if (this.sceneController.signal.aborted) throw error;
+          }
+        }
+        if (
+          prepared &&
+          (prepared.identity !== controllerIdentity ||
+            prepared.target !== target ||
+            prepared.provider !== provider ||
+            prepared.sourceEntry !== entry ||
+            prepared.model.isOperational === false)
+        ) {
+          this.preloadedCharacters.delete(controllerIdentity);
+          await this.disposeCharacterModel(prepared.model);
+          prepared = undefined;
+        }
+        if (prepared) {
+          this.preloadedCharacters.delete(controllerIdentity);
+          model = prepared.model;
+          host = prepared.host;
+        } else {
+          model = provider
+            ? await provider.create({
+                target,
+                entry,
+                resources: this.resources,
+                signal: this.sceneController.signal,
+              })
+            : await StaticPortraitModel.create({
+                imageUrl: source,
+                resources: this.resources,
+                signal: this.sceneController.signal,
+                pivot: record(record(entry.runtime).pivot),
+                alt: target,
+                decodedTemplate: this.preloadedImages.get(source)?.template,
+              });
+        }
       } catch (error) {
         if (this.pendingCharacters.get(target)?.token === token) this.pendingCharacters.delete(target);
         throw error;
       }
       const committed = this.pendingCharacters.get(target);
       if (!committed || committed.token !== token || this.destroyed) {
-        await model.dispose();
+        await this.disposeCharacterModel(model);
         return;
       }
       if (!model?.element || model.isOperational === false) {
-        await model?.dispose?.();
+        await this.disposeCharacterModel(model);
         this.pendingCharacters.delete(target);
         throw new Error(`Character provider ${provider?.id ?? "static-portrait"} failed to create ${target}`);
       }
-      const host = document.createElement("div");
-      host.className = "vega-stage__character";
-      host.dataset.vegaCharacter = target;
-      host.dataset.vegaCharacterProvider = provider?.id ?? "vega.static-portrait";
-      host.style.cssText =
-        "position:absolute;bottom:0;height:96%;max-width:70%;opacity:0;filter:brightness(1);transform:translateX(-50%);transform-origin:center bottom;will-change:transform,opacity,filter;";
-      host.append(model.element);
+      host ??= this.createCharacterHost(target, provider?.id ?? "vega.static-portrait", model);
       this.characterLayer.append(host);
       character = {
         target,
         positionType: committed.positionType,
         identity,
+        controllerIdentity: committed.controllerIdentity,
+        provider: committed.provider,
+        compilationOnly: committed.compilationOnly,
         model,
         host,
         sourceEntry: entry,
@@ -804,10 +1064,7 @@ export class GenericStoryScene implements StorySceneBackend {
       character.model.setPlaybackSpeed(this.playbackSpeed);
       if (!character.paused) {
         if (character.currentMotionName) {
-          void character.model.playMotion?.(
-            character.currentMotionName,
-            character.currentMotionFadeInSeconds,
-          );
+          void character.model.playMotion?.(character.currentMotionName, character.currentMotionFadeInSeconds);
         }
         if (character.currentExpressionName) {
           void character.model.playExpression?.(
@@ -851,12 +1108,7 @@ export class GenericStoryScene implements StorySceneBackend {
     this.applyCharacterPortraitTransform(character);
     this.applyCharacterPresentation(character);
     this.applyCharacterPriorities();
-    await setTransition(
-      character.host,
-      "opacity",
-      String(character.alpha),
-      this.deterministicReplay ? 0 : duration,
-    );
+    await setTransition(character.host, "opacity", String(character.alpha), this.deterministicReplay ? 0 : duration);
   }
 
   async removeCharacter(target: string, duration = 0): Promise<boolean> {
@@ -888,11 +1140,7 @@ export class GenericStoryScene implements StorySceneBackend {
     await setTransition(character.host, "opacity", String(character.alpha), this.deterministicReplay ? 0 : duration);
   }
 
-  async moveCharacter(
-    positionType: number,
-    offset: Partial<StoryPoint3>,
-    duration = 0,
-  ): Promise<void> {
+  async moveCharacter(positionType: number, offset: Partial<StoryPoint3>, duration = 0): Promise<void> {
     const selected = [...this.characters.values(), ...this.pendingCharacters.values()].filter(
       (character) => character.positionType === positionType,
     );
@@ -964,8 +1212,7 @@ export class GenericStoryScene implements StorySceneBackend {
     const visualDuration = this.deterministicReplay ? 0 : duration;
     character.host.style.transition = visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
     if (typeof character.model.applyPresentation !== "function") {
-      character.model.element.style.transition =
-        visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
+      character.model.element.style.transition = visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
     }
     this.applyCharacterTransform(character);
     this.applyCharacterPortraitTransform(character);
@@ -1016,8 +1263,7 @@ export class GenericStoryScene implements StorySceneBackend {
     character.host.removeAttribute("data-look-target");
     const visualDuration = this.deterministicReplay ? 0 : duration;
     if (typeof character.model.applyPresentation !== "function") {
-      character.model.element.style.transition =
-        visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
+      character.model.element.style.transition = visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
     }
     this.applyCharacterPortraitTransform(character);
     this.applyCharacterPresentation(character);
@@ -1035,7 +1281,7 @@ export class GenericStoryScene implements StorySceneBackend {
     const pending = this.pendingCharacters.get(target);
     if (!character && !pending) return;
     const targetCharacter = lookTargetName
-      ? this.characters.get(lookTargetName) ?? this.pendingCharacters.get(lookTargetName)
+      ? (this.characters.get(lookTargetName) ?? this.pendingCharacters.get(lookTargetName))
       : null;
     const source = character ?? pending!;
     const targetPosition = targetCharacter?.positionType || finite(positionType, source.positionType);
@@ -1060,8 +1306,7 @@ export class GenericStoryScene implements StorySceneBackend {
     }
     const visualDuration = this.deterministicReplay ? 0 : duration;
     if (typeof character.model.applyPresentation !== "function") {
-      character.model.element.style.transition =
-        visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
+      character.model.element.style.transition = visualDuration > 0 ? `transform ${visualDuration}s ease` : "none";
     }
     this.applyCharacterPortraitTransform(character);
     this.applyCharacterPresentation(character);
@@ -1218,20 +1463,17 @@ export class GenericStoryScene implements StorySceneBackend {
       this.releaseLease("background");
       return true;
     }
-    const lease = await this.resources.resolveRenderable(source, signal);
-    const image = document.createElement("img");
+    const image = await this.createPreloadedImage(source, signal);
     image.className = "vega-stage__background-image";
     image.alt = "";
     image.draggable = false;
     image.style.cssText =
       "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;filter:brightness(1);will-change:opacity,filter,transform;";
-    image.src = lease.url;
     await this.waitForMedia(image, signal);
     this.backgroundLayer.append(image);
     const previous = this.backgroundImage;
     this.backgroundImage = image;
     this.releaseLease("background");
-    this.backgroundLease = lease;
     this.background = background ?? null;
     this.stage = background?.stage ?? this.stage;
     this.applyBackgroundFilter();
@@ -1292,21 +1534,18 @@ export class GenericStoryScene implements StorySceneBackend {
       await this.clearStill(duration);
       return;
     }
-    const lease = await this.resources.resolveRenderable(source);
-    const image = document.createElement("img");
+    const image = await this.createPreloadedImage(source, this.sceneController.signal);
     image.className = "vega-stage__still-image";
     image.alt = "";
     image.draggable = false;
     image.style.cssText =
       "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;z-index:1;will-change:opacity,transform;";
-    image.src = lease.url;
     await this.waitForMedia(image);
     this.stillLayer.append(image);
     if (this.stillShade) this.stillLayer.append(this.stillShade);
     this.stillImage?.remove();
     this.stillImage = image;
     this.releaseLease("still");
-    this.stillLease = lease;
     this.still = still ?? null;
     await setTransition(image, "opacity", String(clamp(alpha)), this.deterministicReplay ? 0 : duration);
   }
@@ -1320,14 +1559,13 @@ export class GenericStoryScene implements StorySceneBackend {
   ): Promise<void> {
     if (this.stillImage) return this.clearStill(duration);
     this.stillAnimationIndex = Math.max(0, Math.trunc(finite(animationIndex)));
-    return Promise.all([
-      this.setStill(still, alpha, duration),
-      this.setStillViewAlpha(1, overlayAlpha, duration),
-    ]).then(() => {
-      if (!this.stillImage) return;
-      this.stillImage.dataset.animationIndex = String(this.stillAnimationIndex);
-      this.applyStillAnimation(this.stillImage, this.stillAnimationIndex, duration);
-    });
+    return Promise.all([this.setStill(still, alpha, duration), this.setStillViewAlpha(1, overlayAlpha, duration)]).then(
+      () => {
+        if (!this.stillImage) return;
+        this.stillImage.dataset.animationIndex = String(this.stillAnimationIndex);
+        this.applyStillAnimation(this.stillImage, this.stillAnimationIndex, duration);
+      },
+    );
   }
 
   async fadeStill(alpha: number, duration = 0): Promise<void> {
@@ -1338,9 +1576,7 @@ export class GenericStoryScene implements StorySceneBackend {
   async clearStill(duration = 0): Promise<void> {
     const image = this.stillImage;
     await Promise.all([
-      image
-        ? setTransition(image, "opacity", "0", this.deterministicReplay ? 0 : duration)
-        : Promise.resolve(),
+      image ? setTransition(image, "opacity", "0", this.deterministicReplay ? 0 : duration) : Promise.resolve(),
       this.setStillViewAlpha(0, 0, duration),
     ]);
     image?.remove();
@@ -1363,24 +1599,16 @@ export class GenericStoryScene implements StorySceneBackend {
       this.setFrameOpacity(alpha, 0, key);
       return;
     }
-    const lease = await this.resources.resolveRenderable(source);
-    const image = document.createElement("img");
+    const image = await this.createPreloadedImage(source, this.sceneController.signal);
     image.className = "vega-stage__frame-image";
     image.alt = "";
     image.draggable = false;
     image.style.cssText = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;";
-    image.src = lease.url;
-    try {
-      await this.waitForMedia(image);
-    } catch (error) {
-      lease.release();
-      throw error;
-    }
+    await this.waitForMedia(image);
     this.frameLayer.append(image);
     this.frameImage?.remove();
     this.frameImage = image;
     this.releaseLease("frame");
-    this.frameLease = lease;
     this.setFrameOpacity(alpha, 0, key);
   }
 
@@ -1439,8 +1667,7 @@ export class GenericStoryScene implements StorySceneBackend {
       : `repeating-linear-gradient(${angle}deg, transparent 0 12px, rgb(255 255 255 / .08) 12px 13px), linear-gradient(${tone}, ${tone})`;
     cover.style.opacity = "1";
     cover.style.clipPath = reveal ? "inset(0 100% 0 0)" : "inset(0)";
-    cover.style.transition =
-      visualDuration > 0 ? `clip-path ${visualDuration}s cubic-bezier(.32,.72,0,1)` : "none";
+    cover.style.transition = visualDuration > 0 ? `clip-path ${visualDuration}s cubic-bezier(.32,.72,0,1)` : "none";
     void cover.offsetWidth;
     cover.style.clipPath = reveal ? "inset(0)" : "inset(0 0 0 100%)";
     try {
@@ -1455,6 +1682,21 @@ export class GenericStoryScene implements StorySceneBackend {
     }
   }
 
+  setVideoLayout(layout?: import("../../types/AdvRuntime").StoryVideoLayout): void {
+    this.state.video.layout = layout;
+    if (!this.video) return;
+    const viewport = layout?.viewport ?? [0, 0, 1, 1];
+    Object.assign(this.video.style, {
+      inset: "auto",
+      left: `${finite(viewport[0]) * 100}%`,
+      top: `${finite(viewport[1]) * 100}%`,
+      width: `${Math.max(0, finite(viewport[2], 1)) * 100}%`,
+      height: `${Math.max(0, finite(viewport[3], 1)) * 100}%`,
+      objectFit: layout?.fit === "stretch" ? "fill" : (layout?.fit ?? "cover"),
+      backgroundColor: layout?.background ?? "transparent",
+    });
+  }
+
   async showVideo(
     video: AdvVideoEntry | string,
     fadeIn = 0,
@@ -1467,26 +1709,33 @@ export class GenericStoryScene implements StorySceneBackend {
     const source = backgroundSource(video);
     if (!source) return;
     await this.hideVideo(0);
-    const lease = await this.resources.resolveRenderable(source, signal);
-    const element = document.createElement("video");
+    const prepared = this.preloadedVideos.get(source);
+    this.preloadedVideos.delete(source);
+    const lease = prepared?.lease || (await this.resources.resolveRenderable(source, signal));
+    const element = prepared?.element || document.createElement("video");
     element.className = "vega-stage__video-element";
     element.playsInline = true;
     element.preload = "auto";
+    element.muted = false;
+    element.volume = 1;
+    element.dataset.vegaSource = source;
     element.style.cssText =
       "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;pointer-events:none;";
-    element.src = lease.url;
+    if (!prepared) element.src = lease.url;
     element.playbackRate = Math.max(0.01, finite(playbackRate, 1));
     this.videoLayer.append(element);
     this.video = element;
+    this.setVideoLayout(this.state.video.layout);
     this.videoLease = lease;
-    await this.waitForVideoMetadata(element, signal);
+    await this.waitForVideoReady(element, HTMLMediaElement.HAVE_FUTURE_DATA, "canplay", signal);
     if (startRatio > 0 && Number.isFinite(element.duration)) element.currentTime = element.duration * clamp(startRatio);
     await element.play();
     await setTransition(element, "opacity", String(clamp(alpha)), this.deterministicReplay ? 0 : fadeIn, signal);
   }
 
   async fadeVideo(alpha: number, duration = 0): Promise<void> {
-    if (this.video) await setTransition(this.video, "opacity", String(clamp(alpha)), this.deterministicReplay ? 0 : duration);
+    if (this.video)
+      await setTransition(this.video, "opacity", String(clamp(alpha)), this.deterministicReplay ? 0 : duration);
   }
 
   async hideVideo(fadeOut = 0): Promise<void> {
@@ -1495,10 +1744,76 @@ export class GenericStoryScene implements StorySceneBackend {
     await setTransition(video, "opacity", "0", this.deterministicReplay ? 0 : fadeOut);
     video.pause();
     video.remove();
-    video.removeAttribute("src");
-    video.load();
+    const source = video.dataset.vegaSource || "";
+    const lease = this.videoLease;
     this.video = null;
-    this.releaseLease("video");
+    this.videoLease = null;
+    if (source && lease && this.episodeVideoSources.has(source)) {
+      try {
+        video.currentTime = 0;
+      } catch {}
+      video.muted = true;
+      video.volume = 0;
+      this.preloadedVideos.set(source, { element: video, lease });
+    } else {
+      video.removeAttribute("src");
+      video.load();
+      lease?.release();
+    }
+  }
+
+  async preloadVideo(source: string, signal?: AbortSignal): Promise<void> {
+    if (!source) return;
+    if (signal?.aborted || this.destroyed || this.sceneController.signal.aborted) {
+      throw abortError();
+    }
+    this.episodeVideoSources.add(source);
+    const resident = this.preloadedVideos.get(source);
+    if (resident && resident.element.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+      return waitForPromiseWithAbort(Promise.resolve(), signal);
+    }
+    const pending = this.videoPreloadPromises.get(source);
+    if (pending) return waitForPromiseWithAbort(pending, signal);
+    if (resident) {
+      resident.element.removeAttribute("src");
+      resident.element.load();
+      resident.lease.release();
+      this.preloadedVideos.delete(source);
+    }
+    const requestSignal = this.sceneController.signal;
+    const preload = (async () => {
+      const lease = await this.resources.resolveRenderable(source, requestSignal);
+      const element = document.createElement("video");
+      element.src = lease.url;
+      element.dataset.vegaSource = source;
+      element.playsInline = true;
+      element.preload = "auto";
+      element.autoplay = false;
+      element.controls = false;
+      element.muted = true;
+      element.volume = 0;
+      this.preloadedVideos.set(source, { element, lease });
+      try {
+        element.load();
+        await this.waitForVideoReady(element, HTMLMediaElement.HAVE_CURRENT_DATA, "loadeddata", requestSignal);
+        await this.waitForVideoReady(element, HTMLMediaElement.HAVE_FUTURE_DATA, "canplay", requestSignal);
+      } catch (error) {
+        if (this.preloadedVideos.get(source)?.element === element) {
+          this.preloadedVideos.delete(source);
+        }
+        element.removeAttribute("src");
+        element.load();
+        lease.release();
+        throw error;
+      }
+    })().finally(() => {
+      if (this.videoPreloadPromises.get(source) === preload) {
+        this.videoPreloadPromises.delete(source);
+      }
+    });
+    this.videoPreloadPromises.set(source, preload);
+    this.track(preload);
+    await waitForPromiseWithAbort(preload, signal);
   }
 
   skipVideo(): boolean {
@@ -1656,12 +1971,7 @@ export class GenericStoryScene implements StorySceneBackend {
     this.renderStageParticles();
   }
 
-  setRendererCharacterBrightness(
-    target: string,
-    value: number,
-    duration = 0,
-    _positionType?: number,
-  ): Promise<void> {
+  setRendererCharacterBrightness(target: string, value: number, duration = 0, _positionType?: number): Promise<void> {
     return this.setBrightness(target, value, duration);
   }
 
@@ -1854,8 +2164,7 @@ export class GenericStoryScene implements StorySceneBackend {
     const focusData = this.closestFocusDataByZoomRatio(target);
     const fromBlur = this.backgroundBlurIntensity;
     const targetBlur =
-      clamp(focusData?.backgroundBlurIntensity) +
-      (backgroundBlurOffset == null ? 0 : finite(backgroundBlurOffset));
+      clamp(focusData?.backgroundBlurIntensity) + (backgroundBlurOffset == null ? 0 : finite(backgroundBlurOffset));
     const ownership = this.beginCameraTween(["zoomRatio"]);
     await this.runSceneTween({
       duration,
@@ -1985,33 +2294,16 @@ export class GenericStoryScene implements StorySceneBackend {
     const targetRotation = finite(options.rotationY);
     const offset = record(options.cameraOffset);
     const targetOffset = { x: finite(offset.x), y: finite(offset.y) };
-    const ownership = this.beginCameraTween([
-      "rotationY",
-      "stageRotationY",
-      "panOffsetX",
-      "panOffsetY",
-    ]);
+    const ownership = this.beginCameraTween(["rotationY", "stageRotationY", "panOffsetX", "panOffsetY"]);
     await this.runSceneTween({
       duration: finite(options.duration),
       ease: options.ease,
       signal: options.signal as AbortSignal | undefined,
       update: (progress) => {
         this.writeCameraTween(ownership, "rotationY", lerp(from.rotationY, targetRotation, progress));
-        this.writeCameraTween(
-          ownership,
-          "stageRotationY",
-          lerp(from.stageRotationY, targetRotation, progress),
-        );
-        this.writeCameraTween(
-          ownership,
-          "panOffsetX",
-          lerp(from.panOffsetX, targetOffset.x, progress),
-        );
-        this.writeCameraTween(
-          ownership,
-          "panOffsetY",
-          lerp(from.panOffsetY, targetOffset.y, progress),
-        );
+        this.writeCameraTween(ownership, "stageRotationY", lerp(from.stageRotationY, targetRotation, progress));
+        this.writeCameraTween(ownership, "panOffsetX", lerp(from.panOffsetX, targetOffset.x, progress));
+        this.writeCameraTween(ownership, "panOffsetY", lerp(from.panOffsetY, targetOffset.y, progress));
         this.applyCameraTransform();
       },
     });
@@ -2164,6 +2456,8 @@ export class GenericStoryScene implements StorySceneBackend {
     if (!this.seekSnapshotSafety().safe) return null;
     return {
       version: STORY_SCENE_SEEK_SNAPSHOT_VERSION,
+      pluginState: JSON.parse(JSON.stringify(this.state.pluginState ?? {})),
+      ...(this.state.video.layout ? { videoLayout: JSON.parse(JSON.stringify(this.state.video.layout)) } : {}),
       background: this.background,
       still: this.still,
       frame: this.frame,
@@ -2201,6 +2495,7 @@ export class GenericStoryScene implements StorySceneBackend {
           [...this.characters.values()].map((character) => [
             character.target,
             {
+              controllerIdentity: character.controllerIdentity,
               blurIntensity: character.blurIntensity,
               currentMotionName: character.currentMotionName,
               currentMotionFadeInSeconds: character.currentMotionFadeInSeconds,
@@ -2224,9 +2519,12 @@ export class GenericStoryScene implements StorySceneBackend {
     this.resetStageCapture();
     this.stopCommandEffects();
     this.resetShakeState();
+    this.stopAllSpeaking();
     this.ruleTransitionActive = false;
     this.clearRuleVisual();
     this.stage = snapshot.stage;
+    this.state.pluginState = JSON.parse(JSON.stringify(snapshot.pluginState ?? {}));
+    this.setVideoLayout(snapshot.videoLayout ? JSON.parse(JSON.stringify(snapshot.videoLayout)) : undefined);
     await this.setBackground(snapshot.background, 0);
     if (snapshot.still) await this.setStill(snapshot.still, 1, 0);
     else await this.clearStill(0);
@@ -2234,27 +2532,52 @@ export class GenericStoryScene implements StorySceneBackend {
     else this.clearFrameOverlay();
     Object.assign(this.cameraState, snapshot.cameraState);
     this.applyCameraTransform();
-    for (const current of this.characters.values()) {
-      await current.model.dispose();
+    const rendererState = snapshot.rendererState;
+    const genericState = isGenericDomSeekState(rendererState) ? rendererState : null;
+    const desiredCharacters = new Map(snapshot.characters.map((character) => [character.target, character]));
+    for (const [target, current] of this.characters) {
+      const desired = desiredCharacters.get(target);
+      if (desired && current.identity === desired.identity && current.sourceEntry === record(desired.entry)) {
+        continue;
+      }
+      this.characters.delete(target);
+      await this.releaseCharacter(current);
     }
-    this.characters.clear();
     for (const character of snapshot.characters) {
-      await this.placeCharacter(
-        {
-          command: 0,
-          targetName: character.target,
-          targets: [{ target: character.target }],
-          characterModel: character.entry,
-          characterKey: character.identity,
-        },
-        character.positionType,
-        0,
-      );
+      if (!this.characters.has(character.target)) {
+        await this.placeCharacter(
+          {
+            command: 0,
+            targetName: character.target,
+            targets: [{ target: character.target }],
+            characterModel: character.entry,
+            characterKey: character.identity,
+            controllerIdentity: genericState?.characters?.[character.target]?.controllerIdentity,
+          },
+          character.positionType,
+          0,
+        );
+      }
       const restored = this.characters.get(character.target);
       if (!restored) continue;
+      restored.positionType = character.positionType;
       restored.worldPosition = character.worldPosition;
       restored.offset = { ...character.offset };
       restored.paused = character.paused;
+      restored.pendingPausedMotion = null;
+      restored.pendingPausedExpression = null;
+      restored.blurIntensity = 0;
+      restored.currentMotionName = "";
+      restored.currentMotionFadeInSeconds = 0;
+      restored.currentExpressionName = "";
+      restored.currentExpressionFadeInSeconds = 0;
+      restored.rimLight = {
+        enabled: false,
+        color: "transparent",
+        shadowIntensity: 0,
+      };
+      restored.host.removeAttribute("data-motion");
+      restored.host.removeAttribute("data-expression");
       restored.model.setPaused(character.paused);
       restored.angle = finite(character.angle);
       restored.bodyAngle = finite(character.bodyAngle);
@@ -2267,28 +2590,37 @@ export class GenericStoryScene implements StorySceneBackend {
       if (restored.lookEnabled) {
         restored.host.dataset.look = `${restored.lookX},${restored.lookY}`;
         if (restored.lookTargetName) restored.host.dataset.lookTarget = restored.lookTargetName;
+        else restored.host.removeAttribute("data-look-target");
+      } else {
+        restored.host.removeAttribute("data-look");
+        restored.host.removeAttribute("data-look-target");
       }
       restored.host.dataset.angle = String(restored.angle);
       restored.host.dataset.bodyAngle = String(restored.bodyAngle);
       await this.setBrightness(character.target, character.brightness, 0);
       await this.fadeCharacter(character.target, character.alpha, 0);
     }
-    const rendererState = snapshot.rendererState;
-    if (isGenericDomSeekState(rendererState)) {
-      this.backgroundBrightness = clamp(rendererState.backgroundBrightness ?? 1);
-      this.backgroundBlurIntensity = clamp(rendererState.backgroundBlurIntensity ?? 0);
+    if (genericState) {
+      this.backgroundBrightness = clamp(genericState.backgroundBrightness ?? 1);
+      this.backgroundBlurIntensity = clamp(genericState.backgroundBlurIntensity ?? 0);
       this.applyBackgroundFilter();
-      this.characterPriorityOrder = Array.isArray(rendererState.characterPriorityOrder)
-        ? rendererState.characterPriorityOrder.map((value) => Math.trunc(finite(value)))
+      this.characterPriorityOrder = Array.isArray(genericState.characterPriorityOrder)
+        ? genericState.characterPriorityOrder.map((value) => Math.trunc(finite(value)))
         : [4, 0, 3, 1, 2];
       for (const character of this.characters.values()) {
-        const saved = rendererState.characters?.[character.target];
+        const saved = genericState.characters?.[character.target];
         if (!saved) continue;
         character.blurIntensity = clamp(saved.blurIntensity);
         character.currentMotionName = firstString(saved.currentMotionName);
         character.currentMotionFadeInSeconds = finite(saved.currentMotionFadeInSeconds);
         character.currentExpressionName = firstString(saved.currentExpressionName);
         character.currentExpressionFadeInSeconds = finite(saved.currentExpressionFadeInSeconds);
+        if (character.currentMotionName) {
+          character.host.dataset.motion = character.currentMotionName;
+        }
+        if (character.currentExpressionName) {
+          character.host.dataset.expression = character.currentExpressionName;
+        }
         character.rimLight = {
           enabled: Boolean(saved.rimLight?.enabled),
           color: saved.rimLight?.color,
@@ -2298,16 +2630,16 @@ export class GenericStoryScene implements StorySceneBackend {
         this.applyCharacterPresentation(character);
       }
       this.applyCharacterPriorities();
-      this.applyStageEnv(rendererState.stageEnvironmentIndex);
-      this.applyStageLight(rendererState.stageLightIndex);
-      this.applyStagePostEffect(rendererState.stagePostIndex);
-      this.changeStageParticleEffects(rendererState.stageParticleIndex);
-      if (rendererState.commandPostEffect != null) {
-        await this.setCommandPostEffect(rendererState.commandPostEffect, 0);
+      this.applyStageEnv(genericState.stageEnvironmentIndex);
+      this.applyStageLight(genericState.stageLightIndex);
+      this.applyStagePostEffect(genericState.stagePostIndex);
+      this.changeStageParticleEffects(genericState.stageParticleIndex);
+      if (genericState.commandPostEffect != null) {
+        await this.setCommandPostEffect(genericState.commandPostEffect, 0);
       } else {
         await this.clearCommandPostEffects(0);
       }
-      for (const effect of rendererState.commandEffects) {
+      for (const effect of genericState.commandEffects) {
         this.mountCommandEffect(effect.key, effect.asset, effect.options);
       }
     } else {
@@ -2324,8 +2656,55 @@ export class GenericStoryScene implements StorySceneBackend {
 
   private track<T>(pending: Promise<T>): Promise<T> {
     this.pendingLoads.add(pending);
-    void pending.finally(() => this.pendingLoads.delete(pending));
+    void pending.then(
+      () => this.pendingLoads.delete(pending),
+      () => this.pendingLoads.delete(pending),
+    );
     return pending;
+  }
+
+  private createCharacterHost(target: string, providerId: string, model: StoryCharacterModel): HTMLDivElement {
+    const host = document.createElement("div");
+    host.className = "vega-stage__character";
+    host.dataset.vegaCharacter = target;
+    host.dataset.vegaCharacterProvider = providerId;
+    host.style.cssText =
+      "position:absolute;bottom:0;height:96%;max-width:70%;opacity:0;filter:brightness(1);transform:translateX(-50%);transform-origin:center bottom;will-change:transform,opacity,filter;";
+    host.append(model.element);
+    return host;
+  }
+
+  private async disposeCharacterModel(model: StoryCharacterModel | null | undefined): Promise<void> {
+    if (!model || this.disposedCharacterModels.has(model)) return;
+    this.disposedCharacterModels.add(model);
+    await model.dispose();
+  }
+
+  private async releaseCharacter(character: CharacterRecord): Promise<void> {
+    character.host.remove();
+    character.host.removeAttribute("data-speaking");
+    character.model.setPaused(true);
+    if (
+      character.provider &&
+      !character.compilationOnly &&
+      !this.destroyed &&
+      character.model.isOperational !== false
+    ) {
+      const resident = this.preloadedCharacters.get(character.controllerIdentity);
+      if (!resident) {
+        this.preloadedCharacters.set(character.controllerIdentity, {
+          identity: character.controllerIdentity,
+          target: character.target,
+          provider: character.provider,
+          sourceEntry: character.sourceEntry,
+          model: character.model,
+          host: character.host,
+        });
+        return;
+      }
+      if (resident.model === character.model) return;
+    }
+    await this.disposeCharacterModel(character.model);
   }
 
   private createEffectSurface(name: string): HTMLDivElement {
@@ -2353,9 +2732,7 @@ export class GenericStoryScene implements StorySceneBackend {
   } {
     const name = visualName(profile).toLowerCase();
     const source = record(profile);
-    const components = Object.keys(record(source.components))
-      .join(" ")
-      .toLowerCase();
+    const components = Object.keys(record(source.components)).join(" ").toLowerCase();
     const signature = `${name} ${components}`;
     if (/mono|gray|greyscale|black.?white/.test(signature)) {
       return {
@@ -2473,11 +2850,7 @@ export class GenericStoryScene implements StorySceneBackend {
       particle.style.height = `${kind === 2 ? size * 3 : size}px`;
       particle.style.borderRadius = "999px";
       particle.style.background =
-        kind === 1
-          ? `hsl(${hue} 94% 76% / .88)`
-          : kind === 2
-            ? "rgb(255 255 255 / .72)"
-            : `hsl(${hue} 68% 84% / .62)`;
+        kind === 1 ? `hsl(${hue} 94% 76% / .88)` : kind === 2 ? "rgb(255 255 255 / .72)" : `hsl(${hue} 68% 84% / .62)`;
       particle.style.boxShadow = kind === 1 ? `0 0 ${size * 2}px hsl(${hue} 94% 72% / .8)` : "";
       const duration = (5 + (stableHash(`${seed}:duration:${index}`) % 60) / 10) / this.playbackSpeed;
       const animation =
@@ -2501,9 +2874,9 @@ export class GenericStoryScene implements StorySceneBackend {
     const z = character.worldPosition ? character.worldPosition.z : character.offset.z;
     character.host.style.left = `${x}%`;
     character.host.style.bottom = `${y * this.worldUnitPercent()}%`;
-    character.host.style.transform = `translateX(-50%) translateZ(${z}px) rotate(${clamp(
-      (character.bodyAngle + 30) / 60,
-    ) * 60 - 30}deg)`;
+    character.host.style.transform = `translateX(-50%) translateZ(${z}px) rotate(${
+      clamp((character.bodyAngle + 30) / 60) * 60 - 30
+    }deg)`;
     character.host.style.opacity = String(character.alpha);
   }
 
@@ -2638,15 +3011,9 @@ export class GenericStoryScene implements StorySceneBackend {
     }
   }
 
-  private hasCharacterAnimation(
-    character: CharacterRecord,
-    kind: "motion" | "expression",
-    name: string,
-  ): boolean {
+  private hasCharacterAnimation(character: CharacterRecord, kind: "motion" | "expression", name: string): boolean {
     const entries =
-      kind === "motion"
-        ? advCharacterMotions(character.sourceEntry)
-        : advCharacterExpressions(character.sourceEntry);
+      kind === "motion" ? advCharacterMotions(character.sourceEntry) : advCharacterExpressions(character.sourceEntry);
     if (!entries.length) return true;
     return entries.some((entry) => firstString(entry.name, entry.key, entry.source) === name);
   }
@@ -2685,9 +3052,7 @@ export class GenericStoryScene implements StorySceneBackend {
     const scale = animationIndex % 3 === 1 ? 1.06 : animationIndex % 3 === 2 ? 1.12 : 1;
     const translateX = animationIndex % 4 === 3 ? -2.5 : animationIndex % 4 === 2 ? 2.5 : 0;
     image.style.transition =
-      !this.deterministicReplay && duration > 0
-        ? `transform ${duration}s cubic-bezier(.22,.61,.36,1)`
-        : "none";
+      !this.deterministicReplay && duration > 0 ? `transform ${duration}s cubic-bezier(.22,.61,.36,1)` : "none";
     image.style.transform = `translateX(${translateX}%) scale(${scale})`;
   }
 
@@ -2762,8 +3127,7 @@ export class GenericStoryScene implements StorySceneBackend {
       update: (progress) => {
         // runSceneTween receives eased linear progress; DOTween shake owns its
         // own segmented easing/path.
-        const wallClockProgress =
-          duration <= 0 ? 1 : clamp((nowMilliseconds() - startedAt) / 1000 / duration);
+        const wallClockProgress = duration <= 0 ? 1 : clamp((nowMilliseconds() - startedAt) / 1000 / duration);
         const sample = sampleAdvDotweenShake(
           path,
           this.deterministicReplay ? 1 : Math.max(progress, wallClockProgress),
@@ -2846,9 +3210,7 @@ export class GenericStoryScene implements StorySceneBackend {
     };
     const view = this.root?.ownerDocument.defaultView;
     this.cameraShakeFrame =
-      typeof view?.requestAnimationFrame === "function"
-        ? view.requestAnimationFrame(tick)
-        : setTimeout(tick, 16);
+      typeof view?.requestAnimationFrame === "function" ? view.requestAnimationFrame(tick) : setTimeout(tick, 16);
   }
 
   private cancelCameraShakeFrame(): void {
@@ -2886,7 +3248,22 @@ export class GenericStoryScene implements StorySceneBackend {
     }
   }
 
+  private async createPreloadedImage(source: string, signal?: AbortSignal): Promise<HTMLImageElement> {
+    await this.preloadDomImage(source, signal);
+    if (signal?.aborted || this.destroyed) throw abortError();
+    const prepared = this.preloadedImages.get(source);
+    if (!prepared) {
+      throw new Error(`Image preload did not retain a decoded template: ${source}`);
+    }
+    const image = prepared.template.cloneNode(false) as HTMLImageElement;
+    image.src = prepared.lease.url;
+    image.decoding = "async";
+    image.draggable = false;
+    return image;
+  }
+
   private async waitForMedia(image: HTMLImageElement, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw abortError();
     if (image.complete && image.naturalWidth > 0) return;
     await new Promise<void>((resolve, reject) => {
       const loaded = () => {
@@ -2909,11 +3286,21 @@ export class GenericStoryScene implements StorySceneBackend {
       image.addEventListener("load", loaded, { once: true });
       image.addEventListener("error", failed, { once: true });
       signal?.addEventListener("abort", aborted, { once: true });
+      if (signal?.aborted) aborted();
+      else if (image.complete) {
+        if (image.naturalWidth > 0) loaded();
+        else failed();
+      }
     });
   }
 
-  private async waitForVideoMetadata(video: HTMLVideoElement, signal?: AbortSignal): Promise<void> {
-    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) return;
+  private async waitForVideoReady(
+    video: HTMLVideoElement,
+    minimumReadyState: number,
+    event: "loadeddata" | "canplay",
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (video.readyState >= minimumReadyState) return;
     await new Promise<void>((resolve, reject) => {
       const loaded = () => {
         cleanup();
@@ -2928,11 +3315,11 @@ export class GenericStoryScene implements StorySceneBackend {
         reject(abortError());
       };
       const cleanup = () => {
-        video.removeEventListener("loadedmetadata", loaded);
+        video.removeEventListener(event, loaded);
         video.removeEventListener("error", failed);
         signal?.removeEventListener("abort", aborted);
       };
-      video.addEventListener("loadedmetadata", loaded, { once: true });
+      video.addEventListener(event, loaded, { once: true });
       video.addEventListener("error", failed, { once: true });
       signal?.addEventListener("abort", aborted, { once: true });
     });

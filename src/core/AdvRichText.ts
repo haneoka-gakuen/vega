@@ -19,19 +19,47 @@ export interface AdvRichTextRubyNode {
   readonly annotation: string;
 }
 
-export type AdvRichTextNode = AdvRichTextTextNode | AdvRichTextBreakNode | AdvRichTextSizeNode | AdvRichTextRubyNode;
+export interface AdvRichTextStyleNode {
+  readonly type: "style";
+  readonly style: Readonly<
+    Partial<
+      Record<
+        "fontWeight" | "fontStyle" | "textDecoration" | "whiteSpace" | "color" | "fontSize" | "position" | "top",
+        string
+      >
+    >
+  >;
+  readonly children: AdvRichTextNode[];
+}
+
+export interface AdvRichTextSpaceNode {
+  readonly type: "space";
+  readonly value: number;
+  readonly unit: "px" | "em" | "%";
+}
+
+export type AdvRichTextNode =
+  | AdvRichTextTextNode
+  | AdvRichTextBreakNode
+  | AdvRichTextSizeNode
+  | AdvRichTextRubyNode
+  | AdvRichTextStyleNode
+  | AdvRichTextSpaceNode;
 
 export function advTextSizePercent(value: unknown): number {
   const percent = Number(value);
   if (!Number.isFinite(percent)) return 100;
-  return Math.max(40, Math.min(300, percent));
+  return Math.max(0, percent);
 }
 
 function appendText(children: AdvRichTextNode[], value: string): void {
   if (!value) return;
   const previous = children[children.length - 1];
   if (previous?.type === "text") {
-    children[children.length - 1] = { type: "text", value: previous.value + value };
+    children[children.length - 1] = {
+      type: "text",
+      value: previous.value + value,
+    };
     return;
   }
   children.push({ type: "text", value });
@@ -60,11 +88,26 @@ interface AdvRichTextRubyFrame {
   base: string;
 }
 
-type AdvRichTextFrame = AdvRichTextSizeFrame | AdvRichTextRubyFrame;
+interface AdvRichTextStyleFrame {
+  readonly type: "style";
+  readonly tag: string;
+  readonly node: AdvRichTextStyleNode;
+}
+type AdvRichTextFrame = AdvRichTextSizeFrame | AdvRichTextRubyFrame | AdvRichTextStyleFrame;
+
+const parseLength = (source: string): { value: number; unit: "px" | "em" | "%" } | null => {
+  const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(px|em|%)?$/iu.exec(source.trim());
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? { value, unit: (match[2]?.toLowerCase() || "px") as "px" | "em" | "%" } : null;
+};
+
+export const advTextLengthCss = (value: number, unit: "px" | "em" | "%"): string =>
+  unit === "px" ? `calc(${value} * var(--vega-adv-pixel, 1px))` : `${value}${unit}`;
 
 /**
- * Parses the small, supported subset of Unity ADV markup into inert render nodes.
- * Unknown complete tags are discarded like the game player, and incomplete tags
+ * Parses supported ADV markup into inert render nodes.
+ * Unknown complete tags are discarded, and incomplete tags
  * are withheld so typewriter playback never exposes a partial markup token.
  *
  * Source episodes commonly omit `</size>`. Known opening tags therefore remain
@@ -80,7 +123,7 @@ export function parseAdvRichText(value: unknown): AdvRichTextNode[] {
   const activeChildren = (): AdvRichTextNode[] => {
     for (let frameIndex = frames.length - 1; frameIndex >= 0; frameIndex -= 1) {
       const frame = frames[frameIndex];
-      if (frame?.type === "size") return frame.node.children;
+      if (frame?.type === "size" || frame?.type === "style") return frame.node.children;
     }
     return root;
   };
@@ -109,9 +152,101 @@ export function parseAdvRichText(value: unknown): AdvRichTextNode[] {
 
   while (index < source.length) {
     const rest = source.slice(index);
-    const sizeOpen = rest.match(
-      /^<size\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*>/iu,
-    );
+    const control =
+      /^<(\/)?(b|i|u|s|nobr|color|voffset|space|br|noparse|size)(?:\s*=\s*("[^"]*"|'[^']*'|[^>]*))?\s*>/iu.exec(rest);
+    if (control) {
+      const closing = Boolean(control[1]);
+      const tag = control[2].toLowerCase();
+      const argument = (control[3] || "")
+        .trim()
+        .replace(/^(?:"(.*)"|'(.*)')$/u, (_match, double, single) => double ?? single);
+      const length = parseLength(argument);
+      let style: AdvRichTextStyleNode["style"] | undefined;
+      if (!closing && tag === "noparse") {
+        const end = source.toLowerCase().indexOf("</noparse>", index + control[0].length);
+        appendSourceText(source.slice(index + control[0].length, end < 0 ? source.length : end));
+        index = end < 0 ? source.length : end + "</noparse>".length;
+        continue;
+      }
+      if (!closing && tag === "br") {
+        appendSourceText("\n");
+        index += control[0].length;
+        continue;
+      }
+      if (!closing && tag === "space" && length) {
+        closeRuby();
+        activeChildren().push({ type: "space", ...length });
+        index += control[0].length;
+        continue;
+      }
+      if (!closing && tag === "size" && length?.unit === "%" && length.value >= 0) {
+        closeRuby();
+        const node: AdvRichTextSizeNode = {
+          type: "size",
+          percent: length.value,
+          children: [],
+        };
+        activeChildren().push(node);
+        frames.push({ type: "size", node });
+        index += control[0].length;
+        continue;
+      }
+      if (!closing) {
+        if (tag === "b") style = { fontWeight: "700" };
+        else if (tag === "i") style = { fontStyle: "italic" };
+        else if (tag === "u") style = { textDecoration: "underline" };
+        else if (tag === "s") style = { textDecoration: "line-through" };
+        else if (tag === "nobr") style = { whiteSpace: "nowrap" };
+        else if (
+          tag === "color" &&
+          /^(?:#[\da-f]{3,4}|#[\da-f]{6}|#[\da-f]{8}|black|white|red|green|blue|yellow|orange|purple|cyan|magenta|grey|gray|transparent)$/iu.test(
+            argument,
+          )
+        )
+          style = { color: argument };
+        else if (tag === "voffset" && length)
+          style = {
+            position: "relative",
+            top: advTextLengthCss(
+              length.unit === "%" ? -length.value / 100 : -length.value,
+              length.unit === "%" ? "em" : length.unit,
+            ),
+          };
+        else if (tag === "size" && length && length.unit === "px" && /^[+-]/u.test(argument))
+          style = {
+            fontSize: `calc(1em + ${advTextLengthCss(length.value, length.unit)})`,
+          };
+        else if (tag === "size" && length && length.unit !== "%" && length.value >= 0)
+          style = { fontSize: advTextLengthCss(length.value, length.unit) };
+      }
+      if (style) {
+        closeRuby();
+        const node: AdvRichTextStyleNode = {
+          type: "style",
+          style,
+          children: [],
+        };
+        activeChildren().push(node);
+        frames.push({ type: "style", tag, node });
+        index += control[0].length;
+        continue;
+      }
+      if (closing && tag !== "size") {
+        closeRuby();
+        let frameIndex = -1;
+        for (let i = frames.length - 1; i >= 0; i--) {
+          const frame = frames[i];
+          if (frame.type === "style" && frame.tag === tag) {
+            frameIndex = i;
+            break;
+          }
+        }
+        if (frameIndex >= 0) frames.splice(frameIndex);
+        index += control[0].length;
+        continue;
+      }
+    }
+    const sizeOpen = rest.match(/^<size\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*>/iu);
     if (sizeOpen) {
       closeRuby();
       const node: AdvRichTextSizeNode = {
@@ -129,12 +264,9 @@ export function parseAdvRichText(value: unknown): AdvRichTextNode[] {
     if (sizeClose) {
       closeRuby();
       let sizeIndex = -1;
-      for (
-        let frameIndex = frames.length - 1;
-        frameIndex >= 0;
-        frameIndex -= 1
-      ) {
-        if (frames[frameIndex]?.type === "size") {
+      for (let frameIndex = frames.length - 1; frameIndex >= 0; frameIndex -= 1) {
+        const frame = frames[frameIndex];
+        if (frame?.type === "size" || (frame?.type === "style" && frame.tag === "size")) {
           sizeIndex = frameIndex;
           break;
         }

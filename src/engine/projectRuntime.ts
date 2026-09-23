@@ -14,10 +14,7 @@ const isVegaProject = (value: VegaProject | AdvStory): value is VegaProject =>
  * Compiles every Vega scene into one keyed command stream. Scene calls and
  * replacements therefore retain their runtime semantics in every host.
  */
-export const bindVegaProject = (
-  project: VegaProject | AdvStory,
-  sceneId?: string,
-): VegaProjectBinding => {
+export const bindVegaProject = (project: VegaProject | AdvStory, sceneId?: string): VegaProjectBinding => {
   if (!isVegaProject(project)) {
     if (
       !project ||
@@ -46,7 +43,5 @@ export const bindVegaProject = (
   };
 };
 
-export const vegaProjectToAdvStory = (
-  project: VegaProject | AdvStory,
-  sceneId?: string,
-): AdvStory => bindVegaProject(project, sceneId).story;
+export const vegaProjectToAdvStory = (project: VegaProject | AdvStory, sceneId?: string): AdvStory =>
+  bindVegaProject(project, sceneId).story;

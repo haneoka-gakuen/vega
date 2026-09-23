@@ -1,3 +1,4 @@
+import { narrativePositionAtBoundary, resolveNarrativePosition } from "../narrative/position";
 import type {
   VegaBacklogEntry,
   VegaJsonValue,
@@ -11,12 +12,8 @@ import type { AdvStorySceneSeekSnapshot } from "../rendering/neutral/StorySceneS
 import { resolveStoryLocalizedText } from "../runtime";
 import type { AdvSoundSnapshot } from "../sound/AdvSoundManager";
 import type { AdvCommand, AdvStory } from "../types/AdvRuntime";
-import {
-  VegaMemorySaveStorage,
-  VegaSaveRepository,
-  type VegaSaveStorage,
-} from "../narrative/save";
-import { VegaNarrativeStore } from "../narrative/state";
+import { VegaMemorySaveStorage, VegaSaveRepository, type VegaSaveStorage } from "../narrative/save";
+import { DEFAULT_NARRATIVE_SETTINGS, VegaNarrativeStore } from "../narrative/state";
 import type { VegaDisposable } from "../engine/lifecycle";
 import type {
   VegaShellController,
@@ -36,7 +33,10 @@ export interface VegaShellControllerOptions {
   readonly narrativeStore: VegaNarrativeStore;
   readonly storage?: VegaSaveStorage;
   readonly projectId?: string;
+  readonly settingsId?: string;
+  readonly initialSettings?: Partial<VegaNarrativeSettings>;
   readonly title?: string;
+  readonly initialScreen?: "title" | "game";
   readonly root?: HTMLElement;
   readonly signal?: AbortSignal;
   readonly onExitRequest?: () => void | Promise<void>;
@@ -59,6 +59,10 @@ class DefaultVegaShellController implements VegaManagedShellController {
   private readonly story: AdvStory;
   private readonly narrative: VegaNarrativeStore;
   private readonly repository: VegaSaveRepository;
+  private readonly settingsStorage: VegaSaveStorage;
+  private readonly settingsKey: string;
+  private readonly initialSettings?: Partial<VegaNarrativeSettings>;
+  private settingsWriteTail: Promise<void> = Promise.resolve();
   private readonly projectId: string;
   private readonly projectFormatVersion: number;
   private readonly title: string;
@@ -66,7 +70,9 @@ class DefaultVegaShellController implements VegaManagedShellController {
   private readonly signal?: AbortSignal;
   private readonly onExitRequest?: () => void | Promise<void>;
   private readonly listeners = new Set<(snapshot: VegaShellSnapshot) => void>();
-  private readonly sceneMarkers: readonly { id: string; index: number; label: string }[];
+  private readonly sceneMarkers: readonly (VegaShellFlowNode & {
+    index: number;
+  })[];
   private readonly flowEdges: readonly VegaShellFlowEdge[];
   private readonly galleryEntries: readonly {
     id: string;
@@ -85,6 +91,7 @@ class DefaultVegaShellController implements VegaManagedShellController {
   private disposed = false;
 
   constructor(options: VegaShellControllerOptions) {
+    this.screen = options.initialScreen ?? "title";
     this.player = options.player;
     this.story = options.story;
     this.narrative = options.narrativeStore;
@@ -96,27 +103,47 @@ class DefaultVegaShellController implements VegaManagedShellController {
     this.projectFormatVersion = positiveInteger(project.formatVersion, 1);
     this.title =
       options.title?.trim() ||
-      resolveStoryLocalizedText(project.title ?? options.story.title ?? options.story.name ?? this.projectId).text ||
+      this.player.resolveLocalizedText(project.title ?? options.story.title ?? options.story.name ?? this.projectId)
+        .text ||
       this.projectId;
+    this.settingsStorage = options.storage ?? new VegaMemorySaveStorage();
+    this.settingsKey = `vega:${encodeURIComponent(options.settingsId || this.projectId)}:settings`;
+    this.initialSettings = options.initialSettings;
     this.repository = new VegaSaveRepository({
       projectId: this.projectId,
       projectFormatVersion: this.projectFormatVersion,
       engineVersion: CORE_ENGINE_VERSION,
-      storage: options.storage ?? new VegaMemorySaveStorage(),
+      storage: this.settingsStorage,
     });
-    this.sceneMarkers = sceneMarkers(options.story);
+    this.sceneMarkers = sceneMarkers(options.story, this.player.resolveLocalizedText);
     this.flowEdges = deriveVegaShellFlowEdges(options.story);
-    this.galleryEntries = galleryEntries(options.story);
+    this.galleryEntries = galleryEntries(options.story, this.player.resolveLocalizedText);
     this.removeExecutionObserver = this.player.subscribeExecutionObserver((boundary) => {
       if (boundary.phase !== "after" || this.disposed) return;
       this.captureBacklog(boundary.commandIndex, boundary.command);
       this.notify();
     });
-    options.signal?.addEventListener("abort", () => this.dispose(), { once: true });
+    options.signal?.addEventListener("abort", () => this.dispose(), {
+      once: true,
+    });
   }
 
   async initialize(): Promise<void> {
     this.assertActive();
+    let settings = this.initialSettings;
+    try {
+      const saved = await this.settingsStorage.read(this.settingsKey);
+      const parsed: unknown = saved ? JSON.parse(saved) : undefined;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        settings = parsed as Partial<VegaNarrativeSettings>;
+      }
+    } catch {
+      /* Unavailable storage does not prevent playback. */
+    }
+    for (const key of Object.keys(DEFAULT_NARRATIVE_SETTINGS) as Array<keyof VegaNarrativeSettings>) {
+      const value = settings?.[key];
+      if (value !== undefined) this.narrative.setSetting(key, value);
+    }
     this.saves = await this.repository.list();
     this.applySettings();
   }
@@ -133,14 +160,29 @@ class DefaultVegaShellController implements VegaManagedShellController {
           ? "title"
           : this.screen === "game"
             ? "game"
-            : this.returnScreen ?? (this.hasStarted ? "game" : "title"),
+            : (this.returnScreen ?? (this.hasStarted ? "game" : "title")),
       canContinue: this.saves.length > 0,
       paused: this.player.state.paused,
       autoPlay: this.player.state.autoPlay,
       fastForward: this.player.state.fastForward,
       settings: { ...narrative.settings },
       saves: this.saves.map((save) => clone(save)),
-      backlog: narrative.backlog.map((entry) => clone(entry)),
+      backlog: narrative.backlog.map((entry) => ({
+        ...clone(entry),
+        ...(entry.textSources
+          ? { text: entry.textSources.map((value) => this.player.resolveLocalizedText(value).text).join("") }
+          : entry.textSource === undefined
+            ? {}
+            : { text: this.player.resolveLocalizedText(entry.textSource).text }),
+        ...(entry.speakerSources === undefined
+          ? {}
+          : {
+              speaker: entry.speakerSources
+                .map((value) => this.player.resolveLocalizedText(value).text)
+                .filter(Boolean)
+                .join(entry.speakerSeparator ?? "・"),
+            }),
+      })),
       gallery: this.galleryEntries.map((entry): VegaShellGalleryItem => ({
         ...entry,
         unlocked: this.narrative.isUnlocked(entry.kind, entry.id),
@@ -149,10 +191,11 @@ class DefaultVegaShellController implements VegaManagedShellController {
         id: marker.id,
         label: marker.label,
         sceneId: marker.id,
-        visited:
-          this.narrative.isUnlocked("scene", marker.id) ||
-          narrative.visitedFlowNodes.includes(marker.id),
+        visited: this.narrative.isUnlocked("scene", marker.id) || narrative.visitedFlowNodes.includes(marker.id),
         current: marker.id === currentScene,
+        ...(marker.chapter ? { chapter: marker.chapter } : {}),
+        ...(marker.thumbnail ? { thumbnail: marker.thumbnail } : {}),
+        ...(marker.description ? { description: marker.description } : {}),
       })),
       flowEdges: this.flowEdges.map((edge) => ({ ...edge })),
     };
@@ -224,9 +267,7 @@ class DefaultVegaShellController implements VegaManagedShellController {
   close(): void {
     this.assertActive();
     if (this.screen === "title") return;
-    this.screen =
-      this.returnScreen ??
-      (this.hasStarted ? "game" : "title");
+    this.screen = this.returnScreen ?? (this.hasStarted ? "game" : "title");
     this.returnScreen = undefined;
     if (this.screen === "game") {
       this.player.resume();
@@ -239,20 +280,26 @@ class DefaultVegaShellController implements VegaManagedShellController {
 
   save(slot: string, label?: string): Promise<void> {
     return this.enqueue(async () => {
+      const pendingSeek = this.player.activeSeek?.completion;
+      if (pendingSeek) await pendingSeek;
+      this.assertActive();
       const commandIndex = this.player.currentProgressIndex();
       const stage = jsonValue(this.player.SceneRoot.createSeekSnapshot());
       const audio = jsonValue(this.player.SoundManager.createSnapshot());
-      const latestLine = this.narrative.snapshot().backlog.at(-1);
-      const previewImage = await captureStagePreview(
-        this.player.SceneRoot,
-        this.root,
-      );
+      const latestLine = this.player.state.talk?.visible
+        ? this.player.state.talk
+        : this.narrative.snapshot().backlog.at(-1);
+      const previewImage = await captureStagePreview(this.player.SceneRoot, this.root);
       await this.repository.save(
         slot,
-        { sceneId: this.sceneAt(commandIndex), commandIndex },
+        narrativePositionAtBoundary(this.story.commands ?? [], commandIndex, (index) => this.sceneAt(index)),
         this.narrative,
         {
           commandIndex,
+          choicePositions: [...this.player.exportSeekDecisions()].map(([index, value]) => ({
+            position: narrativePositionAtBoundary(this.story.commands ?? [], index, (at) => this.sceneAt(at)),
+            value: jsonValue(value) ?? null,
+          })),
           choiceRecords: [...this.player.exportSeekDecisions()].map(
             ([index, value]) => [index, jsonValue(value) ?? null] as const,
           ),
@@ -292,6 +339,10 @@ class DefaultVegaShellController implements VegaManagedShellController {
   setSetting<K extends keyof VegaNarrativeSettings>(key: K, value: VegaNarrativeSettings[K]): void {
     this.assertActive();
     this.narrative.setSetting(key, value);
+    const serialized = JSON.stringify(this.narrative.settings);
+    this.settingsWriteTail = this.settingsWriteTail
+      .then(() => this.settingsStorage.write(this.settingsKey, serialized))
+      .catch((error: unknown) => console.warn("[Vega] Could not persist settings", error));
     this.applySettings();
     this.notify();
   }
@@ -300,7 +351,17 @@ class DefaultVegaShellController implements VegaManagedShellController {
     return this.enqueue(async () => {
       const entry = this.narrative.snapshot().backlog.find(({ id }) => id === entryId);
       if (!entry) throw new ReferenceError(`Vega backlog entry does not exist: ${entryId}`);
-      await this.jumpTo(entry.commandIndex);
+      await this.jumpTo(
+        resolveNarrativePosition(
+          this.story.commands ?? [],
+          {
+            sceneId: entry.sceneId,
+            commandIndex: entry.commandIndex + 1,
+            ...(entry.commandId ? { commandId: entry.commandId, boundary: "after" as const } : {}),
+          },
+          (index) => this.sceneAt(index),
+        ),
+      );
     });
   }
 
@@ -375,15 +436,46 @@ class DefaultVegaShellController implements VegaManagedShellController {
 
   private async loadNow(slot: string): Promise<void> {
     this.player.pause();
-    const save = await this.repository.restoreNarrative(slot, this.narrative);
-    const restoredNarrative = clone(save.narrative);
-    this.player.importSeekDecisions(
-      new Map(save.player.choiceRecords as unknown as readonly (readonly [number, never])[]),
+    const preferences = this.narrative.settings;
+    const save = await this.repository.load(slot);
+    if (!save) throw new ReferenceError(`Vega save slot does not exist: ${slot}`);
+    const commandIndex = resolveNarrativePosition(this.story.commands ?? [], save.position, (index) =>
+      this.sceneAt(index),
     );
-    await this.player.replayFromStartTo(save.player.commandIndex);
+    const decisions =
+      save.player.choicePositions?.map(
+        (entry) =>
+          [
+            resolveNarrativePosition(this.story.commands ?? [], entry.position, (index) => this.sceneAt(index)),
+            entry.value,
+          ] as const,
+      ) ?? save.player.choiceRecords;
+    const sourceNarrative = clone(save.narrative);
+    const restoredNarrative = {
+      ...sourceNarrative,
+      sceneStack: sourceNarrative.sceneStack.map((frame) => {
+        if (!frame.callerId) return frame;
+        const index = resolveNarrativePosition(
+          this.story.commands ?? [],
+          {
+            sceneId: frame.sceneId,
+            commandId: frame.callerId,
+            commandIndex: 0,
+            boundary: "before",
+          },
+          (index) => this.sceneAt(index),
+        );
+        const returnKey = text(this.story.commands?.[index]?.returnKey);
+        if (!returnKey) throw new Error(`Saved scene call has no return address: ${frame.sceneId}/${frame.callerId}`);
+        return { ...frame, returnKey };
+      }),
+    };
+    this.narrative.restore(restoredNarrative);
+    this.player.importSeekDecisions(new Map(decisions as unknown as readonly (readonly [number, never])[]));
+    await this.player.replayFromStartTo(commandIndex);
     // Deterministic visual replay necessarily executes system commands. The
     // serialized narrative state remains authoritative after reconstruction.
-    this.narrative.restore(restoredNarrative);
+    this.narrative.restore({ ...restoredNarrative, settings: preferences });
     if (save.player.stage) {
       await this.player.SceneRoot.restoreSeekSnapshot(save.player.stage as unknown as AdvStorySceneSeekSnapshot);
     }
@@ -392,7 +484,8 @@ class DefaultVegaShellController implements VegaManagedShellController {
     this.returnScreen = undefined;
     this.screen = "game";
     this.player.state.finished = false;
-    this.applySettings();
+    this.applySettings(true);
+    this.player.holdRestoredDialogue();
     this.player.resume();
     await this.refreshSaves();
     this.playInBackground();
@@ -412,35 +505,49 @@ class DefaultVegaShellController implements VegaManagedShellController {
   private captureBacklog(commandIndex: number, authored: AdvCommand): void {
     if (Number(authored.command) !== 2) return;
     const command = this.player.state.currentCommand ?? authored;
-    const resolvedText = resolveStoryLocalizedText(command.text ?? command.advText ?? "");
+    const presentation = this.player.state.talk.sourceCommand ?? command;
+    const { text: resolvedText, speaker: resolvedSpeaker } = this.player.resolveDialogue(presentation);
     if (!resolvedText.text) return;
-    const speaker = resolveStoryLocalizedText(command.speaker ?? command.targetName ?? "").text;
+    const speaker = resolvedSpeaker.text;
+    const sources = this.player.dialogueSources(presentation);
     const voices = Array.isArray(command.voices) ? command.voices : [];
     const voice = text(record(voices[0]).playableUrl ?? record(voices[0]).url);
     const entry: VegaBacklogEntry = {
       id: `${this.sceneAt(commandIndex)}:${commandIndex}:${++this.backlogSequence}`,
       sceneId: this.sceneAt(commandIndex),
       commandIndex,
+      ...(typeof authored.commandId === "string" && authored.commandId ? { commandId: authored.commandId } : {}),
       speaker,
       text: resolvedText.text,
+      textSources: sources.texts.map((value) => jsonValue(value) ?? null),
+      speakerSources: sources.speakers.map((value) => jsonValue(value) ?? null),
+      speakerSeparator: sources.separator,
       ...(voice ? { voice } : {}),
       createdAt: new Date().toISOString(),
     };
     this.narrative.appendBacklog(entry);
-    this.narrative.markRead(`${entry.sceneId}:${commandIndex}`);
+    this.narrative.markRead(`${entry.sceneId}:${entry.commandId ?? commandIndex}`);
   }
 
-  private applySettings(): void {
+  private applySettings(refreshLocale = false): void {
     const settings = this.narrative.settings;
+    this.player.setLocale(settings.language, { refresh: refreshLocale });
     this.player.setTextSpeed(settings.textSpeed);
-    this.player.setAutoPlayInterval(settings.autoDelay);
+    this.player.setAutoPlayDelaySeconds(settings.autoDelay);
+    const instantText = Boolean(settings.instantText);
+    if (instantText && !this.player.state.instantText) this.player.Model.currentTypingController?.finish();
+    this.player.state.instantText = instantText;
+    if (this.player.Model.isSubtitlesEnabled !== (settings.subtitlesEnabled !== false)) {
+      this.player.setSubtitlesEnabled(settings.subtitlesEnabled !== false);
+    }
     this.player.SoundManager.setMasterVolume(settings.masterVolume);
-    this.player.SoundManager.setUserCategoryVolume("Bgm", settings.bgmVolume);
+    this.player.SoundManager.setUserCategoryVolume("Bgm", settings.bgmEnabled === false ? 0 : settings.bgmVolume);
     this.player.SoundManager.setUserCategoryVolume("Voice", settings.voiceVolume);
     this.player.SoundManager.setUserCategoryVolume("Se", settings.seVolume);
     if (this.root?.dataset) {
       this.root.dataset.vegaReducedMotion = String(settings.reducedMotion);
       this.root.dataset.vegaHighContrast = String(settings.highContrast);
+      this.root.style.setProperty("--vega-text-size", String(settings.textSize ?? 1));
       this.root.lang = settings.uiLanguage === "auto" ? "" : settings.uiLanguage;
     }
   }
@@ -514,13 +621,8 @@ const captureStagePreview = async (
   if (!root || typeof root.querySelector !== "function") return undefined;
   const stage = root.querySelector<HTMLElement>("[data-vega-stage-host]");
   if (!stage) return undefined;
-  const candidates = [...stage.querySelectorAll("canvas")].filter(
-    (canvas) => canvas.width > 0 && canvas.height > 0,
-  );
-  const source = candidates.sort(
-    (left, right) =>
-      right.width * right.height - left.width * left.height,
-  )[0];
+  const candidates = [...stage.querySelectorAll("canvas")].filter((canvas) => canvas.width > 0 && canvas.height > 0);
+  const source = candidates.sort((left, right) => right.width * right.height - left.width * left.height)[0];
   const document = root.ownerDocument;
   if (!source || !document?.createElement) return undefined;
   try {
@@ -529,19 +631,10 @@ const captureStagePreview = async (
     preview.height = 270;
     const context = preview.getContext("2d");
     if (!context) return undefined;
-    const scale = Math.max(
-      preview.width / source.width,
-      preview.height / source.height,
-    );
+    const scale = Math.max(preview.width / source.width, preview.height / source.height);
     const width = source.width * scale;
     const height = source.height * scale;
-    context.drawImage(
-      source,
-      (preview.width - width) / 2,
-      (preview.height - height) / 2,
-      width,
-      height,
-    );
+    context.drawImage(source, (preview.width - width) / 2, (preview.height - height) / 2, width, height);
     return preview.toDataURL("image/webp", 0.55);
   } catch {
     // Cross-origin or host-provided canvases may be unreadable. The shell can
@@ -550,22 +643,56 @@ const captureStagePreview = async (
   }
 };
 
-const sceneMarkers = (story: AdvStory): readonly { id: string; index: number; label: string }[] => {
+const sceneMarkers = (
+  story: AdvStory,
+  resolve = resolveStoryLocalizedText,
+): readonly (VegaShellFlowNode & { index: number })[] => {
   const markers = (story.commands ?? []).flatMap((command, index) => {
     if (Number(command.command) !== VEGA_SYSTEM_OPCODE.SceneMarker || command.returnMarker) return [];
     const id = text(command.sceneId);
     if (!id) return [];
-    return [{ id, index, label: resolveStoryLocalizedText(command.title ?? id).text || id }];
+    const chapter = resolve(command.chapter ?? "").text;
+    const description = resolve(command.description ?? "").text;
+    const thumbnail = text(command.thumbnail);
+    return [
+      {
+        id,
+        index,
+        sceneId: id,
+        visited: false,
+        current: false,
+        label: resolve(command.title ?? id).text || id,
+        ...(chapter ? { chapter } : {}),
+        ...(description ? { description } : {}),
+        ...(thumbnail ? { thumbnail } : {}),
+      },
+    ];
   });
   if (markers.length) return markers;
   const project = record(story.vegaProject);
   const entry = text(project.entryScene) || "main";
-  return [{ id: entry, index: 0, label: entry }];
+  return [
+    {
+      id: entry,
+      index: 0,
+      sceneId: entry,
+      visited: false,
+      current: false,
+      label: entry,
+    },
+  ];
 };
 
 const galleryEntries = (
   story: AdvStory,
-): readonly { id: string; kind: VegaUnlockKind; title: string; thumbnail?: string; source?: string }[] => {
+  resolve = resolveStoryLocalizedText,
+): readonly {
+  id: string;
+  kind: VegaUnlockKind;
+  title: string;
+  thumbnail?: string;
+  source?: string;
+}[] => {
   const assets = record(story.vegaAssets);
   return Object.entries(assets).flatMap(([id, raw]) => {
     const asset = record(raw);
@@ -577,7 +704,7 @@ const galleryEntries = (
       {
         id,
         kind,
-        title: resolveStoryLocalizedText(asset.title ?? id).text || id,
+        title: resolve(asset.title ?? id).text || id,
         ...(source ? { source, ...(kind === "cg" ? { thumbnail: source } : {}) } : {}),
       },
     ];
@@ -617,7 +744,13 @@ export const deriveVegaShellFlowEdges = (story: AdvStory): readonly VegaShellFlo
       const condition = text(command.condition);
       const thenScene = text(command.thenScene);
       const elseScene = text(command.elseScene);
-      if (thenScene) add({ from, to: thenScene, kind: "branch", ...(condition ? { condition } : {}) });
+      if (thenScene)
+        add({
+          from,
+          to: thenScene,
+          kind: "branch",
+          ...(condition ? { condition } : {}),
+        });
       if (elseScene) {
         add({
           from,

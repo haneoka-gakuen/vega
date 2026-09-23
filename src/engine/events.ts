@@ -9,7 +9,7 @@ export interface VegaEventMap {
   "shell:exit-request": { readonly engineId: string; readonly playerId: string };
   "plugin:installed": { readonly pluginId: string };
   "plugin:removed": { readonly pluginId: string };
-  "diagnostic": VegaDiagnosticEvent;
+  diagnostic: VegaDiagnosticEvent;
 }
 
 export interface VegaDiagnosticEvent {

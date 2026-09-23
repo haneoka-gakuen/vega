@@ -2,6 +2,49 @@ import type { AdvStory } from "../types/AdvRuntime";
 
 export const ADV_SEEK_CHECKPOINT_VERSION = 1 as const;
 
+/** Reuse unchanged immutable snapshot branches without modifying either input. */
+export function shareSeekSnapshot<T>(previous: T | undefined, current: T): T {
+  const visited = new WeakSet<object>();
+  const share = (before: unknown, after: unknown): unknown => {
+    if (Object.is(before, after)) return before;
+    if (!before || !after || typeof before !== "object" || typeof after !== "object") return after;
+    const array = Array.isArray(after);
+    if (array !== Array.isArray(before)) return after;
+    const prototype = Object.getPrototypeOf(after);
+    if (!array && prototype !== Object.prototype && prototype !== null) return after;
+    if (Object.getPrototypeOf(before) !== prototype || visited.has(after)) return after;
+    visited.add(after);
+    const keys = Object.keys(after);
+    const beforeKeys = Object.keys(before);
+    let equal =
+      keys.length === beforeKeys.length && (!array || (before as unknown[]).length === (after as unknown[]).length);
+    let replacements: Array<readonly [string, unknown]> | undefined;
+    const left = before as Record<string, unknown>;
+    const right = after as Record<string, unknown>;
+    for (const key of keys) {
+      const value = share(left[key], right[key]);
+      if (!Object.hasOwn(left, key) || !Object.is(value, left[key])) equal = false;
+      if (!Object.is(value, right[key])) {
+        (replacements ??= []).push([key, value]);
+      }
+    }
+    if (equal) return before;
+    if (!replacements) return after;
+    const copy = (
+      array
+        ? (after as unknown[]).slice()
+        : prototype === null
+          ? Object.assign(Object.create(null), right)
+          : { ...right }
+    ) as Record<string, unknown>;
+    for (const [key, value] of replacements) {
+      Object.defineProperty(copy, key, { value, enumerable: true, configurable: true, writable: true });
+    }
+    return copy;
+  };
+  return share(previous, current) as T;
+}
+
 export interface AdvSeekCheckpoint<
   TScene = unknown,
   TSession = unknown,
@@ -20,79 +63,62 @@ export interface AdvSeekCheckpoint<
   readonly state: TState;
 }
 
-/**
- * Bound an in-memory seek cache while keeping useful samples across the whole
- * episode. The checkpoint with the densest neighbours is discarded first;
- * command boundaries near the beginning/end therefore cannot crowd out the
- * rest of the authored timeline.
- */
-export function pruneCheckpointCache<T>(cache: Map<number, T>, maxEntries: number): void {
-  const limit = Math.max(2, Math.floor(Number(maxEntries) || 2));
-  while (cache.size > limit) {
-    const keys = [...cache.keys()].sort((left, right) => left - right);
-    if (keys.length <= 2) return;
-    let removeKey = keys[1];
-    let smallestSpan = Number.POSITIVE_INFINITY;
-    for (let index = 1; index < keys.length - 1; index += 1) {
-      const span = keys[index + 1] - keys[index - 1];
-      if (span < smallestSpan) {
-        smallestSpan = span;
-        removeKey = keys[index];
-      }
-    }
-    cache.delete(removeKey);
-  }
+export interface AdvSeekCheckpointIndex {
+  readonly signature: string;
+  readonly checkpoints: Map<number, AdvSeekCheckpoint>;
+  /** Command boundaries in authored traversal order for this decision path. */
+  readonly boundaries: number[];
+  complete: boolean;
+  blockedAt: number | null;
+  blockedReason: string;
 }
 
-export function checkpointCacheLimit(value: unknown, fallback = 96): number {
-  const limit = Number(value);
-  if (!Number.isFinite(limit)) return fallback;
-  return Math.max(16, Math.min(256, Math.floor(limit)));
-}
+const sharedStoryCheckpointIndexes = new WeakMap<object, Map<string, AdvSeekCheckpointIndex>>();
 
-const sharedStoryCheckpointCaches = new WeakMap<AdvStory, Map<number, AdvSeekCheckpoint>>();
+export const releaseCheckpointIndexes = (owner: object): void => {
+  sharedStoryCheckpointIndexes.delete(owner);
+};
 
-/**
- * A story object survives the Vue player's backward-seek rebuild. Keeping the
- * cache on that immutable story identity lets the freshly booted renderer
- * restore a proven command boundary without coupling the cache to UI code.
- */
-export function sharedCheckpointCacheFor(story: AdvStory): Map<number, AdvSeekCheckpoint> {
-  let cache = sharedStoryCheckpointCaches.get(story);
-  if (!cache) {
-    cache = new Map();
-    sharedStoryCheckpointCaches.set(story, cache);
-  }
-  return cache;
-}
+const stableJsonValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stableJsonValue(entry)]),
+  );
+};
 
-export function isCheckpointEnvelopeValid(
-  checkpoint: AdvSeekCheckpoint | null | undefined,
-  commandCount: number,
-): checkpoint is AdvSeekCheckpoint {
-  return Boolean(
-    checkpoint &&
-    checkpoint.version === ADV_SEEK_CHECKPOINT_VERSION &&
-    checkpoint.commandCount === commandCount &&
-    Number.isInteger(checkpoint.index) &&
-    checkpoint.index >= 0 &&
-    checkpoint.index <= commandCount,
+/** Stable identity for one authored choice path. */
+export function seekDecisionSignature(decisions: ReadonlyMap<number, unknown>): string {
+  return JSON.stringify(
+    [...decisions.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([key, value]) => [key, stableJsonValue(value)]),
   );
 }
 
-export function nearestCheckpointAtOrBefore(
-  cache: ReadonlyMap<number, AdvSeekCheckpoint>,
-  targetIndex: number,
-  commandCount: number,
-  accept: (checkpoint: AdvSeekCheckpoint) => boolean = () => true,
-): AdvSeekCheckpoint | null {
-  const target = Math.max(0, Math.min(commandCount, Math.floor(Number(targetIndex) || 0)));
-  let nearest: AdvSeekCheckpoint | null = null;
-  for (const checkpoint of cache.values()) {
-    if (!isCheckpointEnvelopeValid(checkpoint, commandCount)) continue;
-    if (checkpoint.index > target || checkpoint.index <= (nearest?.index ?? -1)) continue;
-    if (!accept(checkpoint)) continue;
-    nearest = checkpoint;
+export function sharedCheckpointIndexFor(
+  story: AdvStory,
+  signature: string,
+  owner: object = story,
+): AdvSeekCheckpointIndex {
+  let indexes = sharedStoryCheckpointIndexes.get(owner);
+  if (!indexes) {
+    indexes = new Map();
+    sharedStoryCheckpointIndexes.set(owner, indexes);
   }
-  return nearest;
+  let index = indexes.get(signature);
+  if (!index) {
+    index = {
+      signature,
+      checkpoints: new Map(),
+      boundaries: [],
+      complete: false,
+      blockedAt: null,
+      blockedReason: "",
+    };
+    indexes.set(signature, index);
+  }
+  return index;
 }

@@ -3,6 +3,7 @@ import type {
   AdvCharacterModelEntry,
   AdvFrameEntry,
   AdvStillEntry,
+  AdvPlayerState,
 } from "../../types/AdvRuntime";
 import type { StoryCameraState, StoryPoint3 } from "../StorySceneBackend";
 
@@ -33,6 +34,8 @@ export interface AdvSeekCharacterSnapshot {
  */
 export interface AdvStorySceneSeekSnapshot {
   readonly version: typeof STORY_SCENE_SEEK_SNAPSHOT_VERSION;
+  readonly pluginState?: AdvPlayerState["pluginState"];
+  readonly videoLayout?: AdvPlayerState["video"]["layout"];
   readonly background: AdvBackgroundEntry | null;
   readonly still: AdvStillEntry | null;
   readonly frame: AdvFrameEntry | null;

@@ -1,21 +1,9 @@
-import type {
-  VegaBacklogEntry,
-  VegaNarrativeSettings,
-  VegaSaveData,
-  VegaUnlockKind,
-} from "@haneoka/vega-protocol";
+import type { VegaBacklogEntry, VegaNarrativeSettings, VegaSaveData, VegaUnlockKind } from "@haneoka/vega-protocol";
 import { defineVegaService, type VegaDisposable } from "../engine/plugins";
+import type { VegaUiSlotContext } from "../engine/plugins";
 
 export type VegaShellScreen =
-  | "title"
-  | "game"
-  | "menu"
-  | "save"
-  | "load"
-  | "settings"
-  | "backlog"
-  | "gallery"
-  | "flowchart";
+  "title" | "game" | "menu" | "save" | "load" | "settings" | "backlog" | "gallery" | "flowchart";
 
 export interface VegaShellFlowNode {
   readonly id: string;
@@ -23,6 +11,9 @@ export interface VegaShellFlowNode {
   readonly sceneId: string;
   readonly visited: boolean;
   readonly current: boolean;
+  readonly chapter?: string;
+  readonly thumbnail?: string;
+  readonly description?: string;
 }
 
 export interface VegaShellFlowEdge {
@@ -94,3 +85,12 @@ export interface VegaShellController {
 
 /** Per-player shell controller supplied to `ui-slot` contributions. */
 export const VEGA_SHELL_CONTROLLER = defineVegaService<VegaShellController>("vega.shell-controller.v1");
+
+export interface VegaShellTextRenderer {
+  set(element: HTMLElement, text: string): void;
+  releaseWithin(root: Node): void;
+  dispose(): void;
+}
+export const VEGA_SHELL_TYPOGRAPHY = defineVegaService<{
+  create(context: VegaUiSlotContext): VegaShellTextRenderer;
+}>("vega.shell-typography.v1");

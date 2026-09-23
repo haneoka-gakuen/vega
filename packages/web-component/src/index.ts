@@ -1,7 +1,4 @@
-export {
-  VegaPlayerElement,
-  defineVegaPlayerElement,
-} from "./VegaPlayerElement.js";
+export { VegaPlayerElement, defineVegaPlayerElement } from "./VegaPlayerElement.js";
 export type {
   VegaPlayerElementAppearance,
   VegaPlayerElementErrorDetail,

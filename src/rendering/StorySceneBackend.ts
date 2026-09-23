@@ -1,3 +1,4 @@
+import type { StoryScreenEffectDefinition } from "./StoryScreenEffects";
 import type {
   AdvBackgroundEntry,
   AdvCommand,
@@ -12,13 +13,11 @@ import type {
   AdvStillEntry,
   AdvVideoEntry,
 } from "../types/AdvRuntime";
-import type {
-  AdvStorySceneSeekSnapshot,
-  SeekSnapshotSafety,
-} from "./neutral/StorySceneSnapshot";
+import type { AdvStorySceneSeekSnapshot, SeekSnapshotSafety } from "./neutral/StorySceneSnapshot";
 import type { StoryCharacterProvider } from "./StoryCharacterModel";
 import type { StoryRendererExtensionRegistry } from "./StoryRendererExtensions";
 import type { VegaVoiceAnalysisSource } from "../sound/VoiceAnalysis";
+import type { StoryResourceDeclaration } from "../resources/StoryResourcePreparation";
 
 export interface StoryPoint2 {
   x: number;
@@ -61,6 +60,12 @@ export interface StoryCharacterPreloadRequest {
   readonly command: AdvCommand;
   /** Top-level story command containing this controller's first reachable In. */
   readonly commandIndex: number;
+  /**
+   * Number of distinct controller identities referenced by this episode.
+   * Renderers use this to reserve the complete episode warm set instead of
+   * applying a rolling cache limit that would strand later controllers.
+   */
+  readonly episodeControllerCount: number;
   readonly positionType: number;
   readonly motions: readonly string[];
   readonly expressions: readonly string[];
@@ -96,15 +101,22 @@ export interface StoryResourceResolver {
   canLoad(source: string): boolean;
   load(source: string, signal?: AbortSignal): Promise<Uint8Array>;
   /**
+   * Returns the resolver's canonical resident bytes without making an owned
+   * copy. This is an optional fast path for trusted renderer/runtime code that
+   * only reads its input. Consumers must never mutate the returned view or its
+   * backing buffer; untrusted SDKs should continue to use `load`.
+   *
+   * Implementations that cannot guarantee a stable immutable view may omit
+   * this method. Callers must fall back to `load` in that case.
+   */
+  loadSharedBytes?(source: string, signal?: AbortSignal): Promise<Readonly<Uint8Array>>;
+  /**
    * Acquires canonical bytes and keeps them resident until the returned lease
    * is released. While a lease is active, `load` and `resolveRenderable` for
    * the same canonical source must reuse those bytes without another network
    * or adapter request. The signal only cancels lease acquisition.
    */
-  retain(
-    source: string,
-    signal?: AbortSignal,
-  ): Promise<StoryResourceLease>;
+  retain(source: string, signal?: AbortSignal): Promise<StoryResourceLease>;
   /**
    * Produces a URL accepted by browser media elements. The returned release
    * hook must be called by the scene when that media is replaced or destroyed.
@@ -128,7 +140,42 @@ export interface StoryResourceLease {
  * complete backend without changing the opcode interpreter.
  */
 export interface StorySceneBackend {
+  readonly screenEffectKeys?: readonly string[];
+  setScreenEffect?(key: string, definition: StoryScreenEffectDefinition, signal?: AbortSignal): Promise<void>;
+  clearScreenEffects?(key?: string): void;
+
   readonly cameraState: StoryCameraState;
+  /** Scene-unit transforms around the fixed calibration frame; rotations are radians. */
+  readSceneTransform?(target: string):
+    | {
+        readonly current: Readonly<Record<string, number>>;
+        readonly planned: Readonly<Record<string, number>>;
+      }
+    | undefined;
+  writeSceneTransform?(
+    target: string,
+    value: {
+      readonly current: Readonly<Record<string, number>>;
+      readonly planned: Readonly<Record<string, number>>;
+    },
+  ): void;
+  readonly screenTransformChannels?: readonly string[];
+  clearSceneTransform?(target: string): void;
+  clearScreenTransform?(target: string): void;
+  setVideoLayout?(layout?: import("../types/AdvRuntime").StoryVideoLayout): void;
+  readScreenTransform?(target: string):
+    | {
+        readonly current: Readonly<Record<string, number>>;
+        readonly planned: Readonly<Record<string, number>>;
+      }
+    | undefined;
+  writeScreenTransform?(
+    target: string,
+    value: {
+      readonly current: Readonly<Record<string, number>>;
+      readonly planned: Readonly<Record<string, number>>;
+    },
+  ): void;
 
   /**
    * Prepare provider-owned renderer runtimes before the scene creates graphics
@@ -136,40 +183,44 @@ export interface StorySceneBackend {
    * before WebGL model construction; the portable renderer does not need it.
    */
   prepare?(story: AdvStory): void | Promise<void>;
+  /** Prepare renderer extensions referenced anywhere in the current story. */
+  prepareStoryResources?(story: AdvStory, signal?: AbortSignal): void | Promise<void>;
+  /** Enumerate renderer-extension leaf resources before the first frame. */
+  enumerateStoryResources?(
+    story: AdvStory,
+    signal?: AbortSignal,
+  ): readonly StoryResourceDeclaration[] | Promise<readonly StoryResourceDeclaration[]>;
   setup(mount: HTMLElement): Promise<void>;
   destroy(options?: { releaseTextures?: boolean }): void | Promise<void>;
   detachState(state: AdvPlayerState): void;
   resize(): void;
   setDeterministicReplayActive(active: boolean): void;
+  /** Keep checkpoint compilation from consuming episode-resident models. */
+  setSeekIndexCompilationActive?(active: boolean): void;
 
   preloadTexture(url: string, signal?: AbortSignal): Promise<unknown>;
   loadTexture(url: string, signal?: AbortSignal): Promise<unknown>;
+  /** Reserve renderer cache ownership for the complete episode texture set. */
+  reservePreloadedTextures?(count: number): void;
+  /** Prepare and retain a video element until its first authored playback. */
+  preloadVideo?(url: string, signal?: AbortSignal): Promise<unknown>;
   /**
    * Optional renderer-owned warmup that resolves only after a character can
    * produce its first frame in this scene's graphics context.
    */
-  preloadCharacter?(
-    request: StoryCharacterPreloadRequest,
-    signal?: AbortSignal,
-  ): Promise<unknown>;
-  /**
-   * Advance the renderer's bounded warm-controller window. Returned identities
-   * were discarded before activation and may be scheduled again after a seek.
-   */
-  advanceCharacterPreload?(
-    commandIndex: number,
-    retainBehindCommands: number,
-  ): readonly string[] | void;
+  preloadCharacter?(request: StoryCharacterPreloadRequest, signal?: AbortSignal): Promise<unknown>;
+  /** Report renderer-ready identities discarded by a renderer lifecycle event. */
+  advanceCharacterPreload?(commandIndex: number, retainBehindCommands: number): readonly string[] | void;
 
   createSeekSnapshot(): AdvStorySceneSeekSnapshot | null;
   /**
    * Optional renderer-owned stage capture. Backends that own pixels should
    * implement this instead of making the shell inspect renderer internals.
    */
-  capturePreview?(
-    options: StoryScenePreviewOptions,
-  ): string | undefined | Promise<string | undefined>;
-  restoreSeekSnapshot(snapshot: AdvStorySceneSeekSnapshot): Promise<void>;
+  capturePreview?(options: StoryScenePreviewOptions): string | undefined | Promise<string | undefined>;
+  restoreSeekSnapshot(snapshot: AdvStorySceneSeekSnapshot, signal?: AbortSignal): Promise<void>;
+  cancelTransitionsForSeek?(): void;
+  presentSeekSnapshot?(): void;
   settleSeekSnapshotResources(): Promise<void>;
   seekSnapshotSafety(): SeekSnapshotSafety;
 
@@ -182,18 +233,9 @@ export interface StorySceneBackend {
   isCharacterShowing(target: string, expectedIdentity?: string): boolean;
 
   selectCharacterAssetIndex(target: string, assetIndex: number): void;
-  placeCharacter(
-    cmd: AdvCommand,
-    positionType: number,
-    duration?: number,
-    noWait?: boolean,
-  ): Promise<unknown>;
+  placeCharacter(cmd: AdvCommand, positionType: number, duration?: number, noWait?: boolean): Promise<unknown>;
   removeCharacter(target: string, duration?: number): Promise<boolean>;
-  fadeCharacter(
-    target: string,
-    alpha: number,
-    duration?: number,
-  ): Promise<void>;
+  fadeCharacter(target: string, alpha: number, duration?: number): Promise<void>;
   moveCharacter(
     positionType: number,
     offset: Partial<StoryPoint3>,
@@ -213,12 +255,7 @@ export interface StorySceneBackend {
     bodyAngle: number,
     duration?: number,
   ): (() => Promise<void>) | null;
-  setCharacterAngle(
-    target: string,
-    angle: number,
-    bodyAngle: number,
-    duration?: number,
-  ): Promise<void>;
+  setCharacterAngle(target: string, angle: number, bodyAngle: number, duration?: number): Promise<void>;
   prepareLook(
     target: string,
     lookX: number,
@@ -233,13 +270,7 @@ export interface StorySceneBackend {
     enabled?: boolean,
     lookTargetName?: string,
   ): (() => Promise<void>) | null;
-  setLook(
-    target: string,
-    lookX: number,
-    lookY: number,
-    duration?: number,
-    enabled?: boolean,
-  ): Promise<void>;
+  setLook(target: string, lookX: number, lookY: number, duration?: number, enabled?: boolean): Promise<void>;
   setLookTarget(
     target: string,
     positionType: number,
@@ -247,18 +278,8 @@ export interface StorySceneBackend {
     enabled?: boolean,
     lookTargetName?: string,
   ): Promise<void>;
-  playMotionForTarget(
-    target: string,
-    motionName?: string,
-    fadeIn?: number,
-    expectedIdentity?: string,
-  ): void;
-  playExpressionForTarget(
-    target: string,
-    expressionName?: string,
-    fadeIn?: number,
-    expectedIdentity?: string,
-  ): void;
+  playMotionForTarget(target: string, motionName?: string, fadeIn?: number, expectedIdentity?: string): void;
+  playExpressionForTarget(target: string, expressionName?: string, fadeIn?: number, expectedIdentity?: string): void;
   setCharacterPaused(target: string, paused: boolean): void;
   setCharacterForward(positionType: number): void;
   setCharacterBack(positionType: number): void;
@@ -272,17 +293,9 @@ export interface StorySceneBackend {
     signal?: AbortSignal,
   ): Promise<boolean>;
   captureStage(signal?: AbortSignal): Promise<number | null>;
-  fadeStageCapture(
-    duration: number,
-    owner: number,
-    signal?: AbortSignal,
-  ): Promise<boolean>;
+  fadeStageCapture(duration: number, owner: number, signal?: AbortSignal): Promise<boolean>;
   resetStageCapture(owner?: number): void;
-  setStill(
-    still: AdvStillEntry | null | undefined,
-    alpha?: number,
-    duration?: number,
-  ): Promise<void>;
+  setStill(still: AdvStillEntry | null | undefined, alpha?: number, duration?: number): Promise<void>;
   runStillCommand(
     still: AdvStillEntry | null | undefined,
     alpha?: number,
@@ -292,11 +305,7 @@ export interface StorySceneBackend {
   ): Promise<void>;
   fadeStill(alpha: number, duration?: number): Promise<void>;
   clearStill(duration?: number): Promise<void>;
-  setFrameOverlay(
-    frame: AdvFrameEntry,
-    alpha?: number,
-    key?: string,
-  ): Promise<void>;
+  setFrameOverlay(frame: AdvFrameEntry, alpha?: number, key?: string): Promise<void>;
   setFrameOpacity(alpha: number, slide?: number, key?: string): void;
   clearFrameOverlay(key?: string): void;
   setCover(color: unknown, opacity: unknown): void;
@@ -322,10 +331,7 @@ export interface StorySceneBackend {
   seekVideoRatio(ratio: unknown): boolean;
   waitVideoEnded(signal?: AbortSignal): Promise<void>;
 
-  setCommandPostEffect(
-    profile: AdvPostEffectEntry | string | unknown,
-    fade?: number,
-  ): Promise<void>;
+  setCommandPostEffect(profile: AdvPostEffectEntry | string | unknown, fade?: number): Promise<void>;
   clearCommandPostEffects(fade?: number): Promise<void>;
   playCommandEffect(
     asset: AdvEffectEntry | null,
@@ -349,23 +355,10 @@ export interface StorySceneBackend {
     duration?: number,
     positionType?: number,
   ): Promise<void>;
-  setBrightness(
-    target: string,
-    value: number,
-    duration?: number,
-  ): Promise<void>;
-  setPositionBrightness(
-    positionType: number,
-    value: number,
-    duration?: number,
-  ): Promise<void>;
+  setBrightness(target: string, value: number, duration?: number): Promise<void>;
+  setPositionBrightness(positionType: number, value: number, duration?: number): Promise<void>;
   setBackgroundBrightness(value: number, duration?: number): Promise<void>;
-  setBackgroundDoF(
-    intensity: number,
-    duration?: number,
-    ease?: unknown,
-    signal?: AbortSignal,
-  ): Promise<void>;
+  setBackgroundDoF(intensity: number, duration?: number, ease?: unknown, signal?: AbortSignal): Promise<void>;
   setCharacterDoF(
     target: string,
     intensity: number,
@@ -374,19 +367,11 @@ export interface StorySceneBackend {
     signal?: AbortSignal,
   ): Promise<void>;
   cancelPendingCharacterDoF(target: string): void;
-  setRimLight(
-    target: string,
-    color: unknown,
-    shadowIntensity: number,
-  ): Promise<void>;
+  setRimLight(target: string, color: unknown, shadowIntensity: number): Promise<void>;
 
   currentFocusData(distance: number): AdvFocusDataRow | null;
   closestFocusDataByZoomRatio(ratio: number): AdvFocusDataRow | null;
-  focusBaseCameraPosition(
-    positionType: number,
-    targetName?: string,
-    focusData?: AdvFocusDataRow | null,
-  ): StoryPoint3;
+  focusBaseCameraPosition(positionType: number, targetName?: string, focusData?: AdvFocusDataRow | null): StoryPoint3;
   focus(options: Readonly<Record<string, unknown>>): Promise<void>;
   zoomByRatio(
     ratio: number,
@@ -396,30 +381,11 @@ export interface StorySceneBackend {
     adjustBackgroundBlur?: boolean,
     signal?: AbortSignal,
   ): Promise<void>;
-  setCharacterStagesY(
-    y: number,
-    duration?: number,
-    ease?: unknown,
-    signal?: AbortSignal,
-  ): Promise<void>;
-  setTilt(
-    angle: number,
-    duration?: number,
-    ease?: unknown,
-    signal?: AbortSignal,
-  ): Promise<void>;
-  setCameraRoll(
-    angle: number,
-    duration?: number,
-    ease?: unknown,
-    signal?: AbortSignal,
-  ): Promise<void>;
+  setCharacterStagesY(y: number, duration?: number, ease?: unknown, signal?: AbortSignal): Promise<void>;
+  setTilt(angle: number, duration?: number, ease?: unknown, signal?: AbortSignal): Promise<void>;
+  setCameraRoll(angle: number, duration?: number, ease?: unknown, signal?: AbortSignal): Promise<void>;
   panFocusDistance(focusPosition: { z?: number }): number;
-  panV2CameraOffset(
-    rotationY: number,
-    distance: number,
-    focusSlideRate: number,
-  ): StoryPoint2;
+  panV2CameraOffset(rotationY: number, distance: number, focusSlideRate: number): StoryPoint2;
   setPanV2CameraOffset(
     offset: Partial<StoryPoint2>,
     duration?: number,
@@ -439,12 +405,7 @@ export interface StorySceneBackend {
   enableCameraShake(...args: unknown[]): Promise<void>;
   disableCameraShake(fadeDuration: number): Promise<void>;
 
-  startTimedPseudoLipSync(
-    targets: string[] | string,
-    talkLength: number,
-    speed?: number,
-    multiplier?: number,
-  ): void;
+  startTimedPseudoLipSync(targets: string[] | string, talkLength: number, speed?: number, multiplier?: number): void;
   startTimedHoldOpenPseudoLipSync(
     targets: string[] | string,
     opening: number,
@@ -476,8 +437,12 @@ export type StorySceneBackendFactory = (
 
 export type StoryResourceBackend = Pick<
   StorySceneBackend,
+  | "prepareStoryResources"
+  | "enumerateStoryResources"
   | "loadTexture"
   | "preloadTexture"
+  | "reservePreloadedTextures"
+  | "preloadVideo"
   | "preloadCharacter"
   | "advanceCharacterPreload"
 >;

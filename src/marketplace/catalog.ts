@@ -13,9 +13,7 @@ export interface VegaPluginCatalogProvider {
    * Returns metadata only. Providers do not install, import, download, or
    * execute plugin code.
    */
-  entries():
-    | readonly VegaPluginMarketplaceEntry[]
-    | Promise<readonly VegaPluginMarketplaceEntry[]>;
+  entries(): readonly VegaPluginMarketplaceEntry[] | Promise<readonly VegaPluginMarketplaceEntry[]>;
 }
 
 export interface VegaPluginCatalogQuery {
@@ -32,10 +30,7 @@ export class VegaStaticPluginCatalog implements VegaPluginCatalogProvider {
   readonly id: string;
   private readonly snapshot: readonly VegaPluginMarketplaceEntry[];
 
-  constructor(
-    entries: readonly VegaPluginMarketplaceEntry[],
-    id = "static",
-  ) {
+  constructor(entries: readonly VegaPluginMarketplaceEntry[], id = "static") {
     this.id = requireCatalogId(id);
     this.snapshot = freezeCatalog(entries);
   }
@@ -53,10 +48,7 @@ export class VegaInMemoryPluginRegistry implements VegaPluginCatalogProvider {
   readonly id: string;
   private readonly catalog = new Map<string, VegaPluginMarketplaceEntry>();
 
-  constructor(
-    entries: readonly VegaPluginMarketplaceEntry[] = [],
-    id = "memory",
-  ) {
+  constructor(entries: readonly VegaPluginMarketplaceEntry[] = [], id = "memory") {
     this.id = requireCatalogId(id);
     for (const entry of entries) this.register(entry);
   }
@@ -121,13 +113,7 @@ export const searchVegaPluginCatalog = (
   const capabilities = normalizeSet(query.capabilities);
   const permissions = normalizeSet(query.permissions);
   const matches = freezeCatalog(entries).filter((entry) => {
-    const haystack = [
-      entry.id,
-      entry.name,
-      entry.description ?? "",
-      entry.publisher ?? "",
-      ...(entry.tags ?? []),
-    ]
+    const haystack = [entry.id, entry.name, entry.description ?? "", entry.publisher ?? "", ...(entry.tags ?? [])]
       .join(" ")
       .toLowerCase();
     if (terms.some((term) => !haystack.includes(term))) return false;
@@ -149,25 +135,13 @@ export const isVegaPluginTargetCompatible = (
   target: VegaPluginLockTarget | undefined,
 ): boolean => {
   if (!targets || !target) return true;
-  if (
-    target.runtime &&
-    targets.runtimes?.length &&
-    !targets.runtimes.includes(target.runtime)
-  ) {
+  if (target.runtime && targets.runtimes?.length && !targets.runtimes.includes(target.runtime)) {
     return false;
   }
-  if (
-    target.platform &&
-    targets.platforms?.length &&
-    !targets.platforms.includes(target.platform)
-  ) {
+  if (target.platform && targets.platforms?.length && !targets.platforms.includes(target.platform)) {
     return false;
   }
-  if (
-    target.architecture &&
-    targets.architectures?.length &&
-    !targets.architectures.includes(target.architecture)
-  ) {
+  if (target.architecture && targets.architectures?.length && !targets.architectures.includes(target.architecture)) {
     return false;
   }
   if (
@@ -200,27 +174,21 @@ export const vegaPluginSourceKey = (source: VegaPluginInstallSource): string => 
   }
 };
 
-const freezeCatalog = (
-  entries: readonly VegaPluginMarketplaceEntry[],
-): readonly VegaPluginMarketplaceEntry[] => {
+const freezeCatalog = (entries: readonly VegaPluginMarketplaceEntry[]): readonly VegaPluginMarketplaceEntry[] => {
   const unique = new Map<string, VegaPluginMarketplaceEntry>();
   for (const candidate of entries) {
     const entry = freezeEntry(candidate);
     const key = catalogEntryKey(entry);
     const existing = unique.get(key);
     if (existing && JSON.stringify(existing) !== JSON.stringify(entry)) {
-      throw new Error(
-        `Conflicting Vega plugin catalog metadata for ${entry.id}@${entry.version}`,
-      );
+      throw new Error(`Conflicting Vega plugin catalog metadata for ${entry.id}@${entry.version}`);
     }
     unique.set(key, existing ?? entry);
   }
   return Object.freeze(sortCatalogEntries([...unique.values()]));
 };
 
-const freezeEntry = (
-  candidate: VegaPluginMarketplaceEntry,
-): VegaPluginMarketplaceEntry => {
+const freezeEntry = (candidate: VegaPluginMarketplaceEntry): VegaPluginMarketplaceEntry => {
   assertVegaPluginMarketplaceEntry(candidate);
   const clone: VegaPluginMarketplaceEntry = {
     format: "vega-plugin-entry",
@@ -229,23 +197,13 @@ const freezeEntry = (
     name: candidate.name,
     version: candidate.version,
     apiVersion: 1,
-    ...(candidate.description !== undefined
-      ? { description: candidate.description }
-      : {}),
+    ...(candidate.description !== undefined ? { description: candidate.description } : {}),
     ...(candidate.publisher !== undefined ? { publisher: candidate.publisher } : {}),
     ...(candidate.tags ? { tags: sortedUnique(candidate.tags) } : {}),
-    ...(candidate.capabilities
-      ? { capabilities: sortedUnique(candidate.capabilities) }
-      : {}),
-    ...(candidate.permissions
-      ? { permissions: sortedUnique(candidate.permissions) }
-      : {}),
-    ...(candidate.dependencies
-      ? { dependencies: sortedRecord(candidate.dependencies) }
-      : {}),
-    ...(candidate.optionalDependencies
-      ? { optionalDependencies: sortedRecord(candidate.optionalDependencies) }
-      : {}),
+    ...(candidate.capabilities ? { capabilities: sortedUnique(candidate.capabilities) } : {}),
+    ...(candidate.permissions ? { permissions: sortedUnique(candidate.permissions) } : {}),
+    ...(candidate.dependencies ? { dependencies: sortedRecord(candidate.dependencies) } : {}),
+    ...(candidate.optionalDependencies ? { optionalDependencies: sortedRecord(candidate.optionalDependencies) } : {}),
     ...(candidate.externalRuntimes?.length
       ? {
           externalRuntimes: Object.freeze(
@@ -257,15 +215,9 @@ const freezeEntry = (
                   name: runtime.name,
                   version: runtime.version,
                   license: runtime.license,
-                  ...(runtime.homepage !== undefined
-                    ? { homepage: runtime.homepage }
-                    : {}),
-                  ...(runtime.optional !== undefined
-                    ? { optional: runtime.optional }
-                    : {}),
-                  provisioning: Object.freeze(
-                    [...new Set(runtime.provisioning)].sort(compareStableText),
-                  ),
+                  ...(runtime.homepage !== undefined ? { homepage: runtime.homepage } : {}),
+                  ...(runtime.optional !== undefined ? { optional: runtime.optional } : {}),
+                  provisioning: Object.freeze([...new Set(runtime.provisioning)].sort(compareStableText)),
                 }),
               ),
           ),
@@ -282,24 +234,16 @@ const freezeTargets = (targets: VegaPluginTargets): VegaPluginTargets =>
   Object.freeze({
     ...(targets.runtimes ? { runtimes: sortedUnique(targets.runtimes) } : {}),
     ...(targets.platforms ? { platforms: sortedUnique(targets.platforms) } : {}),
-    ...(targets.architectures
-      ? { architectures: sortedUnique(targets.architectures) }
-      : {}),
-    ...(targets.engineVersion !== undefined
-      ? { engineVersion: targets.engineVersion }
-      : {}),
+    ...(targets.architectures ? { architectures: sortedUnique(targets.architectures) } : {}),
+    ...(targets.engineVersion !== undefined ? { engineVersion: targets.engineVersion } : {}),
     ...(targets.apiVersions
       ? {
-          apiVersions: Object.freeze(
-            [...new Set(targets.apiVersions)].sort((left, right) => left - right),
-          ),
+          apiVersions: Object.freeze([...new Set(targets.apiVersions)].sort((left, right) => left - right)),
         }
       : {}),
   });
 
-const freezeSource = (
-  source: VegaPluginInstallSource,
-): VegaPluginInstallSource => {
+const freezeSource = (source: VegaPluginInstallSource): VegaPluginInstallSource => {
   switch (source.type) {
     case "registry":
       return Object.freeze({
@@ -320,9 +264,7 @@ const freezeSource = (
   }
 };
 
-const sortCatalogEntries = (
-  entries: VegaPluginMarketplaceEntry[],
-): VegaPluginMarketplaceEntry[] =>
+const sortCatalogEntries = (entries: VegaPluginMarketplaceEntry[]): VegaPluginMarketplaceEntry[] =>
   entries.sort((left, right) => {
     const id = compareStableText(left.id, right.id);
     if (id) return id;
@@ -332,13 +274,7 @@ const sortCatalogEntries = (
     } catch {
       version = compareStableText(right.version, left.version);
     }
-    return (
-      version ||
-      compareStableText(
-        vegaPluginSourceKey(left.source),
-        vegaPluginSourceKey(right.source),
-      )
-    );
+    return version || compareStableText(vegaPluginSourceKey(left.source), vegaPluginSourceKey(right.source));
   });
 
 const catalogEntryKey = (entry: VegaPluginMarketplaceEntry): string =>
@@ -347,29 +283,16 @@ const catalogEntryKey = (entry: VegaPluginMarketplaceEntry): string =>
 const sortedUnique = (values: readonly string[]): readonly string[] =>
   Object.freeze([...new Set(values)].sort(compareStableText));
 
-const sortedRecord = (
-  record: Readonly<Record<string, string>>,
-): Readonly<Record<string, string>> =>
-  Object.freeze(
-    Object.fromEntries(
-      Object.entries(record).sort(([left], [right]) => compareStableText(left, right)),
-    ),
-  );
+const sortedRecord = (record: Readonly<Record<string, string>>): Readonly<Record<string, string>> =>
+  Object.freeze(Object.fromEntries(Object.entries(record).sort(([left], [right]) => compareStableText(left, right))));
 
 const normalizeTerms = (value: string | undefined): readonly string[] =>
-  (value ?? "")
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
+  (value ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
 
 const normalizeSet = (values: readonly string[] | undefined): ReadonlySet<string> =>
   new Set((values ?? []).map((value) => value.trim()).filter(Boolean));
 
-const includesAll = (
-  values: readonly string[] | undefined,
-  expected: ReadonlySet<string>,
-): boolean => {
+const includesAll = (values: readonly string[] | undefined, expected: ReadonlySet<string>): boolean => {
   if (!expected.size) return true;
   const available = new Set(values ?? []);
   return [...expected].every((value) => available.has(value));
@@ -380,5 +303,4 @@ const requireCatalogId = (id: string): string => {
   return id;
 };
 
-const compareStableText = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
+const compareStableText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);

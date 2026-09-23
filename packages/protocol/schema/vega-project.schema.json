@@ -6,48 +6,80 @@
   "additionalProperties": false,
   "required": ["format", "formatVersion", "id", "title", "entryScene", "scenes"],
   "properties": {
-    "format": { "const": "vega-project" },
-    "formatVersion": { "const": 1 },
-    "id": { "type": "string", "minLength": 1 },
-    "title": { "$ref": "#/$defs/localizedText" },
-    "entryScene": { "type": "string", "minLength": 1 },
+    "format": {
+      "const": "vega-project"
+    },
+    "formatVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "$ref": "#/$defs/localizedText"
+    },
+    "entryScene": {
+      "type": "string",
+      "minLength": 1
+    },
     "engine": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "minimumVersion": { "type": "string", "minLength": 1 },
-        "features": { "type": "array", "items": { "type": "string" } }
+        "minimumVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
       }
     },
     "metadata": {
       "type": "object",
       "properties": {
-        "vega:localization": { "$ref": "#/$defs/projectLocalization" }
+        "vega:localization": {
+          "$ref": "#/$defs/projectLocalization"
+        }
       },
       "additionalProperties": true
     },
     "assets": {
       "type": "object",
-      "additionalProperties": { "$ref": "#/$defs/asset" }
+      "additionalProperties": {
+        "$ref": "#/$defs/asset"
+      }
     },
     "plugins": {
       "type": "array",
-      "items": { "$ref": "#/$defs/plugin" }
+      "items": {
+        "$ref": "#/$defs/plugin"
+      }
     },
     "scenes": {
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": { "$ref": "#/$defs/scene" }
+      "additionalProperties": {
+        "$ref": "#/$defs/scene"
+      }
     }
   },
   "$defs": {
     "localizedText": {
       "oneOf": [
-        { "type": "string" },
+        {
+          "type": "string"
+        },
         {
           "type": "object",
           "minProperties": 1,
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       ]
     },
@@ -56,14 +88,24 @@
       "additionalProperties": false,
       "required": ["version", "languages", "defaultLanguage"],
       "properties": {
-        "version": { "const": 1 },
+        "version": {
+          "const": 1
+        },
         "languages": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/projectLanguage" }
+          "items": {
+            "$ref": "#/$defs/projectLanguage"
+          }
         },
-        "defaultLanguage": { "type": "string", "minLength": 1 },
-        "fallbackLanguage": { "type": "string", "minLength": 1 }
+        "defaultLanguage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fallbackLanguage": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "$comment": "Language tags are canonicalized before uniqueness and declaration checks. defaultLanguage and fallbackLanguage must name declared languages."
     },
@@ -72,13 +114,21 @@
       "additionalProperties": false,
       "required": ["tag"],
       "properties": {
-        "tag": { "type": "string", "minLength": 1 },
-        "label": { "$ref": "#/$defs/localizedText" },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "$ref": "#/$defs/localizedText"
+        },
         "fontAssets": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       },
       "$comment": "Every fontAssets entry must reference a project asset whose type is font."
@@ -87,11 +137,32 @@
       "type": "object",
       "required": ["command"],
       "properties": {
-        "command": { "type": "integer", "minimum": 0 },
-        "index": { "type": "integer", "minimum": 0 },
-        "key": { "type": "string", "minLength": 1 },
-        "name": { "type": "string" },
-        "noWait": { "type": "boolean" }
+        "command": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*:[^@]+@[1-9][0-9]*$"
+            }
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "noWait": {
+          "type": "boolean"
+        }
       },
       "additionalProperties": true
     },
@@ -100,10 +171,22 @@
       "additionalProperties": false,
       "required": ["id", "commands"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "title": { "$ref": "#/$defs/localizedText" },
-        "commands": { "type": "array", "items": { "$ref": "#/$defs/command" } },
-        "metadata": { "type": "object" }
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        },
+        "metadata": {
+          "type": "object"
+        }
       }
     },
     "asset": {
@@ -111,14 +194,31 @@
       "additionalProperties": false,
       "required": ["type", "source"],
       "properties": {
-        "type": { "enum": ["image", "audio", "video", "model", "font", "data", "other"] },
-        "source": { "type": "string", "minLength": 1 },
-        "hash": { "type": "string", "minLength": 1 },
-        "mediaType": { "type": "string", "minLength": 1 },
-        "bytes": { "type": "integer", "minimum": 0 },
+        "type": {
+          "enum": ["image", "audio", "video", "model", "font", "data", "other"]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
         "variants": {
           "type": "object",
-          "additionalProperties": { "type": "string", "minLength": 1 }
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -127,26 +227,49 @@
       "additionalProperties": false,
       "required": ["id", "version"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "minLength": 1 },
-        "required": { "type": "boolean" },
-        "configuration": { "type": "object" },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "configuration": {
+          "type": "object"
+        },
         "capabilities": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "permissions": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "dependencies": {
           "type": "object",
-          "additionalProperties": { "type": "string", "minLength": 1 }
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "targets": { "$ref": "#/$defs/pluginTargets" },
-        "source": { "$ref": "#/$defs/pluginSource" }
+        "targets": {
+          "$ref": "#/$defs/pluginTargets"
+        },
+        "source": {
+          "$ref": "#/$defs/pluginSource"
+        }
       }
     },
     "pluginTargets": {
@@ -156,23 +279,38 @@
         "runtimes": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "platforms": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "architectures": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "engineVersion": { "type": "string", "minLength": 1 },
+        "engineVersion": {
+          "type": "string",
+          "minLength": 1
+        },
         "apiVersions": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "type": "integer", "minimum": 1 }
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },
@@ -183,9 +321,17 @@
           "additionalProperties": false,
           "required": ["type", "package"],
           "properties": {
-            "type": { "const": "registry" },
-            "package": { "type": "string", "minLength": 1 },
-            "registry": { "type": "string", "format": "uri" }
+            "type": {
+              "const": "registry"
+            },
+            "package": {
+              "type": "string",
+              "minLength": 1
+            },
+            "registry": {
+              "type": "string",
+              "format": "uri"
+            }
           }
         },
         {
@@ -193,9 +339,17 @@
           "additionalProperties": false,
           "required": ["type", "url", "integrity"],
           "properties": {
-            "type": { "const": "url" },
-            "url": { "type": "string", "format": "uri" },
-            "integrity": { "type": "string", "minLength": 1 }
+            "type": {
+              "const": "url"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "integrity": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         {
@@ -203,8 +357,13 @@
           "additionalProperties": false,
           "required": ["type", "path"],
           "properties": {
-            "type": { "const": "workspace" },
-            "path": { "type": "string", "minLength": 1 }
+            "type": {
+              "const": "workspace"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         {
@@ -212,8 +371,13 @@
           "additionalProperties": false,
           "required": ["type", "key"],
           "properties": {
-            "type": { "const": "builtin" },
-            "key": { "type": "string", "minLength": 1 }
+            "type": {
+              "const": "builtin"
+            },
+            "key": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       ]

@@ -48,27 +48,9 @@ const MARKETPLACE_ENTRY_KEYS = new Set([
   "integrity",
 ]);
 const CATALOG_KEYS = new Set(["format", "formatVersion", "id", "plugins"]);
-const TARGET_KEYS = new Set([
-  "runtimes",
-  "platforms",
-  "architectures",
-  "engineVersion",
-  "apiVersions",
-]);
-const LOCK_KEYS = new Set([
-  "format",
-  "formatVersion",
-  "projectFormatVersion",
-  "target",
-  "plugins",
-]);
-const LOCK_TARGET_KEYS = new Set([
-  "runtime",
-  "platform",
-  "architecture",
-  "engineVersion",
-  "apiVersion",
-]);
+const TARGET_KEYS = new Set(["runtimes", "platforms", "architectures", "engineVersion", "apiVersions"]);
+const LOCK_KEYS = new Set(["format", "formatVersion", "projectFormatVersion", "target", "plugins"]);
+const LOCK_TARGET_KEYS = new Set(["runtime", "platform", "architecture", "engineVersion", "apiVersion"]);
 const LOCK_ENTRY_KEYS = new Set([
   "id",
   "version",
@@ -79,15 +61,7 @@ const LOCK_ENTRY_KEYS = new Set([
   "permissions",
   "externalRuntimes",
 ]);
-const EXTERNAL_RUNTIME_KEYS = new Set([
-  "id",
-  "name",
-  "version",
-  "license",
-  "homepage",
-  "optional",
-  "provisioning",
-]);
+const EXTERNAL_RUNTIME_KEYS = new Set(["id", "name", "version", "license", "homepage", "optional", "provisioning"]);
 
 export class VegaPluginProtocolError extends TypeError {
   readonly path: string;
@@ -99,42 +73,31 @@ export class VegaPluginProtocolError extends TypeError {
   }
 }
 
-export const parseVegaProjectPlugin = (
-  input: string | Uint8Array | unknown,
-): VegaProjectPlugin => {
+export const parseVegaProjectPlugin = (input: string | Uint8Array | unknown): VegaProjectPlugin => {
   const value = parseInput(input);
   assertVegaProjectPlugin(value);
   return value;
 };
 
-export const parseVegaPluginMarketplaceEntry = (
-  input: string | Uint8Array | unknown,
-): VegaPluginMarketplaceEntry => {
+export const parseVegaPluginMarketplaceEntry = (input: string | Uint8Array | unknown): VegaPluginMarketplaceEntry => {
   const value = parseInput(input);
   assertVegaPluginMarketplaceEntry(value);
   return value;
 };
 
-export const parseVegaPluginCatalog = (
-  input: string | Uint8Array | unknown,
-): VegaPluginCatalog => {
+export const parseVegaPluginCatalog = (input: string | Uint8Array | unknown): VegaPluginCatalog => {
   const value = parseInput(input);
   assertVegaPluginCatalog(value);
   return value;
 };
 
-export const parseVegaPluginLock = (
-  input: string | Uint8Array | unknown,
-): VegaPluginLock => {
+export const parseVegaPluginLock = (input: string | Uint8Array | unknown): VegaPluginLock => {
   const value = parseInput(input);
   assertVegaPluginLock(value);
   return value;
 };
 
-export function assertVegaProjectPlugin(
-  value: unknown,
-  path = "$",
-): asserts value is VegaProjectPlugin {
+export function assertVegaProjectPlugin(value: unknown, path = "$"): asserts value is VegaProjectPlugin {
   assertSafeJson(value, path, 0, { nodes: MAX_PROTOCOL_NODES });
   const plugin = requireRecord(value, path);
   rejectUnknownKeys(plugin, PROJECT_PLUGIN_KEYS, path);
@@ -177,10 +140,7 @@ export function assertVegaPluginMarketplaceEntry(
   requirePluginId(entry.id, `${path}.id`);
   requireNonEmptyString(entry.name, `${path}.name`);
   requireNonEmptyString(entry.version, `${path}.version`);
-  if (
-    !Number.isSafeInteger(entry.apiVersion) ||
-    Number(entry.apiVersion) < 1
-  ) {
+  if (!Number.isSafeInteger(entry.apiVersion) || Number(entry.apiVersion) < 1) {
     fail(`${path}.apiVersion`, "expected a positive safe integer");
   }
   if (entry.description !== undefined && typeof entry.description !== "string") {
@@ -210,10 +170,7 @@ export function assertVegaPluginMarketplaceEntry(
   }
 }
 
-export function assertVegaPluginCatalog(
-  value: unknown,
-  path = "$",
-): asserts value is VegaPluginCatalog {
+export function assertVegaPluginCatalog(value: unknown, path = "$"): asserts value is VegaPluginCatalog {
   assertSafeJson(value, path, 0, { nodes: MAX_PROTOCOL_NODES });
   const catalog = requireRecord(value, path);
   rejectUnknownKeys(catalog, CATALOG_KEYS, path);
@@ -239,10 +196,7 @@ export function assertVegaPluginCatalog(
   }
 }
 
-export function assertVegaPluginLock(
-  value: unknown,
-  path = "$",
-): asserts value is VegaPluginLock {
+export function assertVegaPluginLock(value: unknown, path = "$"): asserts value is VegaPluginLock {
   assertSafeJson(value, path, 0, { nodes: MAX_PROTOCOL_NODES });
   const lock = requireRecord(value, path);
   rejectUnknownKeys(lock, LOCK_KEYS, path);
@@ -275,27 +229,21 @@ export function assertVegaPluginLock(
     for (const [dependencyId, dependencyVersion] of dependencies) {
       const selectedVersion = versions.get(dependencyId);
       if (selectedVersion === undefined) {
-        fail(
-          `${path}.plugins[${index}].dependencies.${dependencyId}`,
-          "dependency is missing from the lock",
-        );
+        fail(`${path}.plugins[${index}].dependencies.${dependencyId}`, "dependency is missing from the lock");
       }
       if (selectedVersion !== dependencyVersion) {
-        fail(
-          `${path}.plugins[${index}].dependencies.${dependencyId}`,
-          `expected selected version ${selectedVersion}`,
-        );
+        fail(`${path}.plugins[${index}].dependencies.${dependencyId}`, `expected selected version ${selectedVersion}`);
       }
     }
-    graph.set(entry.id, dependencies.map(([id]) => id));
+    graph.set(
+      entry.id,
+      dependencies.map(([id]) => id),
+    );
   }
   assertAcyclic(graph, path);
 }
 
-export function assertVegaPluginTargets(
-  value: unknown,
-  path = "$",
-): asserts value is VegaPluginTargets {
+export function assertVegaPluginTargets(value: unknown, path = "$"): asserts value is VegaPluginTargets {
   const targets = requireRecord(value, path);
   rejectUnknownKeys(targets, TARGET_KEYS, path);
   for (const field of ["runtimes", "platforms", "architectures"] as const) {
@@ -309,19 +257,14 @@ export function assertVegaPluginTargets(
   if (targets.apiVersions !== undefined) {
     if (
       !Array.isArray(targets.apiVersions) ||
-      targets.apiVersions.some(
-        (version) => !Number.isSafeInteger(version) || Number(version) < 1,
-      )
+      targets.apiVersions.some((version) => !Number.isSafeInteger(version) || Number(version) < 1)
     ) {
       fail(`${path}.apiVersions`, "expected an array of positive safe integers");
     }
   }
 }
 
-export function assertVegaPluginInstallSource(
-  value: unknown,
-  path = "$",
-): asserts value is VegaPluginInstallSource {
+export function assertVegaPluginInstallSource(value: unknown, path = "$"): asserts value is VegaPluginInstallSource {
   const source = requireRecord(value, path);
   switch (source.type) {
     case "registry":
@@ -349,34 +292,20 @@ export function assertVegaPluginInstallSource(
   }
 }
 
-function assertLockTarget(
-  value: unknown,
-  path: string,
-): asserts value is VegaPluginLockTarget {
+function assertLockTarget(value: unknown, path: string): asserts value is VegaPluginLockTarget {
   const target = requireRecord(value, path);
   rejectUnknownKeys(target, LOCK_TARGET_KEYS, path);
-  for (const field of [
-    "runtime",
-    "platform",
-    "architecture",
-    "engineVersion",
-  ] as const) {
+  for (const field of ["runtime", "platform", "architecture", "engineVersion"] as const) {
     if (target[field] !== undefined) {
       requireNonEmptyString(target[field], `${path}.${field}`);
     }
   }
-  if (
-    target.apiVersion !== undefined &&
-    (!Number.isSafeInteger(target.apiVersion) || Number(target.apiVersion) < 1)
-  ) {
+  if (target.apiVersion !== undefined && (!Number.isSafeInteger(target.apiVersion) || Number(target.apiVersion) < 1)) {
     fail(`${path}.apiVersion`, "expected a positive safe integer");
   }
 }
 
-function assertLockEntry(
-  value: unknown,
-  path: string,
-): asserts value is VegaPluginLockEntry {
+function assertLockEntry(value: unknown, path: string): asserts value is VegaPluginLockEntry {
   const entry = requireRecord(value, path);
   rejectUnknownKeys(entry, LOCK_ENTRY_KEYS, path);
   requirePluginId(entry.id, `${path}.id`);
@@ -388,11 +317,7 @@ function assertLockEntry(
   const dependencies = requireRecord(entry.dependencies, `${path}.dependencies`);
   const dependencyEntries = Object.entries(dependencies);
   const sortedKeys = Object.keys(dependencies).sort(compareJsonObjectKeys);
-  if (
-    dependencyEntries.some(
-      ([dependency], index) => dependency !== sortedKeys[index],
-    )
-  ) {
+  if (dependencyEntries.some(([dependency], index) => dependency !== sortedKeys[index])) {
     fail(`${path}.dependencies`, "dependency keys must be sorted by id");
   }
   for (const [dependency, version] of dependencyEntries) {
@@ -442,16 +367,11 @@ function assertExternalRuntimes(
     }
     const modes = runtime.provisioning as readonly string[];
     if (
-      modes.some(
-        (mode) => mode !== "host" && mode !== "application-bundle",
-      ) ||
+      modes.some((mode) => mode !== "host" && mode !== "application-bundle") ||
       new Set(modes).size !== modes.length ||
       [...modes].sort(compareJsonObjectKeys).some((mode, offset) => mode !== modes[offset])
     ) {
-      fail(
-        `${itemPath}.provisioning`,
-        "expected unique sorted host/application-bundle modes",
-      );
+      fail(`${itemPath}.provisioning`, "expected unique sorted host/application-bundle modes");
     }
   }
 }
@@ -464,10 +384,7 @@ function assertDependencies(value: unknown, path: string): void {
   }
 }
 
-function assertAcyclic(
-  graph: ReadonlyMap<string, readonly string[]>,
-  path: string,
-): void {
+function assertAcyclic(graph: ReadonlyMap<string, readonly string[]>, path: string): void {
   const visiting = new Set<string>();
   const visited = new Set<string>();
   const stack: string[] = [];
@@ -490,17 +407,13 @@ function assertAcyclic(
 
 function parseInput(input: string | Uint8Array | unknown): unknown {
   if (typeof input !== "string" && !(input instanceof Uint8Array)) return input;
-  const bytes =
-    typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
   if (bytes.byteLength > MAX_PROTOCOL_BYTES) {
     fail("$", `document exceeds ${MAX_PROTOCOL_BYTES} bytes`);
   }
   let source: string;
   try {
-    source =
-      typeof input === "string"
-        ? input
-        : new TextDecoder("utf-8", { fatal: true }).decode(input);
+    source = typeof input === "string" ? input : new TextDecoder("utf-8", { fatal: true }).decode(input);
   } catch (error) {
     fail("$", error instanceof Error ? error.message : "invalid UTF-8");
   }
@@ -521,11 +434,7 @@ function assertSafeJson(
   if (budget.nodes < 0 || depth > MAX_PROTOCOL_DEPTH) {
     fail(path, "JSON structure is too complex");
   }
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
     return;
   }
   if (typeof value === "number") {
@@ -533,9 +442,7 @@ function assertSafeJson(
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((entry, index) =>
-      assertSafeJson(entry, `${path}[${index}]`, depth + 1, budget),
-    );
+    value.forEach((entry, index) => assertSafeJson(entry, `${path}[${index}]`, depth + 1, budget));
     return;
   }
   const record = requireRecord(value, path);
@@ -555,10 +462,7 @@ function assertStringArray(value: unknown, path: string): asserts value is strin
   }
 }
 
-function assertSortedStringArray(
-  value: unknown,
-  path: string,
-): asserts value is string[] {
+function assertSortedStringArray(value: unknown, path: string): asserts value is string[] {
   assertStringArray(value, path);
   for (let index = 1; index < value.length; index += 1) {
     if (value[index - 1]! >= value[index]!) {
@@ -605,11 +509,7 @@ function requireAbsoluteUrl(value: unknown, path: string): string {
   return source;
 }
 
-function rejectUnknownKeys(
-  value: Record<string, unknown>,
-  allowed: ReadonlySet<string>,
-  path: string,
-): void {
+function rejectUnknownKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, path: string): void {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) fail(`${path}.${key}`, "unknown field");
   }
@@ -631,10 +531,7 @@ const compareJsonObjectKeys = (left: string, right: string): number => {
 const arrayIndex = (value: string): number | null => {
   if (!/^(?:0|[1-9]\d*)$/.test(value)) return null;
   const index = Number(value);
-  return Number.isSafeInteger(index) && index >= 0 && index < 2 ** 32 - 1
-    ? index
-    : null;
+  return Number.isSafeInteger(index) && index >= 0 && index < 2 ** 32 - 1 ? index : null;
 };
 
-const compareStableText = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
+const compareStableText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);

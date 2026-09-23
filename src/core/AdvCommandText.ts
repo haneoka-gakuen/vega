@@ -1,7 +1,6 @@
 import { resolveStoryLocalizedText } from "../runtime";
 import type { AdvCommand } from "../types/AdvRuntime";
 
-const hasLocalizedText = (value: unknown): boolean => Boolean(resolveStoryLocalizedText(value).text.trim());
 const hasOwn = (value: object, key: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(value, key);
 
 /**
@@ -12,8 +11,8 @@ const hasOwn = (value: object, key: PropertyKey): boolean => Object.prototype.ha
  * back to a retained native ID. Native rows without a semantic projection can
  * still use their AdvTextID presence bit.
  */
-export const hasSemanticAdvText = (command: AdvCommand): boolean => {
-  if (hasOwn(command, "text")) return hasLocalizedText(command.text);
+export const hasSemanticAdvText = (command: AdvCommand, resolve = resolveStoryLocalizedText): boolean => {
+  if (hasOwn(command, "text")) return Boolean(resolve(command.text).text.trim());
   const sourceId = command.advTextId ?? command.raw?.AdvTextID;
   return Boolean(String(sourceId ?? "").trim());
 };

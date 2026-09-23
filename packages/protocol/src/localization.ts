@@ -1,20 +1,9 @@
-import type {
-  VegaAsset,
-  VegaLocalizedText,
-  VegaProjectLanguage,
-  VegaProjectLocalization,
-} from "./model.js";
+import type { VegaAsset, VegaLocalizedText, VegaProjectLanguage, VegaProjectLocalization } from "./model.js";
 
-export const VEGA_PROJECT_LOCALIZATION_METADATA_KEY =
-  "vega:localization" as const;
+export const VEGA_PROJECT_LOCALIZATION_METADATA_KEY = "vega:localization" as const;
 export const VEGA_PROJECT_LOCALIZATION_VERSION = 1 as const;
 
-const LOCALIZATION_KEYS = new Set([
-  "version",
-  "languages",
-  "defaultLanguage",
-  "fallbackLanguage",
-]);
+const LOCALIZATION_KEYS = new Set(["version", "languages", "defaultLanguage", "fallbackLanguage"]);
 const LANGUAGE_KEYS = new Set(["tag", "label", "fontAssets"]);
 const GRANDFATHERED_LANGUAGE_TAGS = new Set([
   "art-lojban",
@@ -76,8 +65,7 @@ export class VegaLocalizationParseError extends TypeError {
 /**
  * Canonicalizes a structurally valid BCP 47 language tag.
  */
-export const canonicalizeVegaLanguageTag = (tag: string): string =>
-  canonicalizeLanguageTagAt(tag, "$");
+export const canonicalizeVegaLanguageTag = (tag: string): string => canonicalizeLanguageTagAt(tag, "$");
 
 /**
  * Parses and canonicalizes versioned project-localization metadata.
@@ -121,32 +109,18 @@ export const parseVegaProjectLocalization = (
       parsed.label = parseLocalizedText(language.label, `${path}.label`);
     }
     if (language.fontAssets !== undefined) {
-      parsed.fontAssets = parseFontAssets(
-        language.fontAssets,
-        `${path}.fontAssets`,
-        assets,
-      );
+      parsed.fontAssets = parseFontAssets(language.fontAssets, `${path}.fontAssets`, assets);
     }
     return parsed;
   });
 
-  const defaultLanguage = canonicalizeLanguageTagAt(
-    localization.defaultLanguage,
-    "$.defaultLanguage",
-  );
+  const defaultLanguage = canonicalizeLanguageTagAt(localization.defaultLanguage, "$.defaultLanguage");
   assertDeclaredLanguage(defaultLanguage, canonicalTags, "$.defaultLanguage");
 
   let fallbackLanguage: string | undefined;
   if (localization.fallbackLanguage !== undefined) {
-    fallbackLanguage = canonicalizeLanguageTagAt(
-      localization.fallbackLanguage,
-      "$.fallbackLanguage",
-    );
-    assertDeclaredLanguage(
-      fallbackLanguage,
-      canonicalTags,
-      "$.fallbackLanguage",
-    );
+    fallbackLanguage = canonicalizeLanguageTagAt(localization.fallbackLanguage, "$.fallbackLanguage");
+    assertDeclaredLanguage(fallbackLanguage, canonicalTags, "$.fallbackLanguage");
   }
 
   return {
@@ -160,9 +134,7 @@ export const parseVegaProjectLocalization = (
 /**
  * Parses localized text and canonicalizes all language-map keys.
  */
-export const parseVegaLocalizedText = (
-  input: unknown,
-): VegaLocalizedText => parseLocalizedText(input, "$");
+export const parseVegaLocalizedText = (input: unknown): VegaLocalizedText => parseLocalizedText(input, "$");
 
 /**
  * Resolves one declared language using RFC 4647-style lookup, followed by the
@@ -203,11 +175,7 @@ export const resolveVegaLocalizedText = (
   if (typeof localized === "string") return { text: localized };
 
   const selected = resolveParsedLanguageTag(parsed, options);
-  const candidates = unique([
-    selected,
-    parsed.fallbackLanguage,
-    parsed.defaultLanguage,
-  ]);
+  const candidates = unique([selected, parsed.fallbackLanguage, parsed.defaultLanguage]);
   for (const candidate of candidates) {
     const match = lookupLocalizedText(localized, candidate);
     if (match) return match;
@@ -219,15 +187,10 @@ const resolveParsedLanguageTag = (
   localization: VegaProjectLocalization,
   options: VegaLanguageResolutionOptions,
 ): string => {
-  const available = new Map(
-    localization.languages.map((language) => [
-      language.tag.toLowerCase(),
-      language.tag,
-    ]),
-  );
+  const available = new Map(localization.languages.map((language) => [language.tag.toLowerCase(), language.tag]));
   const requested =
     options.requested === undefined || options.requested === "auto"
-      ? options.preferredLanguages ?? []
+      ? (options.preferredLanguages ?? [])
       : [options.requested];
 
   if (requested.length === 0) return localization.defaultLanguage;
@@ -240,10 +203,7 @@ const resolveParsedLanguageTag = (
   return localization.fallbackLanguage ?? localization.defaultLanguage;
 };
 
-const lookupAvailableLanguage = (
-  available: ReadonlyMap<string, string>,
-  requested: string,
-): string | undefined => {
+const lookupAvailableLanguage = (available: ReadonlyMap<string, string>, requested: string): string | undefined => {
   let candidate = requested;
   while (candidate) {
     const match = available.get(candidate.toLowerCase());
@@ -276,10 +236,7 @@ const truncateLanguageRange = (tag: string): string => {
   return subtags.join("-");
 };
 
-const parseLocalizedText = (
-  value: unknown,
-  path: string,
-): VegaLocalizedText => {
+const parseLocalizedText = (value: unknown, path: string): VegaLocalizedText => {
   if (typeof value === "string") return value;
   const localized = requireRecord(value, path);
   if (Object.keys(localized).length === 0) {
@@ -301,11 +258,7 @@ const parseLocalizedText = (
   return parsed;
 };
 
-const parseFontAssets = (
-  value: unknown,
-  path: string,
-  assets?: Readonly<Record<string, VegaAsset>>,
-): string[] => {
+const parseFontAssets = (value: unknown, path: string, assets?: Readonly<Record<string, VegaAsset>>): string[] => {
   const assetIds = value;
   if (!Array.isArray(assetIds) || assetIds.length === 0) {
     fail(path, "expected a non-empty array");
@@ -329,11 +282,7 @@ const parseFontAssets = (
   return parsed;
 };
 
-const assertDeclaredLanguage = (
-  tag: string,
-  canonicalTags: ReadonlySet<string>,
-  path: string,
-): void => {
+const assertDeclaredLanguage = (tag: string, canonicalTags: ReadonlySet<string>, path: string): void => {
   if (!canonicalTags.has(tag.toLowerCase())) {
     fail(path, `language ${JSON.stringify(tag)} is not declared`);
   }
@@ -342,10 +291,7 @@ const assertDeclaredLanguage = (
 const canonicalizeLanguageTagAt = (value: unknown, path: string): string => {
   const tag = requireNonEmptyString(value, path).trim().replace(/_/gu, "-");
   const lower = tag.toLowerCase();
-  if (
-    GRANDFATHERED_LANGUAGE_TAGS.has(lower) ||
-    /^x(?:-[a-z0-9]{1,8})+$/u.test(lower)
-  ) {
+  if (GRANDFATHERED_LANGUAGE_TAGS.has(lower) || /^x(?:-[a-z0-9]{1,8})+$/u.test(lower)) {
     return lower;
   }
   try {
@@ -365,9 +311,7 @@ const tryCanonicalizeLanguageTag = (value: unknown): string | undefined => {
   }
 };
 
-const unique = (
-  values: readonly (string | undefined)[],
-): string[] => {
+const unique = (values: readonly (string | undefined)[]): string[] => {
   const seen = new Set<string>();
   const result: string[] = [];
   for (const value of values) {
@@ -378,10 +322,7 @@ const unique = (
   return result;
 };
 
-const requireRecord = (
-  value: unknown,
-  path: string,
-): Record<string, unknown> => {
+const requireRecord = (value: unknown, path: string): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     fail(path, "expected an object");
   }
@@ -404,11 +345,7 @@ function requireNonEmptyString(value: unknown, path: string): string {
   return value;
 }
 
-const rejectUnknownKeys = (
-  value: Record<string, unknown>,
-  allowed: ReadonlySet<string>,
-  path: string,
-): void => {
+const rejectUnknownKeys = (value: Record<string, unknown>, allowed: ReadonlySet<string>, path: string): void => {
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) fail(`${path}.${key}`, "unknown field");
   }

@@ -4,9 +4,7 @@ import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(
-  process.argv[2] ??
-    process.env.VEGA_DISTRIBUTION_ROOT ??
-    fileURLToPath(new URL("..", import.meta.url)),
+  process.argv[2] ?? process.env.VEGA_DISTRIBUTION_ROOT ?? fileURLToPath(new URL("..", import.meta.url)),
 );
 const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 const normalized = (value) => value.split("\\").join("/");
@@ -34,8 +32,7 @@ const forbiddenContentPatterns = [
   /assets\/urp\/film-grain/i,
   /(?:\bfrom\s*|\bimport\s*\(\s*)["']three(?:\/[^"']*)?["']/i,
 ];
-const isLegalNotice = (path) =>
-  path === "THIRD_PARTY_NOTICES.md" || path.endsWith("/THIRD_PARTY_NOTICES.md");
+const isLegalNotice = (path) => path === "THIRD_PARTY_NOTICES.md" || path.endsWith("/THIRD_PARTY_NOTICES.md");
 
 // Known removed binary payloads. Renaming one must not bypass the path gate.
 const forbiddenAssetHashes = new Set([
@@ -75,8 +72,7 @@ const rootsToScan = [
 ];
 
 const isText = (path) =>
-  /\.(?:[cm]?[jt]sx?|vue|json|md|css|scss|html|d\.ts|map|txt|yml|yaml)$/i.test(path) ||
-  !/\.[a-z0-9]+$/i.test(path);
+  /\.(?:[cm]?[jt]sx?|vue|json|md|css|scss|html|d\.ts|map|txt|yml|yaml)$/i.test(path) || !/\.[a-z0-9]+$/i.test(path);
 
 const visit = (absolutePath) => {
   if (!existsSync(absolutePath)) return;
@@ -113,12 +109,11 @@ const collectExportTargets = (value) => {
   if (!value || typeof value !== "object") return [];
   return Object.values(value).flatMap(collectExportTargets);
 };
-const exportTargets = new Set([
-  manifest.main,
-  manifest.module,
-  manifest.types,
-  ...collectExportTargets(manifest.exports),
-].filter((value) => typeof value === "string" && value.startsWith("./")));
+const exportTargets = new Set(
+  [manifest.main, manifest.module, manifest.types, ...collectExportTargets(manifest.exports)].filter(
+    (value) => typeof value === "string" && value.startsWith("./"),
+  ),
+);
 for (const target of exportTargets) {
   if (!existsSync(resolve(root, target))) {
     violations.push(`package.json: export target does not exist (${target})`);
@@ -133,18 +128,11 @@ if (
 ) {
   violations.push("package.json: forbidden restricted SDK or asset path");
 }
-for (const dependencyField of [
-  "dependencies",
-  "devDependencies",
-  "optionalDependencies",
-  "peerDependencies",
-]) {
+for (const dependencyField of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
   const dependencies = manifest[dependencyField] ?? {};
   for (const dependency of ["three", "@types/three"]) {
     if (Object.hasOwn(dependencies, dependency)) {
-      violations.push(
-        `package.json: ${dependencyField} must not contain graphics adapter dependency ${dependency}`,
-      );
+      violations.push(`package.json: ${dependencyField} must not contain graphics adapter dependency ${dependency}`);
     }
   }
 }

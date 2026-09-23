@@ -5,10 +5,7 @@ import { ADV_COMMAND, mergeAdvRuntime } from "../core/AdvConstants";
 import { autoPlayIntervalSeconds, type AdvAutoPlayInterval } from "../core/AdvAutoPlayInterval";
 import { hasSemanticAdvText, splitAdvTargetNames } from "../core/AdvCommandText";
 import { iterateAdvCommands } from "../core/AdvCommandTraversal";
-import {
-  createAdvTextRenderValue,
-  type AdvTextRenderValue,
-} from "../core/AdvTextRenderValue";
+import { createAdvTextRenderValue, type AdvTextRenderValue } from "../core/AdvTextRenderValue";
 import {
   requireScopedStoryResourceUrl,
   resolveStoryLocalizedText,
@@ -20,6 +17,7 @@ import type { AdvCommand, AdvRuntimeConfig, AdvStory, AdvVoiceEntry } from "../t
 import StoryIcon from "./StoryIcon.vue";
 import StoryRichText from "./StoryRichText";
 import type { StoryRichTextRenderer } from "./StoryRichText";
+import { prepareStoryAudio } from "../sound/StoryAudioPrimer";
 
 defineOptions({ name: "StoryPlayerText" });
 
@@ -237,7 +235,6 @@ watch([playingIndex, playingVoices], ([, voices]) => {
       const playableUrl = canonicalResourceUrl(voice.playableUrl, "voice playback");
       const howl = new Howl({
         src: [playableUrl],
-        html5: true,
         volume: clampVolume(props.volume),
         autoplay: true,
         onend: () => settleHowlTalk(howl, generation),
@@ -486,7 +483,11 @@ function resolveTalkCharacter(
   const characterId = explicitCharacterId || fromTarget?.characterId || 0;
   const fromId = characterById.get(characterId);
   const faceImage =
-    characterImage(target) || characterImage(command.characterModel) || fromTarget?.faceImage || fromId?.faceImage || "";
+    characterImage(target) ||
+    characterImage(command.characterModel) ||
+    fromTarget?.faceImage ||
+    fromId?.faceImage ||
+    "";
   const resolvedName = firstResolvedText(
     target?.name,
     target?.nickname,
@@ -643,6 +644,7 @@ function hasPlayableVoice(snippet: { voices?: AdvVoiceEntry[] } | null): boolean
 }
 
 function onClickText(index: number) {
+  prepareStoryAudio();
   const snippet = snippets.value[index];
   if (!snippet || snippet.type !== "talk" || !hasPlayableVoice(snippet)) return;
   cancelNextVoice();
@@ -658,6 +660,7 @@ function onClickText(index: number) {
 }
 
 function play() {
+  prepareStoryAudio();
   cancelNextVoice();
   if (playingIndex.value != null && howlTalk.length) {
     for (const howl of howlTalk) {
@@ -737,6 +740,8 @@ defineExpose({ pause, play });
     class="adv-text-player"
     :style="{ fontSize: `${textScale}rem` }"
     :aria-busy="snippetsBuilding || undefined"
+    @pointerdown.capture="prepareStoryAudio"
+    @keydown.capture="prepareStoryAudio"
     @scroll.passive="scheduleTextViewportUpdate"
   >
     <div v-if="snippets.length" class="adv-text-player__stream" :style="textCanvasStyle">

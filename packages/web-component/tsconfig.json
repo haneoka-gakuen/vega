@@ -10,6 +10,7 @@
     "noImplicitOverride": true,
     "noUncheckedIndexedAccess": false,
     "paths": {
+      "@haneoka/vega/audio": ["../../src/audio-entry.ts"],
       "@haneoka/vega/engine": ["../../src/engine-entry.ts"],
       "@haneoka/vega-protocol": ["../protocol/src/index.ts"],
       "@haneoka/vega-protocol/*": ["../protocol/src/*.ts"]

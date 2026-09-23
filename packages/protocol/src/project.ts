@@ -1,20 +1,12 @@
-import type {
-  VegaAsset,
-  VegaCommand,
-  VegaJsonValue,
-  VegaProject,
-  VegaScene,
-} from "./model.js";
+import { isVegaCommandType } from "./opcodes.js";
+import type { VegaAsset, VegaCommand, VegaJsonValue, VegaProject, VegaScene } from "./model.js";
 import {
   parseVegaLocalizedText,
   parseVegaProjectLocalization,
   VEGA_PROJECT_LOCALIZATION_METADATA_KEY,
   VegaLocalizationParseError,
 } from "./localization.js";
-import {
-  assertVegaProjectPlugin,
-  VegaPluginProtocolError,
-} from "./plugin.js";
+import { assertVegaProjectPlugin, VegaPluginProtocolError } from "./plugin.js";
 
 export type { VegaProject } from "./model.js";
 
@@ -114,9 +106,7 @@ export function assertVegaProject(value: unknown): asserts value is VegaProject 
           const prefix = `${error.path}: `;
           throw new VegaProjectParseError(
             error.path,
-            error.message.startsWith(prefix)
-              ? error.message.slice(prefix.length)
-              : error.message,
+            error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message,
           );
         }
         throw error;
@@ -134,29 +124,21 @@ export function assertVegaProject(value: unknown): asserts value is VegaProject 
     for (const [key, scene] of Object.entries(scenes)) {
       const title = (scene as Record<string, unknown>).title;
       if (title !== undefined) {
-        parseLocalizationAt(`$.scenes.${key}.title`, () =>
-          parseVegaLocalizedText(title),
-        );
+        parseLocalizationAt(`$.scenes.${key}.title`, () => parseVegaLocalizedText(title));
       }
     }
   }
 }
 
 const normalizeProjectLocalization = (project: VegaProject): VegaProject => {
-  const rawLocalization =
-    project.metadata?.[VEGA_PROJECT_LOCALIZATION_METADATA_KEY];
+  const rawLocalization = project.metadata?.[VEGA_PROJECT_LOCALIZATION_METADATA_KEY];
   if (rawLocalization === undefined) return project;
 
-  const localization = parseVegaProjectLocalization(
-    rawLocalization,
-    project.assets ?? {},
-  );
+  const localization = parseVegaProjectLocalization(rawLocalization, project.assets ?? {});
   const scenes = Object.fromEntries(
     Object.entries(project.scenes).map(([key, scene]) => [
       key,
-      scene.title === undefined
-        ? scene
-        : { ...scene, title: parseVegaLocalizedText(scene.title) },
+      scene.title === undefined ? scene : { ...scene, title: parseVegaLocalizedText(scene.title) },
     ]),
   );
   return {
@@ -170,18 +152,12 @@ const normalizeProjectLocalization = (project: VegaProject): VegaProject => {
   };
 };
 
-const parseLocalizationAt = <Value>(
-  path: string,
-  parse: () => Value,
-): Value => {
+const parseLocalizationAt = <Value>(path: string, parse: () => Value): Value => {
   try {
     return parse();
   } catch (error) {
     if (error instanceof VegaLocalizationParseError) {
-      throw new VegaProjectParseError(
-        error.path === "$" ? path : `${path}${error.path.slice(1)}`,
-        error.reason,
-      );
+      throw new VegaProjectParseError(error.path === "$" ? path : `${path}${error.path.slice(1)}`, error.reason);
     }
     throw error;
   }
@@ -199,8 +175,8 @@ function assertScene(value: unknown, path: string): asserts value is VegaScene {
 
 function assertCommand(value: unknown, path: string): asserts value is VegaCommand {
   const command = requireRecord(value, path);
-  if (!Number.isSafeInteger(command.command) || Number(command.command) < 0) {
-    fail(`${path}.command`, "expected a non-negative safe integer");
+  if (!isVegaCommandType(command.command) && (!Number.isSafeInteger(command.command) || Number(command.command) < 0)) {
+    fail(`${path}.command`, "expected a native opcode or a qualified plugin command type");
   }
   if (command.index !== undefined && (!Number.isSafeInteger(command.index) || Number(command.index) < 0)) {
     fail(`${path}.index`, "expected a non-negative safe integer");

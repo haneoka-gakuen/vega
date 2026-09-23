@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import type { VegaPlugin } from "../engine/plugins";
 import type { StoryResourceScope } from "../runtime";
 import type { AdvStory, StoryUiSprites } from "../types/AdvRuntime";
+import { prepareStoryAudio } from "../sound/StoryAudioPrimer";
 import { useStoryPlayerControls, type StoryPlayerControls } from "./StoryPlayerControls";
 import StoryPlayerFull from "./StoryPlayerFull.vue";
 
@@ -74,7 +75,10 @@ const progress = computed(() =>
       },
 );
 const resize = () => fullPlayer.value?.resize();
-const startOrAdvance = () => fullPlayer.value?.startOrAdvance();
+const startOrAdvance = () => {
+  prepareStoryAudio();
+  fullPlayer.value?.startOrAdvance();
+};
 const seekProgress = (ratio: number, delay = 0) => fullPlayer.value?.seekProgress(ratio, delay);
 const skipCurrentVideo = () => fullPlayer.value?.skipCurrentVideo();
 
@@ -82,7 +86,12 @@ defineExpose({ controls, progress, resize, startOrAdvance, seekProgress, skipCur
 </script>
 
 <template>
-  <div ref="storyRoot" class="adv-story-player-root vega-game-root">
+  <div
+    ref="storyRoot"
+    class="adv-story-player-root vega-game-root"
+    @pointerdown.capture="prepareStoryAudio"
+    @keydown.capture="prepareStoryAudio"
+  >
     <StoryPlayerFull
       ref="fullPlayer"
       :story="props.story"

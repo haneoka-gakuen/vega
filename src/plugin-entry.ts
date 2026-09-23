@@ -4,6 +4,7 @@ export { VegaLifetime } from "./engine/lifecycle";
 export type { VegaDisposable } from "./engine/lifecycle";
 export * from "./engine/plugins";
 export * from "./marketplace";
+export * from "./resources/StoryResourcePreparation";
 export {
   chatDataRootForChatId,
   chatDataRootForWindowAsset,
@@ -14,11 +15,7 @@ export {
   isGroupChatParticipants,
   resolveAdvChatMaster,
 } from "./core/AdvChatAssets";
-export type {
-  AdvChatMaster,
-  AdvChatRuntimeAssets,
-  AdvChatWindowSpriteRect,
-} from "./core/AdvChatAssets";
+export type { AdvChatMaster, AdvChatRuntimeAssets, AdvChatWindowSpriteRect } from "./core/AdvChatAssets";
 export {
   ADV_CHAT_WINDOW_TRANSITION,
   advChatWindowTransitionSeconds,
@@ -26,25 +23,18 @@ export {
   evaluateAdvChatOutExpo,
 } from "./core/AdvChatTransition";
 export type { AdvChatWindowTransitionKind } from "./core/AdvChatTransition";
-export {
-  advTextSizePercent,
-  parseAdvRichText,
-} from "./core/AdvRichText";
+export { advTextSizePercent, advTextLengthCss, parseAdvRichText } from "./core/AdvRichText";
 export type {
   AdvRichTextBreakNode,
   AdvRichTextNode,
   AdvRichTextRubyNode,
   AdvRichTextSizeNode,
+  AdvRichTextStyleNode,
+  AdvRichTextSpaceNode,
   AdvRichTextTextNode,
 } from "./core/AdvRichText";
-export {
-  advTextRenderSource,
-  createAdvTextRenderValue,
-} from "./core/AdvTextRenderValue";
-export type {
-  AdvTextRenderMetadata,
-  AdvTextRenderValue,
-} from "./core/AdvTextRenderValue";
+export { advTextRenderSource, createAdvTextRenderValue } from "./core/AdvTextRenderValue";
+export type { AdvTextRenderMetadata, AdvTextRenderValue } from "./core/AdvTextRenderValue";
 export {
   estimateVegaVisemeFrame,
   type VegaViseme,
@@ -54,10 +44,7 @@ export {
   type VegaVoicePcmFrame,
   type VegaVoiceSpectrumFrame,
 } from "./sound/VoiceAnalysis";
-export {
-  VEGA_STANDARD_UI_SLOTS,
-  type VegaStandardUiSlot,
-} from "./engine/playerPresentation";
+export { VEGA_STANDARD_UI_SLOTS, type VegaStandardUiSlot } from "./engine/playerPresentation";
 export type {
   StoryCameraState,
   StoryCharacterHandle,
@@ -98,3 +85,5 @@ export {
   isRendererAwareCharacterProvider,
   prepareCharacterProviderDescriptors,
 } from "./rendering/StoryCharacterModel";
+
+export { storyResourceContentType } from "./resources/StoryResourceResolver";

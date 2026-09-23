@@ -4,15 +4,10 @@
     "noEmit": false,
     "outDir": "dist",
     "paths": {
-      "@haneoka/vega/engine": [
-        "../../dist/engine-entry.d.ts"
-      ],
-      "@haneoka/vega-protocol": [
-        "../protocol/dist/index.d.ts"
-      ],
-      "@haneoka/vega-protocol/*": [
-        "../protocol/dist/*.d.ts"
-      ]
+      "@haneoka/vega/audio": ["../../dist/audio-entry.d.ts"],
+      "@haneoka/vega/engine": ["../../dist/engine-entry.d.ts"],
+      "@haneoka/vega-protocol": ["../protocol/dist/index.d.ts"],
+      "@haneoka/vega-protocol/*": ["../protocol/dist/*.d.ts"]
     },
     "rootDir": "src",
     "sourceMap": true

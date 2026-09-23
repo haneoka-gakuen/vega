@@ -7,18 +7,10 @@
     "noEmit": false,
     "outDir": "dist",
     "paths": {
-      "@haneoka/vega-protocol": [
-        "./packages/protocol/dist/index.d.ts"
-      ],
-      "@haneoka/vega-protocol/*": [
-        "./packages/protocol/dist/*.d.ts"
-      ]
+      "@haneoka/vega-protocol": ["./packages/protocol/dist/index.d.ts"],
+      "@haneoka/vega-protocol/*": ["./packages/protocol/dist/*.d.ts"]
     },
     "rootDir": "src"
   },
-  "include": [
-    "src/index.ts",
-    "src/*-entry.ts",
-    "src/types/**/*.d.ts"
-  ]
+  "include": ["src/index.ts", "src/*-entry.ts", "src/types/**/*.d.ts"]
 }

@@ -94,6 +94,9 @@ export class AdvPlaybackSession {
   private voicePlaybackScopeController: AbortController;
   movieSoundVolume: number;
   FlowParameters: AdvFlowParameters;
+  private talkLogSharedWithSnapshot: boolean;
+  private readonly chatMemoryStatesSharedWithSnapshot: WeakSet<AdvChatMemoryState>;
+  private readonly chatMemoryFrozenEntryCounts: WeakMap<AdvChatMemoryState, number>;
 
   constructor(runtime: AdvRuntimeConfig) {
     this.runtime = runtime;
@@ -134,6 +137,9 @@ export class AdvPlaybackSession {
         this.isClipVideoSkip = v;
       },
     };
+    this.talkLogSharedWithSnapshot = false;
+    this.chatMemoryStatesSharedWithSnapshot = new WeakSet();
+    this.chatMemoryFrozenEntryCounts = new WeakMap();
   }
 
   setMovieSoundVolume(volume: number) {
@@ -156,6 +162,20 @@ export class AdvPlaybackSession {
     return state;
   }
 
+  private writableChatMemoryState(memoryId: string): AdvChatMemoryState {
+    const current = this.getOrCreateChatMemoryState(memoryId);
+    if (!this.chatMemoryStatesSharedWithSnapshot.has(current)) return current;
+    const writable: AdvChatMemoryState = {
+      entries: [...current.entries],
+      // Snapshot serialization already copied these small counters. A new Map
+      // prevents later key replacement from mutating shared live state.
+      senderReadStateMap: new Map(current.senderReadStateMap),
+    };
+    this.chatMemoryFrozenEntryCounts.set(writable, current.entries.length);
+    this.chatMemoryStateMap.set(memoryId, writable);
+    return writable;
+  }
+
   chatMemoryAddTalk(
     memoryId: string,
     senderChatId: number,
@@ -165,7 +185,7 @@ export class AdvPlaybackSession {
     textLang?: string,
     senderLang?: string,
   ) {
-    const state = this.getOrCreateChatMemoryState(memoryId);
+    const state = this.writableChatMemoryState(memoryId);
     state.entries.push({
       entryType: 0,
       senderChatId,
@@ -186,7 +206,7 @@ export class AdvPlaybackSession {
     readCount: number,
     senderLang?: string,
   ) {
-    const state = this.getOrCreateChatMemoryState(memoryId);
+    const state = this.writableChatMemoryState(memoryId);
     state.entries.push({
       entryType: 1,
       senderChatId,
@@ -199,7 +219,7 @@ export class AdvPlaybackSession {
   }
 
   chatMemoryApplyRead(memoryId: string, senderChatId: number, readCount: number) {
-    const state = this.getOrCreateChatMemoryState(memoryId);
+    const state = this.writableChatMemoryState(memoryId);
     const senderState = state.senderReadStateMap.get(senderChatId) || {
       currentReadCount: 0,
       lastReadAppliedEntryCount: 0,
@@ -272,7 +292,13 @@ export class AdvPlaybackSession {
   }
 
   addTalkLog(entry: AdvTalkLogEntry) {
-    this.TalkLog.push(entry);
+    if (this.talkLogSharedWithSnapshot) {
+      this.TalkLog = [...this.TalkLog];
+      this.talkLogSharedWithSnapshot = false;
+    }
+    // Log entries are append-only. Freeze a shallow record once so checkpoints
+    // can share every historical entry instead of JSON-cloning the whole log.
+    this.TalkLog.push(Object.freeze({ ...entry }));
   }
 
   beginVoicePlaybackScope() {
@@ -297,6 +323,10 @@ export class AdvPlaybackSession {
   }
 
   createSnapshot(): AdvPlaybackSessionSnapshot {
+    // addTalkLog and restoreSnapshot establish the frozen-entry invariant, so
+    // checkpoint creation only freezes the current array shell (O(1)).
+    if (!Object.isFrozen(this.TalkLog)) Object.freeze(this.TalkLog);
+    this.talkLogSharedWithSnapshot = true;
     return {
       // Stage/master/video records come from immutable episode/master data.
       // Share those records while mutable collections below receive copies.
@@ -311,17 +341,27 @@ export class AdvPlaybackSession {
       CurrentBgmPlayId: this.CurrentBgmPlayId,
       CurrentVideoInfo: this.CurrentVideoInfo,
       WithVoice: this.WithVoice,
-      TalkLog: clonePlain(this.TalkLog),
+      TalkLog: this.TalkLog,
       CurrentMasterChat: this.CurrentMasterChat,
       CurrentChatWindowScreenMode: this.CurrentChatWindowScreenMode,
       CurrentChatMemoryId: this.CurrentChatMemoryId,
-      chatMemoryStateMap: [...this.chatMemoryStateMap.entries()].map(([memoryId, state]) => [
-        memoryId,
-        {
-          entries: clonePlain(state.entries || []),
-          senderReadStateMap: mapToEntries(state.senderReadStateMap || new Map()),
-        },
-      ]),
+      chatMemoryStateMap: [...this.chatMemoryStateMap.entries()].map(([memoryId, state]) => {
+        const frozenEntryCount = Math.min(state.entries.length, this.chatMemoryFrozenEntryCounts.get(state) ?? 0);
+        for (let index = frozenEntryCount; index < state.entries.length; index += 1) {
+          const entry = state.entries[index];
+          if (!Object.isFrozen(entry)) state.entries[index] = Object.freeze({ ...entry });
+        }
+        this.chatMemoryFrozenEntryCounts.set(state, state.entries.length);
+        Object.freeze(state.entries);
+        this.chatMemoryStatesSharedWithSnapshot.add(state);
+        return [
+          memoryId,
+          {
+            entries: state.entries,
+            senderReadStateMap: mapToEntries(state.senderReadStateMap || new Map()),
+          },
+        ];
+      }),
       targetNameToPositionTypeMap: mapToEntries(this.targetNameToPositionTypeMap),
       positionTypeToCharacterMap: mapToEntries(this.positionTypeToCharacterMap),
       CurrentPlacedCharacterPositionTypes: clonePlain(this.CurrentPlacedCharacterPositionTypes),
@@ -359,9 +399,12 @@ export class AdvPlaybackSession {
     this.CurrentVideoInfo = clonePlain(snapshot.CurrentVideoInfo);
     this.VideoPlaying = false;
     this.WithVoice = snapshot.WithVoice !== false;
-    this.TalkLog = (
-      Array.isArray(clonePlain(snapshot.TalkLog)) ? clonePlain(snapshot.TalkLog) : []
-    ) as AdvTalkLogEntry[];
+    const snapshotTalkLog = Array.isArray(snapshot.TalkLog) ? snapshot.TalkLog : [];
+    this.TalkLog = snapshotTalkLog.every(Object.isFrozen)
+      ? (snapshotTalkLog as AdvTalkLogEntry[])
+      : snapshotTalkLog.map((entry) => Object.freeze({ ...entry }));
+    Object.freeze(this.TalkLog);
+    this.talkLogSharedWithSnapshot = true;
     this.CurrentMasterChat = clonePlain(snapshot.CurrentMasterChat);
     this.CurrentChatWindowScreenMode = Number(snapshot.CurrentChatWindowScreenMode) || 0;
     this.CurrentChatMemoryId = typeof snapshot.CurrentChatMemoryId === "string" ? snapshot.CurrentChatMemoryId : null;
@@ -370,13 +413,22 @@ export class AdvPlaybackSession {
       senderReadStateMap?: Array<[number, { currentReadCount: number; lastReadAppliedEntryCount: number }]>;
     };
     this.chatMemoryStateMap = new Map(
-      ((snapshot.chatMemoryStateMap as Array<[string, SnapshotMemoryEntry]>) || []).map(([memoryId, state]) => [
-        memoryId,
-        {
-          entries: clonePlain(state?.entries || []),
-          senderReadStateMap: new Map(state?.senderReadStateMap || []),
-        },
-      ]),
+      ((snapshot.chatMemoryStateMap as Array<[string, SnapshotMemoryEntry]>) || []).map(([memoryId, state]) => {
+        const sourceEntries = Array.isArray(state?.entries) ? state.entries : [];
+        const entries = sourceEntries.every(Object.isFrozen)
+          ? sourceEntries
+          : sourceEntries.map((entry) => Object.freeze({ ...entry }));
+        Object.freeze(entries);
+        const restored: AdvChatMemoryState = {
+          entries,
+          senderReadStateMap: new Map(
+            (state?.senderReadStateMap || []).map(([senderId, senderState]) => [senderId, { ...senderState }]),
+          ),
+        };
+        this.chatMemoryFrozenEntryCounts.set(restored, entries.length);
+        this.chatMemoryStatesSharedWithSnapshot.add(restored);
+        return [memoryId, restored];
+      }),
     );
     this.targetNameToPositionTypeMap = new Map((snapshot.targetNameToPositionTypeMap as Array<[string, number]>) || []);
     this.positionTypeToCharacterMap = new Map(
@@ -385,11 +437,9 @@ export class AdvPlaybackSession {
         value,
       ]),
     );
-    this.CurrentPlacedCharacterPositionTypes = (
-      Array.isArray(clonePlain(snapshot.CurrentPlacedCharacterPositionTypes))
-        ? clonePlain(snapshot.CurrentPlacedCharacterPositionTypes)
-        : []
-    ) as number[];
+    this.CurrentPlacedCharacterPositionTypes = Array.isArray(snapshot.CurrentPlacedCharacterPositionTypes)
+      ? [...snapshot.CurrentPlacedCharacterPositionTypes]
+      : [];
     this.choiceRecords = new Map((snapshot.choiceRecords as Array<[number, AdvChoiceRecord]>) || []);
     this.sePlayIds = [];
     this.currentVoicePlayIds = [];

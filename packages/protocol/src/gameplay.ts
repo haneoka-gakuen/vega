@@ -1,26 +1,6 @@
 import type { VegaJsonValue } from "./model.js";
 
-/**
- * Portable visual-novel control commands.
- *
- * Native ADV opcodes 0-100 remain immutable. 500 is the native concurrent
- * command group. Vega-owned, format-stable narrative control starts at 501.
- */
-export const VEGA_SYSTEM_OPCODE = Object.freeze({
-  SetVariable: 501,
-  Branch: 502,
-  JumpScene: 503,
-  CallScene: 504,
-  ReturnScene: 505,
-  Input: 506,
-  Unlock: 507,
-  FlowCheckpoint: 508,
-  SetSetting: 509,
-  End: 510,
-  SceneMarker: 511,
-} as const);
-
-export type VegaSystemOpcode = (typeof VEGA_SYSTEM_OPCODE)[keyof typeof VEGA_SYSTEM_OPCODE];
+import { VEGA_SYSTEM_OPCODE, type VegaSystemOpcode } from "./opcodes.js";
 
 export type VegaVariableOperation = "set" | "add" | "subtract" | "multiply" | "divide" | "toggle";
 export type VegaUnlockKind = "cg" | "bgm" | "scene" | "achievement";
@@ -36,24 +16,36 @@ export interface VegaNarrativeSettings {
   readonly uiLanguage: string;
   readonly reducedMotion: boolean;
   readonly highContrast: boolean;
+  readonly instantText?: boolean;
+  readonly textSize?: number;
+  readonly subtitlesEnabled?: boolean;
+  readonly bgmEnabled?: boolean;
 }
 
 export interface VegaNarrativePosition {
   readonly sceneId: string;
+  readonly commandId?: string;
+  readonly boundary?: "before" | "after";
   readonly commandIndex: number;
 }
 
 export interface VegaSceneFrame {
   readonly sceneId: string;
+  readonly callerId?: string;
   readonly returnKey: string;
 }
 
 export interface VegaBacklogEntry {
   readonly id: string;
+  readonly commandId?: string;
   readonly sceneId: string;
   readonly commandIndex: number;
   readonly speaker: string;
   readonly text: string;
+  readonly textSource?: VegaJsonValue;
+  readonly textSources?: readonly VegaJsonValue[];
+  readonly speakerSources?: readonly VegaJsonValue[];
+  readonly speakerSeparator?: string;
   readonly voice?: string;
   readonly createdAt: string;
 }
@@ -89,6 +81,10 @@ export interface VegaSaveData {
   readonly player: {
     readonly commandIndex: number;
     readonly choiceRecords: readonly (readonly [number, VegaJsonValue])[];
+    readonly choicePositions?: readonly {
+      readonly position: VegaNarrativePosition;
+      readonly value: VegaJsonValue;
+    }[];
     readonly stage?: VegaJsonValue;
     readonly audio?: VegaJsonValue;
   };

@@ -17,12 +17,8 @@
     "noImplicitThis": true,
     "noUncheckedIndexedAccess": false,
     "paths": {
-      "@haneoka/vega-protocol": [
-        "./packages/protocol/src/index.ts"
-      ],
-      "@haneoka/vega-protocol/*": [
-        "./packages/protocol/src/*.ts"
-      ]
+      "@haneoka/vega-protocol": ["./packages/protocol/src/index.ts"],
+      "@haneoka/vega-protocol/*": ["./packages/protocol/src/*.ts"]
     },
     "resolveJsonModule": true,
     "skipLibCheck": true,

@@ -6,11 +6,7 @@ import { defineConfig } from "vite";
 
 const packageRoot = fileURLToPath(new URL(".", import.meta.url));
 const outputDirectory = resolve(packageRoot, "dist/deneb-runtime");
-const legalFiles = [
-  "LICENSE",
-  "LICENSE-SCOPE.md",
-  "THIRD_PARTY_NOTICES.md",
-] as const;
+const legalFiles = ["LICENSE", "LICENSE-SCOPE.md", "THIRD_PARTY_NOTICES.md"] as const;
 const legalBanner = `/*!
  * Vega Deneb runtime bundle. Review LICENSE, LICENSE-SCOPE.md,
  * and THIRD_PARTY_NOTICES.md before redistribution.
@@ -59,9 +55,10 @@ export default defineConfig({
         for (const file of legalFiles) {
           copyFileSync(resolve(packageRoot, file), resolve(outputDirectory, file));
         }
-        const manifest = JSON.parse(
-          readFileSync(resolve(packageRoot, "deneb-runtime.json"), "utf8"),
-        ) as Record<string, unknown>;
+        const manifest = JSON.parse(readFileSync(resolve(packageRoot, "deneb-runtime.json"), "utf8")) as Record<
+          string,
+          unknown
+        >;
         manifest.integrity = Object.fromEntries(
           ["deneb-runtime.js", ...legalFiles].map((file) => {
             const digest = createHash("sha256")
@@ -70,10 +67,7 @@ export default defineConfig({
             return [file, `sha256-${digest}`];
           }),
         );
-        writeFileSync(
-          resolve(outputDirectory, "deneb-runtime.json"),
-          `${JSON.stringify(manifest, null, 2)}\n`,
-        );
+        writeFileSync(resolve(outputDirectory, "deneb-runtime.json"), `${JSON.stringify(manifest, null, 2)}\n`);
       },
     },
   ],

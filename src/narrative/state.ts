@@ -22,6 +22,10 @@ export const DEFAULT_NARRATIVE_SETTINGS: VegaNarrativeSettings = Object.freeze({
   uiLanguage: "auto",
   reducedMotion: false,
   highContrast: false,
+  instantText: false,
+  textSize: 1,
+  subtitlesEnabled: true,
+  bgmEnabled: true,
 });
 
 export class VegaNarrativeStore {
@@ -36,7 +40,9 @@ export class VegaNarrativeStore {
     achievement: new Set(),
   };
   private backlogValue: VegaBacklogEntry[] = [];
-  private settingsValue: VegaNarrativeSettings = { ...DEFAULT_NARRATIVE_SETTINGS };
+  private settingsValue: VegaNarrativeSettings = {
+    ...DEFAULT_NARRATIVE_SETTINGS,
+  };
 
   get variables(): VegaExpressionScope {
     return this.variablesValue;
@@ -92,13 +98,20 @@ export class VegaNarrativeStore {
 
   setSetting<K extends keyof VegaNarrativeSettings>(key: K, value: VegaNarrativeSettings[K]): void {
     if (!Object.hasOwn(DEFAULT_NARRATIVE_SETTINGS, key)) throw new RangeError(`Unknown Vega setting: ${String(key)}`);
-    this.settingsValue = normalizeSettings({ ...this.settingsValue, [key]: value });
+    this.settingsValue = normalizeSettings({
+      ...this.settingsValue,
+      [key]: value,
+    });
   }
 
   pushScene(frame: VegaSceneFrame): void {
     if (!frame.sceneId.trim() || !frame.returnKey.trim()) throw new TypeError("Scene stack frame is incomplete");
     if (this.sceneStackValue.length >= 256) throw new RangeError("Vega scene call stack exceeds 256 frames");
-    this.sceneStackValue.push({ sceneId: frame.sceneId, returnKey: frame.returnKey });
+    this.sceneStackValue.push({
+      sceneId: frame.sceneId,
+      returnKey: frame.returnKey,
+      ...(frame.callerId ? { callerId: frame.callerId } : {}),
+    });
   }
 
   popScene(): VegaSceneFrame | undefined {
@@ -151,6 +164,7 @@ export class VegaNarrativeStore {
     this.sceneStackValue = state.sceneStack.slice(0, 256).map((frame) => ({
       sceneId: requireString(frame.sceneId, "sceneId"),
       returnKey: requireString(frame.returnKey, "returnKey"),
+      ...(frame.callerId === undefined ? {} : { callerId: requireString(frame.callerId, "callerId") }),
     }));
     this.readCommandsValue = new Set(state.readCommands.filter(Boolean));
     this.visitedFlowNodesValue = new Set(state.visitedFlowNodes.filter(Boolean));
@@ -175,7 +189,12 @@ export class VegaNarrativeStore {
     this.settingsValue = options.preserveSettings ? settings : { ...DEFAULT_NARRATIVE_SETTINGS };
     this.unlocksValue = options.preserveUnlocks
       ? unlocks
-      : { cg: new Set(), bgm: new Set(), scene: new Set(), achievement: new Set() };
+      : {
+          cg: new Set(),
+          bgm: new Set(),
+          scene: new Set(),
+          achievement: new Set(),
+        };
   }
 }
 
@@ -190,6 +209,10 @@ const normalizeSettings = (input: Partial<VegaNarrativeSettings>): VegaNarrative
   uiLanguage: String(input.uiLanguage || DEFAULT_NARRATIVE_SETTINGS.uiLanguage).slice(0, 64),
   reducedMotion: Boolean(input.reducedMotion),
   highContrast: Boolean(input.highContrast),
+  instantText: Boolean(input.instantText),
+  textSize: clamp(input.textSize, 0.5, 2, 1),
+  subtitlesEnabled: input.subtitlesEnabled !== false,
+  bgmEnabled: input.bgmEnabled !== false,
 });
 
 const clamp = (value: unknown, minimum: number, maximum: number, fallback: number): number => {

@@ -71,10 +71,7 @@ export function isCanonicalStoryResourceUrl(value: unknown): boolean {
   }
 }
 
-export function requireCanonicalStoryResourceUrl(
-  value: unknown,
-  label = "resource",
-): string {
+export function requireCanonicalStoryResourceUrl(value: unknown, label = "resource"): string {
   return adapters.validateResourceUrl(value, label);
 }
 
@@ -88,15 +85,10 @@ export function requireScopedStoryResourceUrl(
   const scopeId = String(scope.id || "").trim();
   if (!scopeId) throw new TypeError("Story resource scope id cannot be empty");
   if (scope.contains(url)) return url;
-  throw new TypeError(
-    `Story ${label} URL is outside resource scope ${scopeId}: ${url}`,
-  );
+  throw new TypeError(`Story ${label} URL is outside resource scope ${scopeId}: ${url}`);
 }
 
-function defaultValidateResourceUrl(
-  value: unknown,
-  label = "resource",
-): string {
+function defaultValidateResourceUrl(value: unknown, label = "resource"): string {
   const url = String(value || "");
   if (!url) return "";
   if (/^(?:data:|blob:|https?:\/\/)/i.test(url)) return url;
@@ -104,9 +96,7 @@ function defaultValidateResourceUrl(
     throw new TypeError(`Story ${label} URL is unsafe: ${url}`);
   }
   const pathname = url.split(/[?#]/, 1)[0] || "";
-  if (
-    pathname.split("/").some((segment) => segment === "." || segment === "..")
-  ) {
+  if (pathname.split("/").some((segment) => segment === "." || segment === "..")) {
     throw new TypeError(`Story ${label} URL contains path traversal: ${url}`);
   }
   return url;
@@ -131,9 +121,7 @@ const defaults: StoryRuntimeAdapters = {
 
 let adapters: StoryRuntimeAdapters = { ...defaults };
 
-export function configureStoryRuntime(
-  next: Partial<StoryRuntimeAdapters>,
-): void {
+export function configureStoryRuntime(next: Partial<StoryRuntimeAdapters>): void {
   adapters = { ...adapters, ...next };
 }
 
@@ -148,9 +136,7 @@ export function storyRuntime(): Readonly<StoryRuntimeAdapters> {
 export function resolveStoryLocalizedText(value: unknown): StoryResolvedText {
   const resolved = adapters.resolveLocalized?.(value);
   if (resolved && typeof resolved.text === "string") {
-    return resolved.lang
-      ? { text: resolved.text, lang: resolved.lang }
-      : { text: resolved.text };
+    return resolved.lang ? { text: resolved.text, lang: resolved.lang } : { text: resolved.text };
   }
   return { text: adapters.localize(value) };
 }

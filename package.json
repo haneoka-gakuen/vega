@@ -49,6 +49,11 @@
       "import": "./dist/runtime.js",
       "default": "./dist/runtime.js"
     },
+    "./audio": {
+      "types": "./dist/audio-entry.d.ts",
+      "import": "./dist/audio.js",
+      "default": "./dist/audio.js"
+    },
     "./engine": {
       "types": "./dist/engine-entry.d.ts",
       "import": "./dist/engine.js",
@@ -115,7 +120,9 @@
     "typecheck:core": "vue-tsc -p tsconfig.json --noEmit",
     "verify:distribution": "node scripts/verify-distribution.mjs",
     "check": "pnpm run typecheck && pnpm run build && pnpm run verify:distribution",
-    "prepack": "pnpm run check"
+    "prepack": "pnpm run check",
+    "format": "prettier --write . --ignore-unknown",
+    "format:check": "prettier --check . --ignore-unknown"
   },
   "publishConfig": {
     "access": "public",
@@ -147,6 +154,7 @@
     "typescript": "^6.0.3",
     "vite": "^7.3.6",
     "vue": "3.5.39",
-    "vue-tsc": "^3.3.6"
+    "vue-tsc": "^3.3.6",
+    "prettier": "3.7.4"
   }
 }

@@ -10,6 +10,8 @@ export interface StaticPortraitModelOptions {
   readonly signal?: AbortSignal;
   readonly pivot?: StaticPortraitPivot;
   readonly alt?: string;
+  /** Episode-owned decoded image retained by the scene until teardown. */
+  readonly decodedTemplate?: HTMLImageElement;
 }
 
 /**
@@ -35,8 +37,12 @@ export class StaticPortraitModel implements StoryCharacterModel {
     if (typeof document === "undefined") {
       throw new Error("Static portraits require a browser document");
     }
-    const resolved = await options.resources.resolveRenderable(options.imageUrl, options.signal);
-    const image = document.createElement("img");
+    const resolved = options.decodedTemplate
+      ? null
+      : await options.resources.resolveRenderable(options.imageUrl, options.signal);
+    const image = options.decodedTemplate
+      ? (options.decodedTemplate.cloneNode(false) as HTMLImageElement)
+      : document.createElement("img");
     image.className = "vega-stage__portrait";
     image.alt = options.alt ?? "";
     image.draggable = false;
@@ -50,29 +56,46 @@ export class StaticPortraitModel implements StoryCharacterModel {
         (1 - (Number.isFinite(pivotY) ? pivotY : 0)) * 100
       }%`;
     }
+    const sourceUrl = options.decodedTemplate?.currentSrc || options.decodedTemplate?.src || resolved?.url || "";
     const loaded = new Promise<void>((resolve, reject) => {
-      const done = () => {
+      const cleanup = () => {
         image.removeEventListener("load", done);
         image.removeEventListener("error", failed);
+        options.signal?.removeEventListener("abort", aborted);
+      };
+      const done = () => {
+        cleanup();
         resolve();
       };
       const failed = () => {
-        image.removeEventListener("load", done);
-        image.removeEventListener("error", failed);
+        cleanup();
         reject(new Error(`Static portrait could not be decoded: ${options.imageUrl}`));
+      };
+      const aborted = () => {
+        cleanup();
+        const error = new Error("Static portrait loading was aborted");
+        error.name = "AbortError";
+        reject(error);
       };
       image.addEventListener("load", done, { once: true });
       image.addEventListener("error", failed, { once: true });
+      options.signal?.addEventListener("abort", aborted, { once: true });
+      image.src = sourceUrl;
+      if (options.signal?.aborted) aborted();
+      else if (image.complete) {
+        if (image.naturalWidth > 0) done();
+        else failed();
+      }
     });
-    image.src = resolved.url;
     try {
       await loaded;
+      if (typeof image.decode === "function") await image.decode();
     } catch (error) {
-      resolved.release();
+      resolved?.release();
       throw error;
     }
     const model = new StaticPortraitModel(options.imageUrl, image);
-    model.releaseSource = resolved.release;
+    model.releaseSource = resolved?.release ?? (() => undefined);
     return model;
   }
 

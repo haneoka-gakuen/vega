@@ -9,9 +9,7 @@ const manifests = await Promise.all(
     "packages/protocol/package.json",
     "packages/react/package.json",
     "packages/web-component/package.json",
-  ].map(async (path) =>
-    JSON.parse(await readFile(resolve(root, path), "utf8")),
-  ),
+  ].map(async (path) => JSON.parse(await readFile(resolve(root, path), "utf8"))),
 );
 const versions = new Set(manifests.map(({ version }) => version));
 
@@ -24,9 +22,7 @@ const expected = `v${version}`;
 const actual = process.env.RELEASE_TAG;
 
 if (actual !== expected) {
-  throw new Error(
-    `GitHub release tag ${JSON.stringify(actual)} must equal ${expected}`,
-  );
+  throw new Error(`GitHub release tag ${JSON.stringify(actual)} must equal ${expected}`);
 }
 
 console.log(`Verified release tag ${actual}.`);

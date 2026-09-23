@@ -1,6 +1,7 @@
 import type { AdvPlayerState } from "../types/AdvRuntime";
 
 const MUTABLE_STATE_KEYS = [
+  "pluginState",
   "viewport",
   "frameEntries",
   "stageEnv",

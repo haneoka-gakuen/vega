@@ -1,9 +1,6 @@
-import type {
-  AdvBaseQualityMode,
-  AdvQualityNumberTable,
-  AdvQualityOverrides,
-} from "./AdvQuality";
+import type { AdvBaseQualityMode, AdvQualityNumberTable, AdvQualityOverrides } from "./AdvQuality";
 import type { AdvChatRuntimeAssets } from "../core/AdvChatAssets";
+import type { VegaJsonValue } from "@haneoka/vega-protocol";
 
 /**
  * Typed interfaces for the ADV story runtime.
@@ -66,6 +63,8 @@ export interface AdvFocusDataRow {
 }
 
 export interface AdvStageConfig {
+  screenReferenceWidth?: number;
+  screenReferenceHeight?: number;
   minX: number;
   maxX: number;
   width: number;
@@ -83,7 +82,7 @@ export interface AdvStageConfig {
   /** Fixed world height of a legacy model's complete canvas at authored scale. */
   characterCanvasWorldHeight?: number;
   /** Camera-relative background sizing. Authored stages retain their exact size. */
-  backgroundFit?: "authored" | "camera-width";
+  backgroundFit?: "authored" | "camera-width" | "cover" | "contain";
   backgroundOverscan?: number;
   fov?: number;
 }
@@ -106,6 +105,31 @@ export interface AdvFieldRendererConfig {
 
 export interface AdvAudioConfig {
   categoryVolumes: { Bgm: number; Se: number; Voice: number };
+}
+
+/** Browser-neutral subset of CSS FontFace descriptors. */
+export interface StoryFontFaceDescriptor {
+  readonly family: string;
+  readonly style?: string;
+  readonly weight?: string | number;
+  readonly stretch?: string;
+  readonly unicodeRange?: string;
+  readonly featureSettings?: string;
+  readonly variationSettings?: string;
+  readonly display?: "auto" | "block" | "swap" | "fallback" | "optional";
+  /** Optional CSS font format hint such as `woff2`. */
+  readonly format?: string;
+}
+
+export interface StoryVideoLayout {
+  readonly viewport?: readonly [x: number, y: number, width: number, height: number];
+  readonly fit?: "cover" | "contain" | "stretch";
+  readonly background?: string;
+}
+
+/** One font face that must be usable before the story's first frame. */
+export interface AdvFontEntry extends StoryFontFaceDescriptor {
+  readonly source: string;
 }
 
 export interface AdvRuntimeConfig {
@@ -176,6 +200,8 @@ export interface AdvRuntimeConfig {
   focusData: AdvFocusDataRow[];
   fieldRenderer: AdvFieldRendererConfig;
   audio: AdvAudioConfig;
+  /** Fonts referenced by story text or the active presentation theme. */
+  fonts?: readonly AdvFontEntry[];
   /** Build-derived MasterAdvChat rows and exact prefab/sprite geometry. */
   chatAssets?: AdvChatRuntimeAssets;
   /** Merged from story.stage at runtime; may carry extra dynamic fields. */
@@ -279,14 +305,10 @@ export interface AdvCharacterModelEntry {
 }
 
 const characterResourceRecord = (value: unknown): Record<string, unknown> =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 
 const characterDescriptorString = (...values: unknown[]): string =>
-  values
-    .map((value) => (typeof value === "string" ? value.trim() : ""))
-    .find(Boolean) ?? "";
+  values.map((value) => (typeof value === "string" ? value.trim() : "")).find(Boolean) ?? "";
 
 const hasProviderPayloadValue = (
   value: unknown,
@@ -299,25 +321,14 @@ const hasProviderPayloadValue = (
   if (seen.has(value)) return false;
   seen.add(value);
   if (Array.isArray(value)) {
-    return value.some((entry) =>
-      hasProviderPayloadValue(entry, new Set(), seen),
-    );
+    return value.some((entry) => hasProviderPayloadValue(entry, new Set(), seen));
   }
   return Object.entries(value as Record<string, unknown>).some(
-    ([key, entry]) =>
-      !ignoredKeys.has(key) &&
-      hasProviderPayloadValue(entry, new Set(), seen),
+    ([key, entry]) => !ignoredKeys.has(key) && hasProviderPayloadValue(entry, new Set(), seen),
   );
 };
 
-const RUNTIME_DESCRIPTOR_KEYS = new Set([
-  "format",
-  "model",
-  "modelUrl",
-  "imageUrl",
-  "motions",
-  "expressions",
-]);
+const RUNTIME_DESCRIPTOR_KEYS = new Set(["format", "model", "modelUrl", "imageUrl", "motions", "expressions"]);
 
 const CHARACTER_DESCRIPTOR_KEYS = new Set([
   "runtime",
@@ -338,20 +349,10 @@ const CHARACTER_DESCRIPTOR_KEYS = new Set([
  * provider. The ADV core never guesses a provider from proprietary fields or
  * filename suffixes.
  */
-export const hasAdvCharacterModel = (
-  entry: AdvCharacterModelEntry | null | undefined,
-): boolean => {
+export const hasAdvCharacterModel = (entry: AdvCharacterModelEntry | null | undefined): boolean => {
   const source = characterResourceRecord(entry);
   const runtime = characterResourceRecord(source.runtime);
-  if (
-    characterDescriptorString(
-      runtime.model,
-      runtime.modelUrl,
-      source.model,
-      source.modelUrl,
-    )
-  )
-    return true;
+  if (characterDescriptorString(runtime.model, runtime.modelUrl, source.model, source.modelUrl)) return true;
   if (characterDescriptorString(runtime.imageUrl, source.imageUrl)) return true;
   return (
     hasProviderPayloadValue(runtime, RUNTIME_DESCRIPTOR_KEYS) ||
@@ -364,17 +365,12 @@ export const hasAdvCharacterModel = (
  * put them in their runtime descriptor. Read one normalized catalog so callers
  * do not need to know the source format.
  */
-export const advCharacterMotions = (
-  entry: AdvCharacterModelEntry | null | undefined,
-): AdvCharacterAnimationEntry[] =>
+export const advCharacterMotions = (entry: AdvCharacterModelEntry | null | undefined): AdvCharacterAnimationEntry[] =>
   entry?.motions?.length ? entry.motions : entry?.runtime?.motions || [];
 
 export const advCharacterExpressions = (
   entry: AdvCharacterModelEntry | null | undefined,
-): AdvCharacterAnimationEntry[] =>
-  entry?.expressions?.length
-    ? entry.expressions
-    : entry?.runtime?.expressions || [];
+): AdvCharacterAnimationEntry[] => (entry?.expressions?.length ? entry.expressions : entry?.runtime?.expressions || []);
 
 export interface AdvBackgroundEntry {
   url?: string;
@@ -394,7 +390,7 @@ export interface AdvStageEntry {
   backgroundFieldScale?: number;
   characterPixelsPerUnit?: number;
   characterCanvasWorldHeight?: number;
-  backgroundFit?: "authored" | "camera-width";
+  backgroundFit?: "authored" | "camera-width" | "cover" | "contain";
   backgroundOverscan?: number;
   backgroundSize?: { width: number; height: number };
   fov?: number;
@@ -589,6 +585,9 @@ export interface AdvTalkTextReveal {
 
 /** Optional Talk interaction semantics supplied by an import adapter. */
 export interface AdvTalkPresentation {
+  appendText?: boolean;
+  retainSpeaker?: boolean;
+  fontScale?: number;
   textReveal?: AdvTalkTextReveal;
   /** Auto-play waits from completed reveal instead of adding a second reading delay. */
   autoAdvanceAfterTextReveal?: boolean;
@@ -627,7 +626,7 @@ export interface AdvCommandGroupAction {
   command: AdvCommand;
 }
 
-/** Generic concurrent Story command object (opcode 500). */
+/** Generic concurrent Story command object. */
 export interface AdvCommandGroup {
   waitForPrevious: boolean;
   cancelOnManualAdvance: boolean;
@@ -637,6 +636,8 @@ export interface AdvCommandGroup {
 
 /** A single ADV command from the episode script. */
 export interface AdvCommand {
+  commandId?: string;
+  commandType?: string;
   command?: unknown;
   index?: number;
   advId?: number;
@@ -667,6 +668,8 @@ export interface AdvCommand {
   cameraDistance?: number;
   advTextId?: string;
   text?: string;
+  /** Flattened localized text sources retained by a composed dialogue. */
+  textSegments?: unknown[];
   /**
    * Optional rich-text format owned by a renderer plugin.
    *
@@ -736,6 +739,11 @@ export interface AdvCommand {
 export interface AdvStory {
   commands?: AdvCommand[];
   runtime?: Partial<AdvRuntimeConfig>;
+  localization?: {
+    locales?: readonly string[];
+    defaultLocale?: string;
+    arrayOrder?: readonly string[];
+  };
   /** Additional fields. */
   [key: string]: unknown;
 }
@@ -752,6 +760,7 @@ export interface AdvFrameState {
 }
 
 export interface AdvChatMessage {
+  sourceCommand?: AdvCommand;
   id: string;
   speaker: string;
   speakerLang?: string;
@@ -768,6 +777,7 @@ export interface AdvChatMessage {
 }
 
 export interface AdvChoiceItem {
+  sourceText?: unknown;
   key: string;
   text: string;
   lang?: string;
@@ -802,6 +812,7 @@ export interface AdvPlayerState {
     surfaceHeight: number;
   };
   session: unknown;
+  pluginState: Record<string, VegaJsonValue>;
   stage: unknown;
   background: unknown;
   still: unknown;
@@ -822,6 +833,12 @@ export interface AdvPlayerState {
   effect: unknown;
   cover: { color: string; opacity: number };
   talk: {
+    sourceCommand?: AdvCommand;
+    presentation?: string;
+    instantReveal?: boolean;
+    prefixLength?: number;
+    fontScale?: number;
+    enabled: boolean;
     visible: boolean;
     speaker: string;
     speakerLang?: string;
@@ -839,9 +856,10 @@ export interface AdvPlayerState {
     shakeY: number;
   };
   talkLog: AdvTalkLogEntry[];
-  title: { visible: boolean; text: string; lang?: string; duration: number };
-  location: { visible: boolean; text: string; lang?: string };
+  title: { sourceText?: unknown; visible: boolean; text: string; lang?: string; duration: number };
+  location: { sourceText?: unknown; visible: boolean; text: string; lang?: string };
   subtitles: {
+    sourceText?: unknown;
     visible: boolean;
     text: string;
     lang?: string;
@@ -850,6 +868,8 @@ export interface AdvPlayerState {
     lastLang?: string;
   };
   chat: {
+    sourceCommand?: AdvCommand;
+    typingSource?: unknown;
     visible: boolean;
     title: string;
     titleLang?: string;
@@ -871,6 +891,7 @@ export interface AdvPlayerState {
   };
   choices: { visible: boolean; items: AdvChoiceItem[] };
   video: {
+    layout?: StoryVideoLayout;
     visible: boolean;
     src: string;
     alpha: number;
@@ -896,6 +917,7 @@ export interface AdvPlayerState {
 // ---------------------------------------------------------------------------
 
 export interface AdvTalkLogEntry {
+  sourceCommand?: AdvCommand;
   speaker: string;
   speakerLang?: string;
   text: string;
@@ -907,6 +929,7 @@ export interface AdvTalkLogEntry {
 }
 
 export interface AdvChatMemoryEntry {
+  sourceCommand?: AdvCommand;
   entryType: number;
   senderChatId: number;
   senderName: string;
@@ -923,10 +946,7 @@ export interface AdvChatMemoryEntry {
 
 export interface AdvChatMemoryState {
   entries: AdvChatMemoryEntry[];
-  senderReadStateMap: Map<
-    number,
-    { currentReadCount: number; lastReadAppliedEntryCount: number }
-  >;
+  senderReadStateMap: Map<number, { currentReadCount: number; lastReadAppliedEntryCount: number }>;
 }
 
 /** Flow parameters for clip video playback. */

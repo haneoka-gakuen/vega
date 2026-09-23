@@ -9,13 +9,7 @@ import type {
   VegaUiSlotContext,
 } from "./plugins";
 
-export const VEGA_STANDARD_UI_SLOTS = [
-  "before-stage",
-  "stage-overlay",
-  "dialogue",
-  "controls",
-  "after-stage",
-] as const;
+export const VEGA_STANDARD_UI_SLOTS = ["before-stage", "stage-overlay", "dialogue", "controls", "after-stage"] as const;
 
 export type VegaStandardUiSlot = (typeof VEGA_STANDARD_UI_SLOTS)[number];
 
@@ -24,6 +18,8 @@ export interface VegaPlayerPresentation {
   readonly stage: HTMLElement;
   readonly slots: ReadonlyMap<string, HTMLElement>;
   readonly themeId?: string;
+  /** Selected contribution, used for story-resource preparation. */
+  readonly theme?: VegaThemeContribution;
 }
 
 export interface VegaPlayerPresentationOptions {
@@ -36,16 +32,11 @@ export interface VegaPlayerPresentationOptions {
   readonly uiSlots: readonly VegaUiSlotContribution[];
 }
 
-export const isVegaUiSlotEventTarget = (
-  target: EventTarget | null,
-): boolean => {
+export const isVegaUiSlotEventTarget = (target: EventTarget | null): boolean => {
   const candidate = target as {
     closest?: (selector: string) => Element | null;
   } | null;
-  return (
-    typeof candidate?.closest === "function" &&
-    candidate.closest("[data-vega-ui-slot]") !== null
-  );
+  return typeof candidate?.closest === "function" && candidate.closest("[data-vega-ui-slot]") !== null;
 };
 
 type SharedThemeStyle =
@@ -62,9 +53,7 @@ type SharedThemeStyle =
 
 const themeStyles = new WeakMap<Document, Map<string, SharedThemeStyle>>();
 
-export const createVegaPlayerPresentation = (
-  options: VegaPlayerPresentationOptions,
-): VegaPlayerPresentation => {
+export const createVegaPlayerPresentation = (options: VegaPlayerPresentationOptions): VegaPlayerPresentation => {
   const document = options.mount.ownerDocument;
   if (!document?.createElement || typeof options.mount.append !== "function") {
     if (options.themes.length || options.uiSlots.length) {
@@ -77,8 +66,7 @@ export const createVegaPlayerPresentation = (
   root.className = "vega-player";
   root.dataset.vegaEngine = options.engineId;
   root.dataset.vegaPlayer = options.playerId;
-  root.style.cssText =
-    "position:absolute;inset:0;overflow:hidden;isolation:isolate;container-type:size;";
+  root.style.cssText = "position:absolute;inset:0;overflow:hidden;isolation:isolate;container-type:size;";
 
   const beforeStage = createSlot(document, "before-stage", -10);
   const stage = document.createElement("div");
@@ -122,11 +110,12 @@ export const createVegaPlayerPresentation = (
     root,
     stage,
     slots,
-    ...(theme ? { themeId: theme.id } : {}),
+    ...(theme ? { themeId: theme.id, theme } : {}),
   };
 };
 
 export const mountVegaUiSlots = async (options: {
+  readonly resources?: VegaUiSlotContext["resources"];
   readonly contributions: readonly VegaUiSlotContribution[];
   readonly presentation: VegaPlayerPresentation;
   readonly lifetime: VegaLifetime;
@@ -141,6 +130,7 @@ export const mountVegaUiSlots = async (options: {
     const host = options.presentation.slots.get(contribution.slot);
     if (!host) throw new ReferenceError(`Vega UI slot host does not exist: ${contribution.slot}`);
     const context: VegaUiSlotContext = {
+      ...(options.resources ? { resources: options.resources } : {}),
       engineId: options.engineId,
       playerId: options.playerId,
       player: options.player,
@@ -197,10 +187,7 @@ const selectTheme = (
   throw new Error(`Multiple Vega themes are installed; select one with VegaPlayerOptions.theme`);
 };
 
-const applyThemeTokens = (
-  root: HTMLElement,
-  tokens: Readonly<Record<string, string | number>> | undefined,
-): void => {
+const applyThemeTokens = (root: HTMLElement, tokens: Readonly<Record<string, string | number>> | undefined): void => {
   for (const [name, value] of Object.entries(tokens ?? {})) {
     const property = name.startsWith("--") ? name : `--vega-${kebabCase(name)}`;
     if (!/^--[a-zA-Z0-9_-]+$/u.test(property)) {
@@ -239,8 +226,7 @@ const adoptThemeStyleSheet = (document: Document, cssText: string): CSSStyleShee
   try {
     const realm = document.defaultView as (Window & { CSSStyleSheet?: CSSStyleSheetConstructor }) | null;
     const constructor =
-      realm?.CSSStyleSheet ??
-      (typeof globalThis.CSSStyleSheet === "function" ? globalThis.CSSStyleSheet : undefined);
+      realm?.CSSStyleSheet ?? (typeof globalThis.CSSStyleSheet === "function" ? globalThis.CSSStyleSheet : undefined);
     if (!constructor) return undefined;
     const sheet = new constructor();
     if (typeof sheet.replaceSync !== "function") return undefined;

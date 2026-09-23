@@ -72,67 +72,53 @@ export const VEGA_ADV_OPCODE = Object.freeze({
 } as const);
 
 export const VEGA_NATIVE_COMPATIBILITY_RANGE = Object.freeze({ minimum: 0, maximum: 100 });
-/** Reserved for future native semantics; extensions must never claim it. */
-export const VEGA_FUTURE_NATIVE_OPCODE_RANGE = Object.freeze({ minimum: 101, maximum: 499 });
-export const VEGA_COMMAND_GROUP_OPCODE = 500;
-export const VEGA_OFFICIAL_OPCODE_RANGE = Object.freeze({ minimum: 500, maximum: 999 });
-export const VEGA_OFFICIAL_EXTENSION_RANGE = Object.freeze({ minimum: 501, maximum: 999 });
-/**
- * Reserved for future protocol allocation. Neither official extensions nor
- * third-party plugins may claim these values in protocol version 1.
- */
-export const VEGA_FUTURE_RESERVED_OPCODE_RANGE = Object.freeze({ minimum: 1_000, maximum: 9_999 });
-export const VEGA_THIRD_PARTY_OPCODE_MINIMUM = 10_000;
-
-/** @deprecated Use `VEGA_OFFICIAL_EXTENSION_RANGE`. */
-export const VEGA_BUILTIN_EXTENSION_RANGE = VEGA_OFFICIAL_EXTENSION_RANGE;
-
+export const VEGA_COMMAND_GROUP_OPCODE = 101;
+export const VEGA_SYSTEM_OPCODE = Object.freeze({
+  SetVariable: 102,
+  Branch: 103,
+  JumpScene: 104,
+  CallScene: 105,
+  ReturnScene: 106,
+  Input: 107,
+  Unlock: 108,
+  FlowCheckpoint: 109,
+  SetSetting: 110,
+  End: 111,
+  SceneMarker: 112,
+  SetDialogueVisibility: 113,
+} as const);
+export const VEGA_EXTENSION_OPCODE_MINIMUM = 114;
+export type VegaSystemOpcode = (typeof VEGA_SYSTEM_OPCODE)[keyof typeof VEGA_SYSTEM_OPCODE];
 const DEFINED_NATIVE_OPCODES = new Set<number>(Object.values(VEGA_ADV_OPCODE));
+const isSafeOpcode = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+export const isVegaNativeOpcode = (value: unknown): boolean => isSafeOpcode(value) && DEFINED_NATIVE_OPCODES.has(value);
+export const isVegaCompatibilityOpcode = (value: unknown): boolean =>
+  isSafeOpcode(value) && value <= VEGA_NATIVE_COMPATIBILITY_RANGE.maximum;
+export const isVegaReservedOpcode = (value: unknown): boolean =>
+  isSafeOpcode(value) && value < VEGA_EXTENSION_OPCODE_MINIMUM;
+export const isVegaExtensionOpcode = (value: unknown): boolean =>
+  isSafeOpcode(value) && value >= VEGA_EXTENSION_OPCODE_MINIMUM;
 
-const isSafeOpcode = (opcode: unknown): opcode is number =>
-  typeof opcode === "number" && Number.isSafeInteger(opcode) && opcode >= 0;
-
-export const isVegaNativeOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) && (DEFINED_NATIVE_OPCODES.has(opcode) || opcode === VEGA_COMMAND_GROUP_OPCODE);
-
-/**
- * Values 0-100 are immutable compatibility territory, including retired and
- * currently unassigned gaps. The predicate deliberately differs from
- * `isVegaNativeOpcode`, which only identifies commands implemented today.
- */
-export const isVegaCompatibilityOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) &&
-  opcode >= VEGA_NATIVE_COMPATIBILITY_RANGE.minimum &&
-  opcode <= VEGA_NATIVE_COMPATIBILITY_RANGE.maximum;
-
-export const isVegaOfficialOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) &&
-  opcode >= VEGA_OFFICIAL_OPCODE_RANGE.minimum &&
-  opcode <= VEGA_OFFICIAL_OPCODE_RANGE.maximum;
-
-export const isVegaFutureNativeOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) &&
-  opcode >= VEGA_FUTURE_NATIVE_OPCODE_RANGE.minimum &&
-  opcode <= VEGA_FUTURE_NATIVE_OPCODE_RANGE.maximum;
-
-export const isVegaOfficialExtensionOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) &&
-  opcode >= VEGA_OFFICIAL_EXTENSION_RANGE.minimum &&
-  opcode <= VEGA_OFFICIAL_EXTENSION_RANGE.maximum;
-
-export const isVegaFutureReservedOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) &&
-  opcode >= VEGA_FUTURE_RESERVED_OPCODE_RANGE.minimum &&
-  opcode <= VEGA_FUTURE_RESERVED_OPCODE_RANGE.maximum;
-
-export const isVegaThirdPartyOpcode = (opcode: unknown): boolean =>
-  isSafeOpcode(opcode) && opcode >= VEGA_THIRD_PARTY_OPCODE_MINIMUM;
-
-export const isVegaReservedOpcode = (opcode: unknown): boolean =>
-  isVegaCompatibilityOpcode(opcode) ||
-  isVegaFutureNativeOpcode(opcode) ||
-  isVegaOfficialOpcode(opcode) ||
-  isVegaFutureReservedOpcode(opcode);
-
-export const isVegaExtensionOpcode = (opcode: unknown): boolean =>
-  isVegaOfficialExtensionOpcode(opcode) || isVegaThirdPartyOpcode(opcode);
+/** Stable plugin command identity; the player assigns its numeric execution slot. */
+export function vegaCommandType(plugin: string, name: string, schemaVersion: number): string {
+  if (
+    !/^[a-z0-9][a-z0-9._-]*$/.test(plugin) ||
+    !name.trim() ||
+    /[\u0000-\u001f\u007f]/.test(name) ||
+    !Number.isSafeInteger(schemaVersion) ||
+    schemaVersion < 1
+  )
+    throw new TypeError("Invalid plugin command identity");
+  return `${plugin}:${encodeURIComponent(name)}@${schemaVersion}`;
+}
+export function isVegaCommandType(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^([a-z0-9][a-z0-9._-]*):([^@]+)@([1-9][0-9]*)$/.exec(value);
+  if (!match) return false;
+  try {
+    return vegaCommandType(match[1]!, decodeURIComponent(match[2]!), Number(match[3])) === value;
+  } catch {
+    return false;
+  }
+}

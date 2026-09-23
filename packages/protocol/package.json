@@ -46,7 +46,11 @@
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js"
     },
-    "./schema/vega-project.json": "./schema/vega-project.schema.json"
+    "./schema/vega-project.json": "./schema/vega-project.schema.json",
+    "./coordinates": {
+      "types": "./dist/coordinates.d.ts",
+      "import": "./dist/coordinates.js"
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

@@ -4,9 +4,7 @@ export interface VegaJsonObject {
   [key: string]: VegaJsonValue;
 }
 
-export type VegaLocalizedText =
-  | string
-  | Readonly<Record<string, string>>;
+export type VegaLocalizedText = string | Readonly<Record<string, string>>;
 
 export type VegaProjectLanguage = Readonly<{
   /** A canonical BCP 47 language tag. */
@@ -62,7 +60,8 @@ export interface VegaScene {
  * semantics survive a lossless import/export round trip.
  */
 export interface VegaCommand {
-  readonly command: number;
+  readonly command: number | string;
+  readonly commandId?: string;
   readonly index?: number;
   readonly key?: string;
   readonly name?: string;
@@ -112,10 +111,7 @@ export interface VegaExternalRuntimeRequirement {
   readonly license: string;
   readonly homepage?: string;
   readonly optional?: boolean;
-  readonly provisioning: readonly (
-    | "host"
-    | "application-bundle"
-  )[];
+  readonly provisioning: readonly ("host" | "application-bundle")[];
 }
 
 /**

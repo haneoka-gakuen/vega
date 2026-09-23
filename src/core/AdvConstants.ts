@@ -1,3 +1,4 @@
+import { DEFAULT_SCENE_GEOMETRY } from "@haneoka/vega-protocol/coordinates";
 import type { AdvFocusDataRow, AdvRuntimeConfig } from "../types/AdvRuntime";
 import { VEGA_ADV_OPCODE, VEGA_COMMAND_GROUP_OPCODE } from "@haneoka/vega-protocol";
 import {
@@ -11,7 +12,7 @@ import {
 
 export const ADV_COMMAND = Object.freeze({
   ...VEGA_ADV_OPCODE,
-  /** Generic Story command group. Values 500-999 remain Vega-reserved. */
+  /** Engine-owned concurrent command group. */
   CommandGroup: VEGA_COMMAND_GROUP_OPCODE,
 });
 
@@ -339,24 +340,15 @@ export const DEFAULT_ADV_RUNTIME = Object.freeze({
     maxX: 1.6,
     width: 3.2,
     backgroundSize: { width: 22.31, height: 14.28145 },
-    positions: {
-      1: { x: -1.6, y: 0, z: 0 },
-      3: { x: -0.8, y: 0, z: 0 },
-      5: { x: 0, y: 0, z: 0 },
-      7: { x: 0.8, y: 0, z: 0 },
-      9: { x: 1.6, y: 0, z: 0 },
-    },
-    focusAnchors: {
-      1: { x: -1.6, y: 0, z: 0 },
-      2: { x: -1.2, y: 0, z: 0 },
-      3: { x: -0.8, y: 0, z: 0 },
-      4: { x: -0.4, y: 0, z: 0 },
-      5: { x: 0, y: 0, z: 0 },
-      6: { x: 0.4, y: 0, z: 0 },
-      7: { x: 0.8, y: 0, z: 0 },
-      8: { x: 1.2, y: 0, z: 0 },
-      9: { x: 1.6, y: 0, z: 0 },
-    },
+    positions: DEFAULT_SCENE_GEOMETRY.positions,
+    focusAnchors: DEFAULT_SCENE_GEOMETRY.focusAnchors,
+    fov: DEFAULT_SCENE_GEOMETRY.fov,
+    initialCameraPosition: DEFAULT_SCENE_GEOMETRY.cameraPosition,
+    initialCameraRotation: DEFAULT_SCENE_GEOMETRY.cameraRotation,
+    characterFieldPosition: DEFAULT_SCENE_GEOMETRY.characterFieldPosition,
+    backgroundFieldPosition: DEFAULT_SCENE_GEOMETRY.backgroundFieldPosition,
+    characterFieldScale: DEFAULT_SCENE_GEOMETRY.characterFieldScale,
+    backgroundFieldScale: DEFAULT_SCENE_GEOMETRY.backgroundFieldScale,
   },
   layout: {
     designViewportAspect: 13 / 6,
@@ -469,12 +461,8 @@ export function mergeAdvRuntime(runtime?: Partial<AdvRuntimeConfig> | null): Adv
       qualityTableValue(targetFrameRateByQuality, baseQualityMode, ADV_TARGET_FRAME_RATE_BY_QUALITY),
     targetFrameRateByQuality,
     quality,
-    focusCharacterBlurEnabled:
-      runtime?.focusCharacterBlurEnabled ??
-      DEFAULT_ADV_RUNTIME.focusCharacterBlurEnabled,
-    focusBackgroundBlurEnabled:
-      runtime?.focusBackgroundBlurEnabled ??
-      DEFAULT_ADV_RUNTIME.focusBackgroundBlurEnabled,
+    focusCharacterBlurEnabled: runtime?.focusCharacterBlurEnabled ?? DEFAULT_ADV_RUNTIME.focusCharacterBlurEnabled,
+    focusBackgroundBlurEnabled: runtime?.focusBackgroundBlurEnabled ?? DEFAULT_ADV_RUNTIME.focusBackgroundBlurEnabled,
     stage: { ...DEFAULT_ADV_RUNTIME.stage, ...(runtime?.stage || {}) },
     layout: { ...DEFAULT_ADV_RUNTIME.layout, ...(runtime?.layout || {}) },
     fieldRenderer: { ...DEFAULT_ADV_RUNTIME.fieldRenderer, ...(runtime?.fieldRenderer || {}) },

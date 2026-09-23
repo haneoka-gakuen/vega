@@ -1,14 +1,7 @@
-import {
-  decodeVegaBundle,
-  parseVegaProject,
-  type VegaProject,
-} from "@haneoka/vega-protocol";
+import { decodeVegaBundle, parseVegaProject, type VegaProject } from "@haneoka/vega-protocol";
 import type { AdvStory } from "../types/AdvRuntime";
 import { VegaEngine, createVega, type VegaEngineOptions, type VegaPlayerHandle } from "./VegaEngine";
-import {
-  bindVegaProject,
-  type VegaProjectBinding,
-} from "./projectRuntime";
+import { bindVegaProject, type VegaProjectBinding } from "./projectRuntime";
 import { loadDenebRuntimePlugins } from "./denebPlugins";
 
 export const DENEB_RUNTIME_ABI_VERSION = 1 as const;
@@ -93,25 +86,16 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
   let disposed = false;
   let disposal: Promise<void> | null = null;
 
-  const ensureEngine = (
-    mountOptions?: DenebRuntimeMountOptions,
-  ): Promise<VegaEngine> => {
-    const requestedRuntimePlugins = normalizedUrl(
-      options.runtimePluginIndexUrl ?? mountOptions?.runtimePluginIndexUrl,
-    );
+  const ensureEngine = (mountOptions?: DenebRuntimeMountOptions): Promise<VegaEngine> => {
+    const requestedRuntimePlugins = normalizedUrl(options.runtimePluginIndexUrl ?? mountOptions?.runtimePluginIndexUrl);
     const requestedExternalRuntimes = normalizedUrl(
       options.externalRuntimeIndexUrl ?? mountOptions?.externalRuntimeIndexUrl,
     );
     if (
       engineInitialization &&
-      (requestedRuntimePlugins !== runtimePluginIndexUrl ||
-        requestedExternalRuntimes !== externalRuntimeIndexUrl)
+      (requestedRuntimePlugins !== runtimePluginIndexUrl || requestedExternalRuntimes !== externalRuntimeIndexUrl)
     ) {
-      return Promise.reject(
-        new TypeError(
-          "A Deneb runtime instance cannot switch plugin or external-runtime indexes",
-        ),
-      );
+      return Promise.reject(new TypeError("A Deneb runtime instance cannot switch plugin or external-runtime indexes"));
     }
     if (engineInitialization) return engineInitialization;
     runtimePluginIndexUrl = requestedRuntimePlugins;
@@ -119,28 +103,17 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
     const initialization = (async () => {
       let created: VegaEngine | undefined;
       const loaded = await loadDenebRuntimePlugins({
-        ...(runtimePluginIndexUrl
-          ? { runtimePluginIndexUrl }
-          : {}),
-        ...(externalRuntimeIndexUrl
-          ? { externalRuntimeIndexUrl }
-          : {}),
+        ...(runtimePluginIndexUrl ? { runtimePluginIndexUrl } : {}),
+        ...(externalRuntimeIndexUrl ? { externalRuntimeIndexUrl } : {}),
         signal: engineSignal.signal,
       });
       if (disposed) {
-        throw new ReferenceError(
-          "The Deneb Vega runtime was disposed while loading plugins",
-        );
+        throw new ReferenceError("The Deneb Vega runtime was disposed while loading plugins");
       }
       created = createVega({
         ...options.engineOptions,
-        plugins: [
-          ...loaded.plugins,
-          ...(options.engineOptions?.plugins ?? []),
-        ],
-        officialPlugins: [
-          ...(options.engineOptions?.officialPlugins ?? []),
-        ],
+        plugins: [...loaded.plugins, ...(options.engineOptions?.plugins ?? [])],
+        officialPlugins: [...(options.engineOptions?.officialPlugins ?? [])],
       });
       engine = created;
       try {
@@ -179,9 +152,7 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
         const player = await activeEngine.createPlayer({
           mount: mountOptions.root,
           story: binding.story,
-          ...(mountOptions.theme !== undefined
-            ? { theme: mountOptions.theme }
-            : {}),
+          ...(mountOptions.theme !== undefined ? { theme: mountOptions.theme } : {}),
         });
         if (binding.entryKey) player.player.navigateToKey(binding.entryKey);
         if (options.standaloneShell) player.player.pause();
@@ -217,9 +188,7 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
     dispose() {
       if (disposal) return disposal;
       disposed = true;
-      lifetime.abort(
-        new DOMException("The Deneb Vega runtime was disposed", "AbortError"),
-      );
+      lifetime.abort(new DOMException("The Deneb Vega runtime was disposed", "AbortError"));
       disposal = (async () => {
         const results = await Promise.allSettled([...mounts].map((mounted) => mounted.dispose()));
         mounts.clear();
@@ -255,10 +224,7 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
 };
 
 const normalizedUrl = (value: string | URL | undefined): string | undefined =>
-  value === undefined
-    ? undefined
-    : new URL(String(value), globalThis.document?.baseURI ?? "http://localhost/")
-        .href;
+  value === undefined ? undefined : new URL(String(value), globalThis.document?.baseURI ?? "http://localhost/").href;
 
 const resolveStory = async (options: DenebRuntimeMountOptions, signal: AbortSignal): Promise<VegaProjectBinding> => {
   if (options.manifestUrl) await validateDenebManifest(options.manifestUrl, signal);

@@ -2,35 +2,17 @@ import { AdvPlayer } from "../core/AdvPlayer";
 import type { AdvCommandExecutor } from "../core/AdvCommandService";
 import { mergeAdvRuntime } from "../core/AdvConstants";
 import type { VegaNarrativeInputProvider } from "../narrative/commands";
-import {
-  VegaLocalStorageSaveStorage,
-  VegaMemorySaveStorage,
-  type VegaSaveStorage,
-} from "../narrative/save";
+import { VegaLocalStorageSaveStorage, VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
 import { VegaNarrativeStore } from "../narrative/state";
 import type { StorySceneBackend } from "../rendering/StorySceneBackend";
-import type {
-  StoryRendererExtensionRegistry,
-  StoryRendererServiceKey,
-} from "../rendering/StoryRendererExtensions";
+import type { StoryRendererExtensionRegistry, StoryRendererServiceKey } from "../rendering/StoryRendererExtensions";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { AdvPlayerState, AdvStory } from "../types/AdvRuntime";
-import {
-  createVegaShellController,
-  type VegaManagedShellController,
-} from "../shell/controller";
+import { createVegaShellController, type VegaManagedShellController } from "../shell/controller";
 import { VEGA_SHELL_CONTROLLER, type VegaShellController } from "../shell/contracts";
-import {
-  VegaEventBus,
-  type VegaEventHandler,
-  type VegaEventMap,
-} from "./events";
+import { VegaEventBus, type VegaEventHandler, type VegaEventMap } from "./events";
 import { VegaLifetime } from "./lifecycle";
-import {
-  createVegaPlayerPresentation,
-  mountVegaUiSlots,
-  type VegaPlayerPresentation,
-} from "./playerPresentation";
+import { createVegaPlayerPresentation, mountVegaUiSlots, type VegaPlayerPresentation } from "./playerPresentation";
 import { createBrowserNarrativeInput } from "./browserNarrativeInput";
 import { selectVegaRenderContribution } from "./playerPluginPreset";
 import {
@@ -70,6 +52,7 @@ export type VegaInputHandler = VegaEventHandler<VegaInputEvent>;
 export interface VegaPlayerOptions {
   readonly mount: HTMLElement;
   readonly story: AdvStory;
+  readonly resolveLocalizedText?: AdvPlayer["resolveLocalizedText"];
   readonly state?: AdvPlayerState;
   readonly narrativeStore?: VegaNarrativeStore;
   readonly narrativeInput?: VegaNarrativeInputProvider;
@@ -98,7 +81,10 @@ export interface VegaPlayerService<T = unknown> {
 export interface VegaPlayerShellOptions {
   readonly storage?: VegaSaveStorage;
   readonly projectId?: string;
+  readonly settingsId?: string;
+  readonly initialSettings?: Parameters<typeof createVegaShellController>[0]["initialSettings"];
   readonly title?: string;
+  readonly initialScreen?: "title" | "game";
   readonly onExitRequest?: () => void | Promise<void>;
 }
 
@@ -145,12 +131,9 @@ export class VegaEngine {
     this.portsLifetime = this.lifetime.child("ports");
     this.portsLifetime.defer(() => this.volatileStorage.clear());
     this.storage = Object.freeze({
-      get: <T = unknown>(key: string, signal?: AbortSignal) =>
-        this.readStorage<T>(key, signal),
-      set: (key: string, value: unknown, signal?: AbortSignal) =>
-        this.writeStorage(key, value, signal),
-      delete: (key: string, signal?: AbortSignal) =>
-        this.deleteStorage(key, signal),
+      get: <T = unknown>(key: string, signal?: AbortSignal) => this.readStorage<T>(key, signal),
+      set: (key: string, value: unknown, signal?: AbortSignal) => this.writeStorage(key, value, signal),
+      delete: (key: string, signal?: AbortSignal) => this.deleteStorage(key, signal),
     });
     this.initialization = this.initializePlugins(options);
     // Constructor work must never become an unhandled rejection. `start`
@@ -225,7 +208,15 @@ export class VegaEngine {
     const state = options.state ?? createVegaPlayerState();
     const narrativeStore = options.narrativeStore ?? new VegaNarrativeStore();
     const commandExtensions = [...this.plugins.commandExtensions.values()].map(
-      ({ opcode, execute, authority }) => ({ opcode, execute, authority }),
+      ({ opcode, commandType, execute, authority, replaySafe, prepareStoryResources, enumerateCommandResources }) => ({
+        opcode,
+        commandType,
+        execute,
+        authority,
+        replaySafe,
+        prepareStoryResources,
+        enumerateCommandResources,
+      }),
     );
     const resources = new DefaultStoryResourceResolver(this.plugins.contributions("resource"));
     let presentation: VegaPlayerPresentation | undefined;
@@ -248,14 +239,10 @@ export class VegaEngine {
       );
       const characterProviders = this.plugins.contributions("character");
       if (renderContribution) {
-        const rendererExtensions: StoryRendererExtensionRegistry =
-          Object.freeze({
-            effects: Object.freeze([
-              ...this.plugins.contributions("effect"),
-            ]),
-            service: <T>(key: StoryRendererServiceKey<T>) =>
-              this.plugins.service(key),
-          });
+        const rendererExtensions: StoryRendererExtensionRegistry = Object.freeze({
+          effects: Object.freeze([...this.plugins.contributions("effect")]),
+          service: <T>(key: StoryRendererServiceKey<T>) => this.plugins.service(key),
+        });
         const context = {
           runtime: mergeAdvRuntime(options.story.runtime),
           state,
@@ -277,6 +264,7 @@ export class VegaEngine {
       player = new AdvPlayer({
         mount: presentation.stage,
         story: options.story,
+        resolveLocalizedText: options.resolveLocalizedText,
         state,
         commandExtensions,
         sceneBackend,
@@ -284,6 +272,7 @@ export class VegaEngine {
         narrativeStore,
         narrativeInput: options.narrativeInput ?? browserInput?.provider,
         characterProviders,
+        resourcePreparers: presentation.theme ? [presentation.theme] : [],
       });
       const constructedPlayer = player;
       lifetime.defer(() => constructedPlayer.dispose({ releaseTextures: true }));
@@ -293,28 +282,23 @@ export class VegaEngine {
       const uiRequiresShell = this.plugins
         .contributions("ui-slot")
         .some((contribution) =>
-          contribution.requiredServices?.some(
-            ({ id: serviceId }) =>
-              serviceId === VEGA_SHELL_CONTROLLER.id,
-          ),
+          contribution.requiredServices?.some(({ id: serviceId }) => serviceId === VEGA_SHELL_CONTROLLER.id),
         );
       if (configuredShell || engineShell) {
         shell = configuredShell ?? engineShell;
-      } else if (
-        options.shell !== false &&
-        (options.shell !== undefined || uiRequiresShell)
-      ) {
+      } else if (options.shell !== false && (options.shell !== undefined || uiRequiresShell)) {
         const shellOptions = options.shell || {};
         shell = await createVegaShellController({
           player: constructedPlayer,
           story: options.story,
           narrativeStore,
           storage:
-            shellOptions.storage ??
-            (this.defaultSaveStorage ??=
-              browserSaveStorage() ?? new VegaMemorySaveStorage()),
+            shellOptions.storage ?? (this.defaultSaveStorage ??= browserSaveStorage() ?? new VegaMemorySaveStorage()),
           projectId: shellOptions.projectId,
+          settingsId: shellOptions.settingsId,
+          initialSettings: shellOptions.initialSettings,
           title: shellOptions.title,
+          initialScreen: shellOptions.initialScreen,
           root: presentation.root,
           signal: lifetime.signal,
           onExitRequest: async () => {
@@ -326,6 +310,7 @@ export class VegaEngine {
         playerServices.set(VEGA_SHELL_CONTROLLER.id, shell);
       }
       await mountVegaUiSlots({
+        resources,
         contributions: this.plugins.contributions("ui-slot"),
         presentation,
         lifetime,
@@ -334,9 +319,7 @@ export class VegaEngine {
         player: constructedPlayer,
         state,
         service: (key) =>
-          playerServices.has(key.id)
-            ? (playerServices.get(key.id) as never)
-            : this.plugins.service(key),
+          playerServices.has(key.id) ? (playerServices.get(key.id) as never) : this.plugins.service(key),
       });
       await constructedPlayer.boot();
     } catch (error) {
@@ -454,11 +437,7 @@ export class VegaEngine {
     try {
       event = normalizeInputEvent(candidate, fallbackSource);
     } catch (error) {
-      void this.reportInputDiagnostic(
-        "input-event-invalid",
-        errorMessage(error),
-        fallbackSource,
-      );
+      void this.reportInputDiagnostic("input-event-invalid", errorMessage(error), fallbackSource);
       return;
     }
     const dispatch = this.inputDispatchTail.then(async () => {
@@ -466,21 +445,13 @@ export class VegaEngine {
       try {
         await this.events.emit("input", event);
       } catch (error) {
-        await this.reportInputDiagnostic(
-          "input-handler-failed",
-          errorMessage(error),
-          event.source,
-        );
+        await this.reportInputDiagnostic("input-handler-failed", errorMessage(error), event.source);
       }
     });
     this.inputDispatchTail = dispatch.catch(() => undefined);
   }
 
-  private async reportInputDiagnostic(
-    code: string,
-    message: string,
-    source?: string,
-  ): Promise<void> {
+  private async reportInputDiagnostic(code: string, message: string, source?: string): Promise<void> {
     try {
       await this.events.emit("diagnostic", {
         level: "warning",
@@ -493,44 +464,31 @@ export class VegaEngine {
     }
   }
 
-  private readStorage<T>(
-    key: string,
-    signal: AbortSignal | undefined,
-  ): Promise<T | undefined> {
+  private readStorage<T>(key: string, signal: AbortSignal | undefined): Promise<T | undefined> {
     return this.withStorage(
       key,
       signal,
-      (storage, operationSignal) =>
-        storage.get(key, operationSignal) as Promise<T | undefined>,
+      (storage, operationSignal) => storage.get(key, operationSignal) as Promise<T | undefined>,
       () => this.volatileStorage.get(key) as T | undefined,
     );
   }
 
-  private writeStorage(
-    key: string,
-    value: unknown,
-    signal: AbortSignal | undefined,
-  ): Promise<void> {
+  private writeStorage(key: string, value: unknown, signal: AbortSignal | undefined): Promise<void> {
     return this.withStorage(
       key,
       signal,
-      (storage, operationSignal) =>
-        storage.set(key, value, operationSignal),
+      (storage, operationSignal) => storage.set(key, value, operationSignal),
       () => {
         this.volatileStorage.set(key, value);
       },
     );
   }
 
-  private deleteStorage(
-    key: string,
-    signal: AbortSignal | undefined,
-  ): Promise<void> {
+  private deleteStorage(key: string, signal: AbortSignal | undefined): Promise<void> {
     return this.withStorage(
       key,
       signal,
-      (storage, operationSignal) =>
-        storage.delete(key, operationSignal),
+      (storage, operationSignal) => storage.delete(key, operationSignal),
       () => {
         this.volatileStorage.delete(key);
       },
@@ -540,32 +498,19 @@ export class VegaEngine {
   private async withStorage<T>(
     key: string,
     callerSignal: AbortSignal | undefined,
-    run: (
-      storage: VegaStorageContribution,
-      signal: AbortSignal,
-    ) => Promise<T>,
+    run: (storage: VegaStorageContribution, signal: AbortSignal) => Promise<T>,
     fallback: () => T,
   ): Promise<T> {
     requireStorageKey(key);
-    if (
-      this.phaseValue === "disposing" ||
-      this.phaseValue === "disposed"
-    ) {
-      throw new ReferenceError(
-        `Vega engine ${this.id} cannot access storage while ${this.phaseValue}`,
-      );
+    if (this.phaseValue === "disposing" || this.phaseValue === "disposed") {
+      throw new ReferenceError(`Vega engine ${this.id} cannot access storage while ${this.phaseValue}`);
     }
-    const linked = linkAbortSignals([
-      this.portsLifetime.signal,
-      callerSignal,
-    ]);
+    const linked = linkAbortSignals([this.portsLifetime.signal, callerSignal]);
     try {
       throwIfAborted(linked.signal);
       await settleWithAbort(this.start(), linked.signal);
       if (this.phaseValue !== "ready") {
-        throw new ReferenceError(
-          `Vega engine ${this.id} cannot access storage while ${this.phaseValue}`,
-        );
+        throw new ReferenceError(`Vega engine ${this.id} cannot access storage while ${this.phaseValue}`);
       }
       throwIfAborted(linked.signal);
       const storage = this.selectStorageContribution();
@@ -577,23 +522,14 @@ export class VegaEngine {
   }
 
   private selectStorageContribution(): VegaStorageContribution | undefined {
-    const active = this.plugins
-      .contributionSelections("storage")
-      .filter(({ active }) => active);
-    const explicit = active.filter(
-      ({ singletonPort }) => singletonPort === VEGA_STORAGE_PORT,
-    );
-    const compatible = explicit.length
-      ? explicit
-      : active.filter(({ singletonPort }) => singletonPort === undefined);
+    const active = this.plugins.contributionSelections("storage").filter(({ active }) => active);
+    const explicit = active.filter(({ singletonPort }) => singletonPort === VEGA_STORAGE_PORT);
+    const compatible = explicit.length ? explicit : active.filter(({ singletonPort }) => singletonPort === undefined);
     return [...compatible].sort((left, right) => {
       if (left.priority !== right.priority) {
         return right.priority - left.priority;
       }
-      return stableText(
-        `${left.owner}:${left.contribution.id}`,
-        `${right.owner}:${right.contribution.id}`,
-      );
+      return stableText(`${left.owner}:${left.contribution.id}`, `${right.owner}:${right.contribution.id}`);
     })[0]?.contribution;
   }
 
@@ -618,10 +554,7 @@ export class VegaEngine {
   }
 }
 
-const normalizeInputEvent = (
-  candidate: unknown,
-  fallbackSource: string,
-): VegaInputEvent => {
+const normalizeInputEvent = (candidate: unknown, fallbackSource: string): VegaInputEvent => {
   if (!candidate || typeof candidate !== "object") {
     throw new TypeError("Vega input contribution emitted a non-object event");
   }
@@ -637,14 +570,9 @@ const normalizeInputEvent = (
       (typeof input.value === "number" && Number.isFinite(input.value))
     )
   ) {
-    throw new TypeError(
-      "Vega input event value must be a string, boolean, or finite number",
-    );
+    throw new TypeError("Vega input event value must be a string, boolean, or finite number");
   }
-  if (
-    input.source !== undefined &&
-    (typeof input.source !== "string" || !input.source.trim())
-  ) {
+  if (input.source !== undefined && (typeof input.source !== "string" || !input.source.trim())) {
     throw new TypeError("Vega input event source must not be empty");
   }
   return Object.freeze({
@@ -660,24 +588,18 @@ const requireStorageKey = (key: string): void => {
   }
 };
 
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-const stableText = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
+const stableText = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 const throwIfAborted = (signal: AbortSignal): void => {
   if (signal.aborted) throw abortReason(signal);
 };
 
 const abortReason = (signal: AbortSignal): unknown =>
-  signal.reason ??
-  new DOMException("The Vega operation was aborted", "AbortError");
+  signal.reason ?? new DOMException("The Vega operation was aborted", "AbortError");
 
-const settleWithAbort = <T>(
-  operation: PromiseLike<T>,
-  signal: AbortSignal,
-): Promise<T> => {
+const settleWithAbort = <T>(operation: PromiseLike<T>, signal: AbortSignal): Promise<T> => {
   if (signal.aborted) return Promise.reject(abortReason(signal));
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => {
@@ -766,6 +688,7 @@ export const createVegaPlayerState = (): AdvPlayerState => ({
   currentCommand: null,
   viewport: { x: 0, y: 0, width: 1, height: 1, surfaceWidth: 1, surfaceHeight: 1 },
   session: null,
+  pluginState: {},
   stage: null,
   background: null,
   still: null,
@@ -780,6 +703,9 @@ export const createVegaPlayerState = (): AdvPlayerState => ({
   effect: null,
   cover: { color: "#000000", opacity: 0 },
   talk: {
+    presentation: "default",
+    instantReveal: true,
+    enabled: true,
     visible: false,
     speaker: "",
     text: "",
