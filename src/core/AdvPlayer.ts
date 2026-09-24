@@ -3420,13 +3420,13 @@ export class AdvPlayer {
           rawCategory === "bgm" ? "Bgm" : rawCategory === "se" ? "Se" : rawCategory === "voice" ? "Voice" : "";
         if (category) {
           const volumes = new Map(this.seekSoundProjection.categoryVolumes);
-          volumes.set(category, clamp01(param(cmd, 1), 1));
+          volumes.set(category, clamp01(optionalFinite(param(cmd, 1), 1), 1));
           this.seekSoundProjection.categoryVolumes = [...volumes.entries()];
         }
         return;
       }
       await this.runCommandTask(cmd, async () => {
-        ctx.SoundManager.setCategoryVolume(param(cmd, 0), finite(param(cmd, 1), 1), duration);
+        ctx.SoundManager.setCategoryVolume(param(cmd, 0), optionalFinite(param(cmd, 1), 1), duration);
         if (duration > 0) await delaySeconds(duration, signal || this.abortController.signal);
       });
     });
@@ -4321,7 +4321,7 @@ export class AdvPlayer {
       const hasVideoId = hasAuthoredVideoId(cmd, src);
       if (hasVideoId && !ctx.Session.VideoPlaying) {
         if (!src) throw new Error(`ADV clip video ${String(cmd.videoId)} has no resolved local asset`);
-        const alpha = clamp01(param(cmd, 1), 1);
+        const alpha = clamp01(optionalFinite(param(cmd, 1), 1), 1);
         const videoInfo = clip ? { ...clip, playableUrl: src, src } : src;
         this.cancelClipPlaybackWatch();
         ctx.Session.CurrentVideoInfo = videoInfo;
