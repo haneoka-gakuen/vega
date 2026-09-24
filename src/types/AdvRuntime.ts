@@ -456,7 +456,33 @@ export interface AdvFrameParticleLayer {
   [key: string]: unknown;
 }
 
+export interface AdvFrameAnimationBinding {
+  readonly node: string;
+  readonly property:
+    | "opacity"
+    | "positionX"
+    | "positionY"
+    | "sizeX"
+    | "sizeY"
+    | "scale"
+    | "active"
+    | "imageR"
+    | "imageG"
+    | "imageB";
+  readonly curve: number;
+}
+
+export interface AdvFrameAnimation {
+  readonly duration: number;
+  readonly loop: boolean;
+  readonly streamedCurveCount: number;
+  readonly constantValues: readonly number[];
+  readonly stream: string;
+  readonly bindings: readonly AdvFrameAnimationBinding[];
+}
+
 export interface AdvFrameEntry {
+  animation?: AdvFrameAnimation;
   /** Authored one-shot overlay lifetime; hosts may supply it from native animation clips. */
   oneShotSeconds?: number;
   texture?: string;
