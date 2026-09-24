@@ -457,6 +457,8 @@ export interface AdvFrameParticleLayer {
 }
 
 export interface AdvFrameEntry {
+  /** Authored one-shot overlay lifetime; hosts may supply it from native animation clips. */
+  oneShotSeconds?: number;
   texture?: string;
   textures?: Record<string, string>;
   edges?: Array<{ texture?: string; [key: string]: unknown }>;
