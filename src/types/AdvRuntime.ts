@@ -481,6 +481,29 @@ export interface AdvFrameAnimation {
   readonly bindings: readonly AdvFrameAnimationBinding[];
 }
 
+/**
+ * One ParticleSystem inside an ADV frame prefab, keyed by its GameObject path.
+ *
+ * `system`/`renderer`/`node` are object ids into the frame's
+ * `particleRuntime` graph (the same Unity effect runtime contract used by
+ * AdvEffectCommand prefabs); `layoutNode` is the RectTransform node id in the
+ * frame layout that places the emitter on the canvas.
+ */
+export interface AdvFrameParticleDescriptor {
+  /** Slash-joined GameObject path from the frame root. */
+  readonly path?: string;
+  /** GameObject node id inside the frame particle runtime graph. */
+  readonly node?: string;
+  /** ParticleSystem object id inside the frame particle runtime graph. */
+  readonly system?: string;
+  /** ParticleSystemRenderer object id inside the frame particle runtime graph. */
+  readonly renderer?: string;
+  /** RectTransform node id in the frame layout carrying this emitter. */
+  readonly layoutNode?: string;
+  /** Additional fields. */
+  [key: string]: unknown;
+}
+
 export interface AdvFrameEntry {
   animation?: AdvFrameAnimation;
   /** Authored one-shot overlay lifetime; hosts may supply it from native animation clips. */
@@ -502,6 +525,14 @@ export interface AdvFrameEntry {
   direction?: string;
   rate?: number;
   layers?: AdvFrameParticleLayer[];
+  /** Serialized ParticleSystems of the frame prefab, keyed by GameObject path. */
+  particles?: readonly AdvFrameParticleDescriptor[];
+  /**
+   * Renderer-plugin-owned Unity runtime graph backing `particles` (the shared
+   * opcode-54 effect contract: nodes, particleSystems, particleRenderers,
+   * materials, sprites, meshes, animations).
+   */
+  particleRuntime?: Readonly<Record<string, unknown>> | null;
   rootTransform?: {
     position?: { x?: number; y?: number };
     rotation?: number;
