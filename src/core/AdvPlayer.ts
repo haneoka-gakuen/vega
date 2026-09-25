@@ -1566,6 +1566,7 @@ export class AdvPlayer {
     try {
       this.SceneRoot.presentSeekSnapshot?.();
     } finally {
+      this.clearSeekReplayWatchdog();
       this.SceneRoot.setDeterministicReplayActive(false);
       this.cancelAutoAdvance();
       this.Model.changeIdleState();
@@ -1854,9 +1855,43 @@ export class AdvPlayer {
     }
   }
 
+  /**
+   * Deterministic replay must always have an owner: the playback loop, an
+   * active seek request, or the idle drain. If unblockForSeek armed replay
+   * and every owner has since vanished (an aborted request whose completion
+   * path never ran), the scene would freeze forever with update() gated and
+   * the clock reset each frame. This watchdog releases that dead state.
+   */
+  private seekReplayWatchdog: ReturnType<typeof setTimeout> | undefined;
+
+  private armSeekReplayWatchdog(): void {
+    this.clearSeekReplayWatchdog();
+    this.seekReplayWatchdog = setTimeout(() => {
+      this.seekReplayWatchdog = undefined;
+      if (this.disposed || !this.state.seeking) return;
+      if (this.activeSeek || this.idleSeekDrain) return;
+      if (!this.state.playing) {
+        console.warn("[Vega] seek state lost its owner; releasing deterministic replay");
+        this.Model.shouldShortCut = false;
+        this.Model.shortCutIndex = -1;
+        this.state.seeking = false;
+        this.SceneRoot.setDeterministicReplayActive(false);
+        this.Model.changeIdleState();
+      }
+    }, 20_000);
+  }
+
+  private clearSeekReplayWatchdog(): void {
+    if (this.seekReplayWatchdog !== undefined) {
+      clearTimeout(this.seekReplayWatchdog);
+      this.seekReplayWatchdog = undefined;
+    }
+  }
+
   unblockForSeek() {
     this.playbackCommandController?.abort();
     this.SceneRoot.setDeterministicReplayActive(true);
+    this.armSeekReplayWatchdog();
     this.SceneRoot.cancelTransitionsForSeek?.();
     this.cancelAutoAdvance();
     this.commandGroupScheduler.cancelAll();
