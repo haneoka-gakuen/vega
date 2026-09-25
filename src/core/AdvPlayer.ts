@@ -491,6 +491,10 @@ function frameCanvasAlpha(frame: AdvFrameEntry | null) {
 
 function frameClipDuration(ctx: AdvCommandContext, stateName: string, frame: AdvFrameEntry | null) {
   const lower = String(stateName || "").toLowerCase();
+  // Authored state variants carry their own Animator clips; native durations
+  // come from the selected state, not the generic show window.
+  const stateAnimation = lower ? frame?.animationStates?.[lower] : undefined;
+  if (stateAnimation) return ctx.Model.calcDuration(finite(stateAnimation.duration, 0.5), 0.5);
   const clipSeconds = lower.includes("hide") ? finite(frame?.clips?.hide, 0.5) : finite(frame?.clips?.show, 0.5);
   return ctx.Model.calcDuration(clipSeconds, clipSeconds);
 }
@@ -2899,7 +2903,14 @@ export class AdvPlayer {
       const task = async () => {
         const commandSignal = signal || this.abortController.signal;
         if (!hide) {
-          await ctx.SceneRoot.setFrameOverlay(frame, 0, frameName);
+          // params[1] names the authored Animator state; play that variant's
+          // clip instead of the frame's default animation.
+          const stateAnimation = customState ? frame.animationStates?.[stateName] : undefined;
+          const overlayFrame =
+            stateAnimation && frame.animation !== stateAnimation
+              ? { ...frame, animation: stateAnimation }
+              : frame;
+          await ctx.SceneRoot.setFrameOverlay(overlayFrame, 0, frameName);
           ctx.state.frame = frame;
           ctx.state.frameName = frameName;
           frameStates[frameName] = { frame, opacity: 0, slide: 1 };

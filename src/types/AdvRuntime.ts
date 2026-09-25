@@ -506,6 +506,8 @@ export interface AdvFrameParticleDescriptor {
 
 export interface AdvFrameEntry {
   animation?: AdvFrameAnimation;
+  /** Authored Animator state variants keyed by full clip name (opcode 44 params[1]). */
+  animationStates?: Readonly<Record<string, AdvFrameAnimation>>;
   /** Authored one-shot overlay lifetime; hosts may supply it from native animation clips. */
   oneShotSeconds?: number;
   texture?: string;
