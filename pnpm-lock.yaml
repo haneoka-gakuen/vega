@@ -12,8 +12,8 @@ importers:
         specifier: workspace:*
         version: link:packages/protocol
       '@lucide/vue':
-        specifier: ^1.27.0
-        version: 1.27.0(vue@3.5.39(typescript@6.0.3))
+        specifier: ^1.47.0
+        version: 1.47.0(vue@3.5.39(typescript@6.0.3))
     devDependencies:
       '@types/howler':
         specifier: ^2.2.13
@@ -272,8 +272,8 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@lucide/vue@1.27.0':
-    resolution: {integrity: sha512-LKDEZJ0Uo9UaT4vxBMYVwXeK/0dGcWCTdav1AK/aGD/jYsDPtiVvOgfM7jPlx9BVeyGZ1Uf0aQhHA++rmbe7rw==}
+  '@lucide/vue@1.47.0':
+    resolution: {integrity: sha512-S0/UX9zra4Z8xmqrA1MH5GiSKA8daAPFwkmORt/u+gUHAkYZoeOcr+DH3scZeyE9bdLWScGK+MJoDYi8rIU5Jg==}
     peerDependencies:
       vue: '>=3.0.1'
 
@@ -752,7 +752,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@lucide/vue@1.27.0(vue@3.5.39(typescript@6.0.3))':
+  '@lucide/vue@1.47.0(vue@3.5.39(typescript@6.0.3))':
     dependencies:
       vue: 3.5.39(typescript@6.0.3)
 
