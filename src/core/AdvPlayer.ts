@@ -125,6 +125,7 @@ interface AdvCharacterDoFCommandOwner {
 // constructing TypingTask.
 const ADV_CHAT_TYPING_DELAY_SECONDS = 0.03;
 const ADV_CHAT_MIN_PLAYBACK_SPEED = 0.01;
+const ADV_SEEK_INDEX_BUILD_TIMEOUT_MS = 120_000;
 
 const SEEK_PLAYER_STATE_KEYS = [
   "pluginState",
@@ -171,6 +172,14 @@ type StorySeekCheckpoint = AdvSeekCheckpoint<
   AdvSoundSnapshot,
   AdvPlayerSeekStateSnapshot
 >;
+
+interface AdvReadableAdvanceWait {
+  readonly textLength: number;
+  readonly voicePlayIds: readonly number[];
+  readonly voicePlaybackScopeVersion: number;
+  readonly signal: AbortSignal;
+  readonly intervalSeconds: number;
+}
 
 const ABORTED_CHOICE = Symbol("aborted-choice");
 
@@ -751,6 +760,8 @@ export class AdvPlayer {
   private readonly replaySafeExtensionOpcodes: Set<number>;
   private seekIndexBuild: AdvSeekIndexBuild | null;
   private seekIndexBuilding: boolean;
+  private seekIndexCompileController: AbortController | null;
+  private seekIndexCompileWatchdog: ReturnType<typeof setTimeout> | undefined;
   private seekSoundProjection: AdvSoundSnapshot | null;
   private lastSettledSeekBoundary: number;
   private lastSharedCheckpoint: StorySeekCheckpoint | undefined;
@@ -759,6 +770,7 @@ export class AdvPlayer {
   private talkPresentationGeneration: number;
   private manualAdvanceGeneration: number;
   private talkTypingController: { finish: () => void } | null;
+  private pendingReadableAdvance: AdvReadableAdvanceWait | null;
   private executionObserver: AdvPlayerExecutionObserver | null;
   private readonly executionObservers: Set<AdvPlayerExecutionObserver>;
   private readonly presentationObservers = new Set<() => void>();
@@ -908,6 +920,8 @@ export class AdvPlayer {
     this.replaySafeExtensionOpcodes = new Set();
     this.seekIndexBuild = null;
     this.seekIndexBuilding = false;
+    this.seekIndexCompileController = null;
+    this.seekIndexCompileWatchdog = undefined;
     this.seekSoundProjection = null;
     this.lastSettledSeekBoundary = 0;
     this.chatTypingGeneration = 0;
@@ -915,6 +929,7 @@ export class AdvPlayer {
     this.talkPresentationGeneration = 0;
     this.manualAdvanceGeneration = 0;
     this.talkTypingController = null;
+    this.pendingReadableAdvance = null;
     this.executionObserver = null;
     this.executionObservers = new Set();
     this.playbackResumeWaiters = new Set();
@@ -1051,11 +1066,9 @@ export class AdvPlayer {
         // commands on a detached task corrupts the shared session/scene
         // state the live player reads. The compilation-only renderer gates
         // (zero GPU model/texture creation) keep this fast enough.
-        await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
+        await this.ensureSeekIndex(decisions, { trackLoadingProgress: true, signal });
         if (!isActive()) return;
-        const startCheckpoint = this.seekIndexFor(decisions).checkpoints.get(0) as
-          | StorySeekCheckpoint
-          | undefined;
+        const startCheckpoint = this.seekIndexFor(decisions).checkpoints.get(0) as StorySeekCheckpoint | undefined;
         if (!startCheckpoint) throw new Error("The scene index is missing command boundary 0");
         await this.applyCheckpoint(startCheckpoint, decisions);
         this.finishSeekRestoration(0);
@@ -1306,137 +1319,262 @@ export class AdvPlayer {
     }
   }
 
+  private throwIfSeekIndexCompileAborted(signal: AbortSignal): void {
+    if (!signal.aborted) return;
+    if (signal.reason instanceof Error) throw signal.reason;
+    const error = new Error("ADV seek-index compilation was cancelled");
+    error.name = "AbortError";
+    throw error;
+  }
+
+  private awaitSeekIndexTask<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        signal.removeEventListener("abort", onAbort);
+        try {
+          this.throwIfSeekIndexCompileAborted(signal);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      task.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private armSeekIndexCompileWatchdog(controller: AbortController): void {
+    this.clearSeekIndexCompileWatchdog();
+    this.seekIndexCompileWatchdog = setTimeout(() => {
+      this.seekIndexCompileWatchdog = undefined;
+      if (this.seekIndexCompileController !== controller || controller.signal.aborted) return;
+      const error = new Error("ADV seek-index compilation exceeded its time limit");
+      error.name = "TimeoutError";
+      controller.abort(error);
+    }, ADV_SEEK_INDEX_BUILD_TIMEOUT_MS);
+  }
+
+  private clearSeekIndexCompileWatchdog(): void {
+    if (this.seekIndexCompileWatchdog === undefined) return;
+    clearTimeout(this.seekIndexCompileWatchdog);
+    this.seekIndexCompileWatchdog = undefined;
+  }
+
   private async compileSeekIndex(
     decisions: ReadonlyMap<number, AdvChoiceRecord>,
-    options: { trackLoadingProgress?: boolean } = {},
+    options: { trackLoadingProgress?: boolean; signal?: AbortSignal } = {},
   ): Promise<AdvSeekCheckpointIndex> {
     const commands = this.story?.commands || [];
     const signature = seekDecisionSignature(decisions);
-    const index = sharedCheckpointIndexFor(this.story, signature, this);
-    const baseIndex = sharedCheckpointIndexFor(this.story, "[]", this);
-    const anchor = baseIndex.checkpoints.get(0) as StorySeekCheckpoint | undefined;
-    if (!anchor) throw new Error("Cannot compile a scene index without checkpoint 0");
-    const returnBoundary = this.currentProgressIndex();
-    if (!index.checkpoints.has(returnBoundary) && !this.captureCheckpoint(returnBoundary, true)) {
-      throw new Error(`The scene renderer rejected return boundary ${returnBoundary}`);
-    }
-    const returnCheckpoint = index.checkpoints.get(returnBoundary) as StorySeekCheckpoint | undefined;
-    if (!returnCheckpoint) {
-      throw new Error(`The scene index is missing return boundary ${returnBoundary}`);
-    }
-
-    const loadingBudget = options.trackLoadingProgress ? commands.length : 0;
-    let loadingProcessed = 0;
-    const advanceLoading = (count = 1): void => {
-      if (!loadingBudget || count <= 0) return;
-      const next = Math.min(count, loadingBudget - loadingProcessed);
-      loadingProcessed += next;
-      this.updateSeekIndexLoadingProgress(next);
-    };
-
-    index.checkpoints.clear();
-    index.boundaries.length = 0;
-    index.complete = false;
-    index.blockedAt = null;
-    index.blockedReason = "";
-
-    await this.applyCheckpoint(anchor, decisions, {
-      restoreAudio: false,
-      preservePersistentNarrative: false,
-    });
-    this.SoundManager.suspendForSeek();
-    this.seekSoundProjection = clonePlain(anchor.sound);
-    this.seekIndexBuilding = true;
-    this.SceneRoot.setSeekIndexCompilationActive?.(true);
-    this.Model.shouldShortCut = true;
-    this.Model.shortCutIndex = commands.length;
-    this.state.seeking = true;
-    this.SceneRoot.setDeterministicReplayActive(true);
-    this.Model.CurrentEpisodeListIndex = 0;
-    this.state.commandIndex = 0;
-    this.state.currentCommand = commands[0] || null;
-
+    const compileController = createAbortLink(this.abortController.signal, options.signal);
+    this.seekIndexCompileController = compileController;
+    this.armSeekIndexCompileWatchdog(compileController);
     let failure: unknown = null;
+    let compilationActive = false;
     try {
-      if (!commands.length) {
-        await this.SceneRoot.clearCommandPostEffects(0);
-        this.state.finished = true;
-        this.retainFinishedRenderState();
+      const index = sharedCheckpointIndexFor(this.story, signature, this);
+      const baseIndex = sharedCheckpointIndexFor(this.story, "[]", this);
+      const anchor = baseIndex.checkpoints.get(0) as StorySeekCheckpoint | undefined;
+      if (!anchor) throw new Error("Cannot compile a scene index without checkpoint 0");
+      const returnBoundary = this.currentProgressIndex();
+      if (!index.checkpoints.has(returnBoundary) && !this.captureCheckpoint(returnBoundary, true)) {
+        throw new Error(`The scene renderer rejected return boundary ${returnBoundary}`);
       }
-      if (!this.captureCheckpoint(0, true)) {
-        throw new Error("The scene renderer rejected command boundary 0");
+      const returnCheckpoint = index.checkpoints.get(returnBoundary) as StorySeekCheckpoint | undefined;
+      if (!returnCheckpoint) {
+        throw new Error(`The scene index is missing return boundary ${returnBoundary}`);
       }
-      const visited = new Set<number>();
-      let batch = 0;
-      while (!this.abortController.signal.aborted && this.Model.CurrentEpisodeListIndex < commands.length) {
-        const commandIndex = this.Model.CurrentEpisodeListIndex;
-        if (visited.has(commandIndex)) {
-          index.blockedAt = commandIndex;
-          index.blockedReason = "control-flow-cycle";
-          break;
-        }
-        visited.add(commandIndex);
-        const authored = commands[commandIndex];
-        if (!authored) {
-          index.blockedAt = commandIndex;
-          index.blockedReason = "missing-command";
-          break;
-        }
-        const barrier = this.seekCompilationBarrier(authored);
-        if (barrier) {
-          index.blockedAt = commandIndex;
-          index.blockedReason = barrier;
-          break;
-        }
-        const execution = this.executeCommandAtIndex(commands, commandIndex, this.abortController.signal);
-        if (execution) await execution;
-        await this.settleDetachedCommandTasks();
-        await this.SceneRoot.settleSeekSnapshotResources();
-        const boundary = this.currentProgressIndex();
-        if (boundary >= commands.length) {
-          await this.SceneRoot.clearCommandPostEffects(0);
+
+      const loadingBudget = options.trackLoadingProgress ? commands.length : 0;
+      let loadingProcessed = 0;
+      const advanceLoading = (count = 1): void => {
+        if (!loadingBudget || count <= 0) return;
+        const next = Math.min(count, loadingBudget - loadingProcessed);
+        loadingProcessed += next;
+        this.updateSeekIndexLoadingProgress(next);
+      };
+
+      index.checkpoints.clear();
+      index.boundaries.length = 0;
+      index.complete = false;
+      index.blockedAt = null;
+      index.blockedReason = "";
+
+      try {
+        // Compilation owns deterministic replay before restoring the anchor.
+        // The ordinary seek watchdog must not be able to release this
+        // transaction in the gap between applyCheckpoint() and the replay
+        // flags below; rollback below also covers anchor-restore failure.
+        compilationActive = true;
+        this.seekIndexBuilding = true;
+        this.SceneRoot.setSeekIndexCompilationActive?.(true);
+        this.Model.shouldShortCut = true;
+        this.Model.shortCutIndex = commands.length;
+        this.state.seeking = true;
+        this.SceneRoot.setDeterministicReplayActive(true);
+        await this.awaitSeekIndexTask(
+          this.applyCheckpoint(anchor, decisions, {
+            restoreAudio: false,
+            preservePersistentNarrative: false,
+            signal: compileController.signal,
+          }),
+          compileController.signal,
+        );
+        this.throwIfSeekIndexCompileAborted(compileController.signal);
+        this.SoundManager.suspendForSeek();
+        this.seekSoundProjection = clonePlain(anchor.sound);
+        this.Model.CurrentEpisodeListIndex = 0;
+        this.state.commandIndex = 0;
+        this.state.currentCommand = commands[0] || null;
+
+        if (!commands.length) {
+          await this.awaitSeekIndexTask(this.SceneRoot.clearCommandPostEffects(0), compileController.signal);
           this.state.finished = true;
           this.retainFinishedRenderState();
         }
-        if (!this.captureCheckpoint(boundary, true)) {
-          throw new Error(`The scene renderer rejected command boundary ${boundary}`);
+        if (!this.captureCheckpoint(0, true)) {
+          throw new Error("The scene renderer rejected command boundary 0");
         }
-        advanceLoading();
-        batch += 1;
-        if (options.trackLoadingProgress && batch >= 16) {
-          batch = 0;
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const visited = new Set<number>();
+        let batch = 0;
+        while (!compileController.signal.aborted && this.Model.CurrentEpisodeListIndex < commands.length) {
+          const commandIndex = this.Model.CurrentEpisodeListIndex;
+          if (visited.has(commandIndex)) {
+            index.blockedAt = commandIndex;
+            index.blockedReason = "control-flow-cycle";
+            break;
+          }
+          visited.add(commandIndex);
+          const authored = commands[commandIndex];
+          if (!authored) {
+            index.blockedAt = commandIndex;
+            index.blockedReason = "missing-command";
+            break;
+          }
+          const barrier = this.seekCompilationBarrier(authored);
+          if (barrier) {
+            index.blockedAt = commandIndex;
+            index.blockedReason = barrier;
+            break;
+          }
+          const execution = this.executeCommandAtIndex(commands, commandIndex, compileController.signal);
+          if (execution) await this.awaitSeekIndexTask(execution, compileController.signal);
+          this.throwIfSeekIndexCompileAborted(compileController.signal);
+          await this.awaitSeekIndexTask(
+            this.settleDetachedCommandTasks(compileController.signal),
+            compileController.signal,
+          );
+          this.throwIfSeekIndexCompileAborted(compileController.signal);
+          await this.awaitSeekIndexTask(this.SceneRoot.settleSeekSnapshotResources(), compileController.signal);
+          this.throwIfSeekIndexCompileAborted(compileController.signal);
+          const boundary = this.currentProgressIndex();
+          if (boundary >= commands.length) {
+            await this.awaitSeekIndexTask(this.SceneRoot.clearCommandPostEffects(0), compileController.signal);
+            this.state.finished = true;
+            this.retainFinishedRenderState();
+          }
+          if (!this.captureCheckpoint(boundary, true)) {
+            throw new Error(`The scene renderer rejected command boundary ${boundary}`);
+          }
+          advanceLoading();
+          batch += 1;
+          if (options.trackLoadingProgress && batch >= 16) {
+            batch = 0;
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            this.throwIfSeekIndexCompileAborted(compileController.signal);
+          }
+        }
+        this.throwIfSeekIndexCompileAborted(compileController.signal);
+        if (this.Model.CurrentEpisodeListIndex >= commands.length) {
+          index.complete = true;
+          index.blockedAt = null;
+          index.blockedReason = "";
+        }
+        return index;
+      } catch (error) {
+        failure = error;
+        throw error;
+      } finally {
+        advanceLoading(loadingBudget - loadingProcessed);
+        let restoreError: unknown = null;
+        if (compileController.signal.aborted && !this.disposed) {
+          // A backend may still own an uncooperative task. Retire the scene
+          // before releasing replay mode so that late work cannot alter a
+          // resumed player. Retry creates a fresh player and resource scope.
+          if (failure instanceof Error && failure.name !== "AbortError") this.state.error = failure.message;
+          void this.dispose().catch((error) => console.error("[Vega] cancelled scene disposal failed", error));
+        }
+        if (!this.disposed) {
+          try {
+            await this.awaitSeekIndexTask(
+              this.applyCheckpoint(returnCheckpoint, decisions, {
+                preservePersistentNarrative: false,
+                signal: compileController.signal,
+              }),
+              compileController.signal,
+            );
+          } catch (error) {
+            restoreError = error;
+            if (compileController.signal.aborted) {
+              if (error instanceof Error && error.name !== "AbortError") this.state.error = error.message;
+              void this.dispose().catch((cause) => console.error("[Vega] cancelled scene disposal failed", cause));
+            }
+          }
+        }
+        // Keep shortcut/deterministic replay owned until the return checkpoint
+        // has been restored. This rollback is part of the compile transaction.
+        this.seekIndexBuilding = false;
+        this.SceneRoot.setSeekIndexCompilationActive?.(false);
+        this.seekSoundProjection = null;
+        if (!this.disposed) {
+          try {
+            this.finishSeekRestoration(returnCheckpoint.index);
+          } catch (error) {
+            restoreError ||= error;
+          }
+        }
+        if (restoreError) {
+          if (failure) console.error("[Vega] seek-index rollback failed", restoreError);
+          else throw restoreError;
         }
       }
-      if (this.Model.CurrentEpisodeListIndex >= commands.length) {
-        index.complete = true;
-        index.blockedAt = null;
-        index.blockedReason = "";
-      }
-      return index;
     } catch (error) {
-      failure = error;
+      failure = failure || error;
+      if (
+        !this.disposed &&
+        !this.abortController.signal.aborted &&
+        !options.signal?.aborted &&
+        (error instanceof Error ? error.name !== "AbortError" : true)
+      ) {
+        this.state.loading = false;
+        this.state.ready = false;
+        this.state.error = error instanceof Error ? error.message : String(error);
+      }
       throw error;
     } finally {
-      advanceLoading(loadingBudget - loadingProcessed);
-      this.seekIndexBuilding = false;
-      this.SceneRoot.setSeekIndexCompilationActive?.(false);
-      this.seekSoundProjection = null;
-      try {
-        await this.applyCheckpoint(returnCheckpoint, decisions, {
-          preservePersistentNarrative: false,
-        });
-      } catch (restoreError) {
-        if (!failure) throw restoreError;
-      } finally {
-        this.finishSeekRestoration(returnCheckpoint.index);
+      if (compilationActive && this.disposed) {
+        this.seekIndexBuilding = false;
+        this.SceneRoot.setSeekIndexCompilationActive?.(false);
+        this.seekSoundProjection = null;
       }
+      this.clearSeekIndexCompileWatchdog();
+      if (this.seekIndexCompileController === compileController) this.seekIndexCompileController = null;
+      compileController.abort();
     }
   }
 
   private async ensureSeekIndex(
     decisions: ReadonlyMap<number, AdvChoiceRecord>,
-    options: { trackLoadingProgress?: boolean } = {},
+    options: { trackLoadingProgress?: boolean; signal?: AbortSignal } = {},
   ): Promise<AdvSeekCheckpointIndex> {
     const signature = seekDecisionSignature(decisions);
     const existing = sharedCheckpointIndexFor(this.story, signature, this);
@@ -1521,7 +1659,7 @@ export class AdvPlayer {
     this.restoredDialoguePending = false;
     this.cancelAutoAdvance();
     this.commandGroupScheduler.cancelAll();
-    await this.commandGroupScheduler.waitForSettled();
+    await this.commandGroupScheduler.waitForSettled(options.signal);
     if (this.disposed || options.signal?.aborted) return checkpoint.index;
     this.beginTalkPresentation();
     this.Session.cancelVoicePlaybackScope();
@@ -1535,7 +1673,7 @@ export class AdvPlayer {
     this.choiceResolver = null;
     this.state.seeking = true;
     this.SceneRoot.setDeterministicReplayActive(true);
-    this.armSeekReplayWatchdog();
+    if (!this.seekIndexCompileController) this.armSeekReplayWatchdog();
     this.SoundManager.suspendForSeek();
     this.Session.restoreSnapshot(checkpoint.session);
     this.Session.choiceRecords.clear();
@@ -1717,16 +1855,21 @@ export class AdvPlayer {
     });
   }
 
-  private async settleDetachedCommandTasks(): Promise<void> {
-    await this.commandGroupScheduler.waitForSettled(this.abortController.signal);
+  private async settleDetachedCommandTasks(signal = this.abortController.signal): Promise<void> {
+    await this.commandGroupScheduler.waitForSettled(signal);
+    if (signal.aborted) return;
     while (this.detachedCommandTasks.size) {
       await Promise.all([...this.detachedCommandTasks]);
+      if (signal.aborted) return;
     }
+    if (signal.aborted) return;
     await this.PlayableDirector.waitForBackgroundTasks();
+    if (signal.aborted) return;
     while (this.detachedCommandTasks.size) {
       await Promise.all([...this.detachedCommandTasks]);
+      if (signal.aborted) return;
     }
-    await this.commandGroupScheduler.waitForSettled(this.abortController.signal);
+    await this.commandGroupScheduler.waitForSettled(signal);
   }
 
   /** Restore an indexed boundary while retaining renderer/controller caches. */
@@ -2173,6 +2316,12 @@ export class AdvPlayer {
     this.activeSeek = null;
     seek?.controller.abort();
     seek?.resolve();
+    this.clearSeekIndexCompileWatchdog();
+    this.seekIndexCompileController?.abort();
+    this.seekIndexCompileController = null;
+    this.seekIndexBuilding = false;
+    this.SceneRoot.setSeekIndexCompilationActive?.(false);
+    this.seekSoundProjection = null;
     this.Model.shouldShortCut = false;
     this.Model.shortCutIndex = -1;
     this.state.seeking = false;
@@ -2394,7 +2543,8 @@ export class AdvPlayer {
   toggleAuto() {
     this.Model.isAutoPlay = !this.Model.isAutoPlay;
     this.state.autoPlay = this.Model.isAutoPlay;
-    if (!this.Model.isAutoPlay) this.cancelAutoAdvance();
+    if (!this.Model.isAutoEnabled) this.cancelAutoAdvance();
+    else if (!this.autoAdvanceController) this.armPendingReadableAdvance();
     // Native waits for the current dialogue's auto timer before advancing;
     // advancing here skipped the tail of whatever was already showing.
   }
@@ -2605,6 +2755,19 @@ export class AdvPlayer {
       });
   }
 
+  private armPendingReadableAdvance(): void {
+    const pending = this.pendingReadableAdvance;
+    if (!pending || pending.signal.aborted || this.disposed || this.choiceResolver || this.state.choices.visible)
+      return;
+    this.autoAdvanceWhenReadable(
+      pending.textLength,
+      pending.voicePlayIds,
+      pending.voicePlaybackScopeVersion,
+      pending.signal,
+      pending.intervalSeconds,
+    );
+  }
+
   setAutoPlayInterval(value: unknown) {
     this.autoPlayIntervalIndex = normalizeAutoPlayInterval(value);
     this.autoPlayIntervalSeconds = autoPlayIntervalSeconds(value);
@@ -2673,6 +2836,7 @@ export class AdvPlayer {
     const controller = this.talkTypingController;
     this.talkTypingController = null;
     if (this.Model.currentTypingController === controller) this.Model.currentTypingController = null;
+    this.pendingReadableAdvance = null;
     this.talkPresentationGeneration += 1;
     return this.talkPresentationGeneration;
   }
@@ -2734,7 +2898,14 @@ export class AdvPlayer {
     intervalSeconds: number,
   ): void {
     this.cancelAutoAdvance();
-    if (!this.Model.isAutoEnabled || this.disposed || signal.aborted) return;
+    if (
+      !this.Model.isAutoEnabled ||
+      this.disposed ||
+      signal.aborted ||
+      this.choiceResolver ||
+      this.state.choices.visible
+    )
+      return;
     const scopeSignal = this.Session.voicePlaybackScopeSignal(voicePlaybackScopeVersion);
     if (!scopeSignal) return;
 
@@ -2756,15 +2927,18 @@ export class AdvPlayer {
       });
       if (controller.signal.aborted || !ownsScope()) return false;
       if (completedNaturally) {
-        await delaySeconds(finite(this.runtime.waitAfterVoiceTime, 0), controller.signal);
+        await this.delayWithSpeedAdjustment(finite(this.runtime.waitAfterVoiceTime, 0), controller.signal);
       }
       return !controller.signal.aborted && ownsScope();
     };
 
     const advance = async (): Promise<void> => {
-      const [, voiceReady] = await Promise.all([delaySeconds(readSeconds, controller.signal), waitForVoice()]);
+      const [, voiceReady] = await Promise.all([
+        this.delayWithSpeedAdjustment(readSeconds, controller.signal),
+        waitForVoice(),
+      ]);
       if (!voiceReady || controller.signal.aborted || !this.Model.isAutoEnabled || !ownsScope()) return;
-      await delaySeconds(Math.max(0, finite(intervalSeconds, 0)), controller.signal);
+      await this.delayWithSpeedAdjustment(Math.max(0, finite(intervalSeconds, 0)), controller.signal);
       if (!controller.signal.aborted && this.Model.isAutoEnabled && ownsScope()) this.Model.changeGoNextState();
     };
 
@@ -2782,8 +2956,21 @@ export class AdvPlayer {
     intervalSeconds: number,
   ): Promise<void> {
     if (this.disposed || signal.aborted || this.Model.shouldShortCut) return;
-    this.autoAdvanceWhenReadable(textLength, voicePlayIds, voicePlaybackScopeVersion, signal, intervalSeconds);
-    await this.Model.waitForNext(signal);
+    const pending: AdvReadableAdvanceWait = {
+      textLength,
+      voicePlayIds: [...voicePlayIds],
+      voicePlaybackScopeVersion,
+      signal,
+      intervalSeconds,
+    };
+    this.pendingReadableAdvance = pending;
+    try {
+      if (this.Model.isAutoEnabled)
+        this.autoAdvanceWhenReadable(textLength, voicePlayIds, voicePlaybackScopeVersion, signal, intervalSeconds);
+      await this.Model.waitForNext(signal);
+    } finally {
+      if (this.pendingReadableAdvance === pending) this.pendingReadableAdvance = null;
+    }
   }
 
   async typeTalkText(
@@ -2966,9 +3153,7 @@ export class AdvPlayer {
           // clip instead of the frame's default animation.
           const stateAnimation = customState ? frame.animationStates?.[stateName] : undefined;
           const overlayFrame =
-            stateAnimation && frame.animation !== stateAnimation
-              ? { ...frame, animation: stateAnimation }
-              : frame;
+            stateAnimation && frame.animation !== stateAnimation ? { ...frame, animation: stateAnimation } : frame;
           await ctx.SceneRoot.setFrameOverlay(overlayFrame, 0, frameName);
           ctx.state.frame = frame;
           ctx.state.frameName = frameName;
@@ -3031,7 +3216,7 @@ export class AdvPlayer {
       await this.runCommandTask(cmd, task);
     });
 
-    register(ADV_COMMAND.In, async (cmd, ctx) => {
+    register(ADV_COMMAND.In, async (cmd, ctx, signal) => {
       const duration = unityCharacterFadeDuration("in", commandDuration(ctx, cmd, 0), ctx.Model.shouldShortCut);
       const clearStill = ctx.SceneRoot.clearStill(duration);
       if (cmd.noWait) this.observeDetachedCommandTask(clearStill);
@@ -3076,9 +3261,12 @@ export class AdvPlayer {
           // on network and SDK work, freezing heavy episodes on the loading
           // screen for minutes. The scene keeps the pending placement and
           // commits presentation state when the model arrives.
-          this.observeDetachedCommandTask(placement.then(() => {
-            if (variant) ctx.Loader.setCharacterAssetIndex(target, variant!.targetAssetIndex);
-          }));
+          this.observeDetachedCommandTask(
+            placement.then(() => {
+              if (this.disposed || signal?.aborted) return;
+              if (variant) ctx.Loader.setCharacterAssetIndex(target, variant!.targetAssetIndex);
+            }),
+          );
           return;
         }
         await placement;
@@ -4026,13 +4214,18 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Delay, async (cmd, ctx, signal) => {
+      // Index compilation and other shortcut replays advance logical time
+      // without waiting on authored presentation clocks. In particular, a
+      // video timestamp must never fall through to the ordinary timer once
+      // shortcut Clip handling has hidden the video element.
+      if (ctx.Model.shouldShortCut || this.seekIndexBuilding) return;
       const authored = param(cmd, 0);
       const video = ctx.state.video as { currentTime?: unknown; src?: unknown };
       const inClip = Boolean(video?.src);
       if (inClip && authored !== undefined && authored !== "") {
         // Inside a playing clip, param[0] is an absolute video timestamp.
         // Poll until the video clock reaches T (or the video/signal ends).
-        const target = finite(authored, 0) / Math.max(0.01, ctx.Model.getCurrentSpeedRate());
+        const target = finite(authored, 0);
         const pollSignal = signal || this.abortController.signal;
         const started = nowSeconds();
         while (
@@ -4050,12 +4243,12 @@ export class AdvPlayer {
       if (authored !== undefined && authored !== "" && !inClip) {
         const paramSec = finite(authored, 0);
         if (paramSec > sec) {
-          await ctx.Session.DelayTokens.delay(paramSec, this.abortController.signal);
+          await ctx.Session.DelayTokens.delay(paramSec, signal || this.abortController.signal);
           return;
         }
       }
       if (sec <= 0) return;
-      await ctx.Session.DelayTokens.delay(sec, this.abortController.signal);
+      await ctx.Session.DelayTokens.delay(sec, signal || this.abortController.signal);
     });
 
     register(ADV_COMMAND.CancelDelay, async (_cmd, ctx) => {
