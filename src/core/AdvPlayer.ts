@@ -1357,8 +1357,15 @@ export class AdvPlayer {
     this.SceneRoot.setSeekIndexCompilationActive?.(true);
     this.Model.shouldShortCut = true;
     this.Model.shortCutIndex = commands.length;
-    this.state.seeking = true;
-    this.SceneRoot.setDeterministicReplayActive(true);
+    // Background index building runs while playback is live: freezing the
+    // scene and rewinding the shared model index here blacked out the
+    // already-visible stage and models. The logical-only compilation gates
+    // in the renderer keep the index correct without touching live state.
+    if (!options.trackLoadingProgress) {
+      this.state.seeking = true;
+      this.SceneRoot.setDeterministicReplayActive(true);
+    }
+    const savedIndex = this.Model.CurrentEpisodeListIndex;
     this.Model.CurrentEpisodeListIndex = 0;
     this.state.commandIndex = 0;
     this.state.currentCommand = commands[0] || null;
@@ -1429,6 +1436,19 @@ export class AdvPlayer {
       this.seekIndexBuilding = false;
       this.SceneRoot.setSeekIndexCompilationActive?.(false);
       this.seekSoundProjection = null;
+      if (!options.trackLoadingProgress) {
+        // Background build: the live scene was never frozen, so restore the
+        // playback position instead of rewinding to boundary 0.
+        this.Model.shouldShortCut = false;
+        this.Model.shortCutIndex = -1;
+        this.Model.CurrentEpisodeListIndex = savedIndex;
+        this.state.commandIndex = savedIndex;
+        this.state.currentCommand = commands[savedIndex] || null;
+        this.state.seeking = false;
+        this.SceneRoot.setDeterministicReplayActive(false);
+        this.completedSeekRevision += 1;
+        return index;
+      }
       try {
         await this.applyCheckpoint(returnCheckpoint, decisions, {
           preservePersistentNarrative: false,
