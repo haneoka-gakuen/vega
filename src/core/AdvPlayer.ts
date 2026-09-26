@@ -1047,22 +1047,15 @@ export class AdvPlayer {
         this.state.preload.total = 0;
         this.state.preload.label = "scene index";
         const decisions = new Map<number, AdvChoiceRecord>();
-        // Boundary 0 is captured before the replay starts, so playback can
-        // begin immediately while the full command-boundary index keeps
-        // building in the background; a seek that lands before the index is
-        // ready waits on the existing build promise inside ensureSeekIndex.
-        const initial = this.seekIndexFor(decisions).checkpoints.get(0) as StorySeekCheckpoint | undefined;
-        if (initial) {
-          this.startDetachedCommandTask(async () => {
-            await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
-          });
-        } else {
-          await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
-          if (!isActive()) return;
-        }
-        const startCheckpoint =
-          initial ??
-          (this.seekIndexFor(decisions).checkpoints.get(0) as StorySeekCheckpoint | undefined);
+        // The index build must complete synchronously: replaying 2000+
+        // commands on a detached task corrupts the shared session/scene
+        // state the live player reads. The compilation-only renderer gates
+        // (zero GPU model/texture creation) keep this fast enough.
+        await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
+        if (!isActive()) return;
+        const startCheckpoint = this.seekIndexFor(decisions).checkpoints.get(0) as
+          | StorySeekCheckpoint
+          | undefined;
         if (!startCheckpoint) throw new Error("The scene index is missing command boundary 0");
         await this.applyCheckpoint(startCheckpoint, decisions);
         this.finishSeekRestoration(0);
@@ -1357,15 +1350,8 @@ export class AdvPlayer {
     this.SceneRoot.setSeekIndexCompilationActive?.(true);
     this.Model.shouldShortCut = true;
     this.Model.shortCutIndex = commands.length;
-    // Background index building runs while playback is live: freezing the
-    // scene and rewinding the shared model index here blacked out the
-    // already-visible stage and models. The logical-only compilation gates
-    // in the renderer keep the index correct without touching live state.
-    if (!options.trackLoadingProgress) {
-      this.state.seeking = true;
-      this.SceneRoot.setDeterministicReplayActive(true);
-    }
-    const savedIndex = this.Model.CurrentEpisodeListIndex;
+    this.state.seeking = true;
+    this.SceneRoot.setDeterministicReplayActive(true);
     this.Model.CurrentEpisodeListIndex = 0;
     this.state.commandIndex = 0;
     this.state.currentCommand = commands[0] || null;
@@ -1436,19 +1422,6 @@ export class AdvPlayer {
       this.seekIndexBuilding = false;
       this.SceneRoot.setSeekIndexCompilationActive?.(false);
       this.seekSoundProjection = null;
-      if (!options.trackLoadingProgress) {
-        // Background build: the live scene was never frozen, so restore the
-        // playback position instead of rewinding to boundary 0.
-        this.Model.shouldShortCut = false;
-        this.Model.shortCutIndex = -1;
-        this.Model.CurrentEpisodeListIndex = savedIndex;
-        this.state.commandIndex = savedIndex;
-        this.state.currentCommand = commands[savedIndex] || null;
-        this.state.seeking = false;
-        this.SceneRoot.setDeterministicReplayActive(false);
-        this.completedSeekRevision += 1;
-        return index;
-      }
       try {
         await this.applyCheckpoint(returnCheckpoint, decisions, {
           preservePersistentNarrative: false,
