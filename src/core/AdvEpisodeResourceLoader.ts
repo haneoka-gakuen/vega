@@ -524,6 +524,16 @@ export class AdvEpisodeResourceLoader {
         ),
       );
     }
+    // Heavy episodes reference dozens of backgrounds, stills and voice files
+    // across the whole script; preloading every one decodes them all into
+    // memory up front, which jetsam-kills iOS WebContent and stalls low-end
+    // desktops during the loading screen. Resources beyond the horizon load
+    // on demand when playback reaches their command instead.
+    const horizonSetting = Number((story?.runtime as { preloadCommandHorizon?: unknown } | undefined)?.preloadCommandHorizon);
+    const horizonCommands = Math.max(60, Math.floor(Number.isFinite(horizonSetting) && horizonSetting > 0 ? horizonSetting : 320));
+    const withinHorizon = (url: string): boolean =>
+      (firstCmdIndex.get(url) ?? 0) <= horizonCommands;
+
     const fontTasks: PreloadTask[] =
       preparationContext && declaredResources.some((declaration) => declaration.kind === "font")
         ? [
@@ -536,7 +546,7 @@ export class AdvEpisodeResourceLoader {
           ]
         : [];
     const tasks: PreloadTask[] = [
-      ...[...textureUrls].map((url) => ({
+      ...[...textureUrls].filter(withinHorizon).map((url) => ({
         key: `texture:${url}`,
         label: "image",
         index: firstCmdIndex.get(url) ?? 0,
@@ -550,7 +560,7 @@ export class AdvEpisodeResourceLoader {
         },
       })),
       ...[...fileUrls.entries()]
-        .filter(([url]) => !textureUrls.has(url))
+        .filter(([url]) => !textureUrls.has(url) && withinHorizon(url))
         .map(([url, label]) => ({
           key: `file:${url}`,
           label,
@@ -572,7 +582,9 @@ export class AdvEpisodeResourceLoader {
           },
         })),
     ];
-    this.sceneRoot.reservePreloadedTextures?.(textureUrls.size);
+    this.sceneRoot.reservePreloadedTextures?.(
+      [...textureUrls].filter(withinHorizon).length,
+    );
     this.backgroundConcurrency = preloadConcurrency(
       supportsRenderReadyCharacters ? story?.runtime?.characterPreloadConcurrency : story?.runtime?.preloadConcurrency,
       supportsRenderReadyCharacters ? 2 : workerCount,
