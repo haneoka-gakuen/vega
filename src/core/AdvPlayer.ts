@@ -2395,7 +2395,8 @@ export class AdvPlayer {
     this.Model.isAutoPlay = !this.Model.isAutoPlay;
     this.state.autoPlay = this.Model.isAutoPlay;
     if (!this.Model.isAutoPlay) this.cancelAutoAdvance();
-    if (this.Model.isAutoPlay && this.Model.NextStepState === 1) this.Model.changeGoNextState();
+    // Native waits for the current dialogue's auto timer before advancing;
+    // advancing here skipped the tail of whatever was already showing.
   }
 
   toggleFast() {
@@ -2433,7 +2434,9 @@ export class AdvPlayer {
     this.Session.FlowParameters.setClipVideoPlaying(false);
     this.Session.VideoPlaying = false;
     void this.SceneRoot.hideVideo(0).catch(() => {});
-    this.Model.changeGoNextState();
+    // Don't force changeGoNextState here: the video command's await
+    // resolves when playback ends or is skipped, which advances exactly one
+    // command. Forcing it here consumed the command AFTER the video too.
     return true;
   }
 
