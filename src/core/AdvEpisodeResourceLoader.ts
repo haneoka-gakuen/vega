@@ -530,7 +530,7 @@ export class AdvEpisodeResourceLoader {
     // desktops during the loading screen. Resources beyond the horizon load
     // on demand when playback reaches their command instead.
     const horizonSetting = Number((story?.runtime as { preloadCommandHorizon?: unknown } | undefined)?.preloadCommandHorizon);
-    const horizonCommands = Math.max(60, Math.floor(Number.isFinite(horizonSetting) && horizonSetting > 0 ? horizonSetting : 320));
+    const horizonCommands = Math.max(60, Math.floor(Number.isFinite(horizonSetting) && horizonSetting > 0 ? horizonSetting : 200));
     const withinHorizon = (url: string): boolean =>
       (firstCmdIndex.get(url) ?? 0) <= horizonCommands;
 
