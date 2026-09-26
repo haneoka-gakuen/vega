@@ -587,8 +587,8 @@ export class AdvEpisodeResourceLoader {
     );
     this.backgroundConcurrency = preloadConcurrency(
       supportsRenderReadyCharacters ? story?.runtime?.characterPreloadConcurrency : story?.runtime?.preloadConcurrency,
-      supportsRenderReadyCharacters ? 2 : workerCount,
-      supportsRenderReadyCharacters ? 4 : 8,
+      supportsRenderReadyCharacters ? 1 : workerCount,
+      supportsRenderReadyCharacters ? 2 : 8,
     );
     const characterTasks: PreloadTask[] = characterWarmups.map((warmup) => ({
       key: `character:${warmup.identity}`,
