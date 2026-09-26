@@ -4025,8 +4025,35 @@ export class AdvPlayer {
       }
     });
 
-    register(ADV_COMMAND.Delay, async (cmd, ctx) => {
+    register(ADV_COMMAND.Delay, async (cmd, ctx, signal) => {
+      const authored = param(cmd, 0);
+      const video = ctx.state.video as { currentTime?: unknown; src?: unknown };
+      const inClip = Boolean(video?.src);
+      if (inClip && authored !== undefined && authored !== "") {
+        // Inside a playing clip, param[0] is an absolute video timestamp.
+        // Poll until the video clock reaches T (or the video/signal ends).
+        const target = finite(authored, 0) / Math.max(0.01, ctx.Model.getCurrentSpeedRate());
+        const pollSignal = signal || this.abortController.signal;
+        const started = nowSeconds();
+        while (
+          !pollSignal.aborted &&
+          !this.disposed &&
+          Boolean((ctx.state.video as { src?: unknown }).src) &&
+          finite((ctx.state.video as { currentTime?: unknown }).currentTime, 0) < target
+        ) {
+          await delaySeconds(1 / 30, pollSignal);
+          if (nowSeconds() - started > 600) break;
+        }
+        return;
+      }
       const sec = ctx.Model.calcDuration(finite(cmd.duration, 0), 0);
+      if (authored !== undefined && authored !== "" && !inClip) {
+        const paramSec = finite(authored, 0);
+        if (paramSec > sec) {
+          await ctx.Session.DelayTokens.delay(paramSec, this.abortController.signal);
+          return;
+        }
+      }
       if (sec <= 0) return;
       await ctx.Session.DelayTokens.delay(sec, this.abortController.signal);
     });
@@ -4423,7 +4450,11 @@ export class AdvPlayer {
         return;
       }
 
-      if (!hasVideoId && isSkipClipTarget(param(cmd, 2))) ctx.Session.FlowParameters.setClipSkip(false);
+      if (!hasVideoId) {
+        // Native clears subtitles when the clip stops.
+        ctx.state.subtitles.visible = false;
+        if (isSkipClipTarget(param(cmd, 2))) ctx.Session.FlowParameters.setClipSkip(false);
+      }
       if (ctx.Model.isAutoEnabled) {
         await this.delayWithSpeedAdjustment(
           finite(ctx.runtime.waitVideoLingeringTimeOnAutoPlay, 0.3) / ctx.Model.getCurrentSpeedRate(),
