@@ -1047,11 +1047,24 @@ export class AdvPlayer {
         this.state.preload.total = 0;
         this.state.preload.label = "scene index";
         const decisions = new Map<number, AdvChoiceRecord>();
-        await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
-        if (!isActive()) return;
+        // Boundary 0 is captured before the replay starts, so playback can
+        // begin immediately while the full command-boundary index keeps
+        // building in the background; a seek that lands before the index is
+        // ready waits on the existing build promise inside ensureSeekIndex.
         const initial = this.seekIndexFor(decisions).checkpoints.get(0) as StorySeekCheckpoint | undefined;
-        if (!initial) throw new Error("The scene index is missing command boundary 0");
-        await this.applyCheckpoint(initial, decisions);
+        if (initial) {
+          this.startDetachedCommandTask(async () => {
+            await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
+          });
+        } else {
+          await this.ensureSeekIndex(decisions, { trackLoadingProgress: true });
+          if (!isActive()) return;
+        }
+        const startCheckpoint =
+          initial ??
+          (this.seekIndexFor(decisions).checkpoints.get(0) as StorySeekCheckpoint | undefined);
+        if (!startCheckpoint) throw new Error("The scene index is missing command boundary 0");
+        await this.applyCheckpoint(startCheckpoint, decisions);
         this.finishSeekRestoration(0);
       }
       this.state.loading = false;
@@ -1529,6 +1542,7 @@ export class AdvPlayer {
     this.choiceResolver = null;
     this.state.seeking = true;
     this.SceneRoot.setDeterministicReplayActive(true);
+    this.armSeekReplayWatchdog();
     this.SoundManager.suspendForSeek();
     this.Session.restoreSnapshot(checkpoint.session);
     this.Session.choiceRecords.clear();
@@ -1866,19 +1880,33 @@ export class AdvPlayer {
 
   private armSeekReplayWatchdog(): void {
     this.clearSeekReplayWatchdog();
+    const revisionAtArm = this.completedSeekRevision;
     this.seekReplayWatchdog = setTimeout(() => {
       this.seekReplayWatchdog = undefined;
       if (this.disposed || !this.state.seeking) return;
-      if (this.activeSeek || this.idleSeekDrain) return;
-      if (!this.state.playing) {
-        console.warn("[Vega] seek state lost its owner; releasing deterministic replay");
+      if (this.completedSeekRevision !== revisionAtArm) return;
+      // No seek completed since arm. Whether the owner vanished or the
+      // reconciliation is wedged on a loader pump, the deterministic replay
+      // gate is starving the whole WebGL scene; restore playability at the
+      // current boundary instead of freezing on a black frame forever.
+      console.warn("[Vega] seek restoration stalled; releasing deterministic replay");
+      const request = this.activeSeek;
+      if (request) {
+        this.activeSeek = null;
+        request.controller.abort();
+        request.resolve();
+      }
+      try {
+        this.finishSeekRestoration(this.currentProgressIndex(), this.state.paused);
+      } catch (error) {
+        console.error("[Vega] stalled seek release failed", error);
         this.Model.shouldShortCut = false;
         this.Model.shortCutIndex = -1;
         this.state.seeking = false;
         this.SceneRoot.setDeterministicReplayActive(false);
         this.Model.changeIdleState();
       }
-    }, 20_000);
+    }, 25_000);
   }
 
   private clearSeekReplayWatchdog(): void {
@@ -3046,6 +3074,17 @@ export class AdvPlayer {
         // its first resource await. Queue the authored layout presentation now
         // so a newly loaded model has it on its first visible frame.
         playCharacterPresentation(cmd, ctx, target);
+        if (ctx.Model.shouldShortCut && this.seekIndexBuilding) {
+          // Seek-index compilation is a logical fast-forward: awaiting each
+          // browser model load here serialized the whole 2000-command replay
+          // on network and SDK work, freezing heavy episodes on the loading
+          // screen for minutes. The scene keeps the pending placement and
+          // commits presentation state when the model arrives.
+          this.observeDetachedCommandTask(placement.then(() => {
+            if (variant) ctx.Loader.setCharacterAssetIndex(target, variant!.targetAssetIndex);
+          }));
+          return;
+        }
         await placement;
         if (variant) ctx.Loader.setCharacterAssetIndex(target, variant.targetAssetIndex);
       });
