@@ -2030,7 +2030,7 @@ export class AdvPlayer {
       if (request) {
         this.activeSeek = null;
         request.controller.abort();
-        request.resolve();
+        request.reject(new Error(`Scene boundary ${request.target} restoration timed out`));
       }
       try {
         this.finishSeekRestoration(this.currentProgressIndex(), this.state.paused);
@@ -3708,6 +3708,13 @@ export class AdvPlayer {
         const rule = cmd.ruleTransition || (ctx.runtime.defaultRuleTransition as AdvRuleTransitionEntry | undefined);
         if (rule && (rule.texture || rule.maskTexture || rule.gradient != null)) {
           await ctx.SceneRoot.runRuleTransition(rule, color, duration, true);
+          if (
+            this.disposed ||
+            signal?.aborted ||
+            this.abortController.signal.aborted ||
+            transitionGeneration !== this.coverTransitionGeneration
+          )
+            return;
           ctx.SceneRoot.stopCommandEffects();
           ctx.state.effect = null;
           return;
