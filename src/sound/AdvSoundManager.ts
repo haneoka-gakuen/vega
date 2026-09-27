@@ -183,6 +183,11 @@ function audioWarmKey(category: AdvSoundCategory, source: string): string {
   return `${category}\u0000${source}`;
 }
 
+function audioFormat(source: string): string[] | undefined {
+  const extension = /\.([a-z0-9]+)(?:[?#]|$)/iu.exec(source)?.[1]?.toLowerCase();
+  return extension ? [extension] : undefined;
+}
+
 function clonePlain<T>(value: T): T {
   if (value == null) return value;
   try {
@@ -224,6 +229,12 @@ function waitForAudioWarmup(pending: Promise<void>, signal: AbortSignal | undefi
       (error: unknown) => finish(() => reject(error)),
     );
   });
+}
+
+function audioPreloadAbortError(source = "episode audio"): Error {
+  const error = new Error(`Audio preload was aborted: ${source}`);
+  error.name = "AbortError";
+  return error;
 }
 
 function waitForEpisodeAudioSource(
@@ -387,11 +398,13 @@ export class AdvSoundManager {
   warmHowls: Map<string, Howl>;
   nextPlayIdValue: number;
   private readonly warmHowlLoads: Map<string, Promise<void>>;
+  private readonly warmHowlCancels: Map<string, (error?: Error) => void>;
   private readonly episodeWarmKeys: Set<string>;
   private readonly resources?: StoryResourceResolver;
   private readonly episodeAudioSources: Map<string, EpisodeAudioSource>;
   private readonly episodeAudioSourceLoads: Map<string, Promise<EpisodeAudioSource>>;
-  private readonly episodeAudioLifecycle = new AbortController();
+  private episodeAudioLifecycle: AbortController;
+  private episodeAudioGeneration = 0;
   private disposing: boolean;
   private readonly bgmFades: Map<ManagedHowl, BgmFadeState>;
   private readonly voicePlaybackCompletions: Map<number, VoicePlaybackCompletion>;
@@ -427,10 +440,12 @@ export class AdvSoundManager {
     this.lastSeLabel = "";
     this.warmHowls = new Map();
     this.warmHowlLoads = new Map();
+    this.warmHowlCancels = new Map();
     this.episodeWarmKeys = new Set();
     this.resources = resources;
     this.episodeAudioSources = new Map();
     this.episodeAudioSourceLoads = new Map();
+    this.episodeAudioLifecycle = new AbortController();
     this.disposing = false;
     this.nextPlayIdValue = 1;
     this.bgmFades = new Map();
@@ -473,6 +488,9 @@ export class AdvSoundManager {
     }
     this.warmHowls.clear();
     this.warmHowlLoads.clear();
+    const abort = audioPreloadAbortError();
+    for (const cancel of this.warmHowlCancels.values()) cancel(abort);
+    this.warmHowlCancels.clear();
     this.episodeWarmKeys.clear();
     for (const source of this.episodeAudioSources.values()) source.release();
     this.episodeAudioSources.clear();
@@ -507,6 +525,7 @@ export class AdvSoundManager {
     const src = this.episodeAudioSources.get(canonical)?.url ?? canonical;
     return new Howl({
       src: [src],
+      format: audioFormat(canonical),
       // BGM streams through HTMLMediaElement. Short, frequently overlapping
       // SE and voices use Web Audio and reuse the decoded buffer held by the
       // episode warm anchor.
@@ -525,6 +544,12 @@ export class AdvSoundManager {
     void this.preloadSound(sound, category).catch(() => undefined);
   }
 
+  /** Prepare a local encoded source without creating an audio decoder. */
+  async prepareSoundSource(sound: AdvSoundDescriptor, signal?: AbortSignal): Promise<void> {
+    const canonical = localPlaybackUrl(sound.playableUrl, "audio");
+    if (canonical) await this.resolveEpisodeAudioSource(canonical, signal);
+  }
+
   /**
    * Load and retain one episode anchor for a distinct authored audio URL.
    * WebAudio anchors keep decoded SE/voice buffers in Howler's shared cache;
@@ -537,8 +562,12 @@ export class AdvSoundManager {
   ): Promise<void> {
     const category = categoryKey(categoryValue) || categoryKey(sound);
     if (!category || !sound.playableUrl) return;
+    const generation = this.episodeAudioGeneration;
     const canonical = localPlaybackUrl(sound.playableUrl, "audio");
     const source = await this.resolveEpisodeAudioSource(canonical, signal);
+    if (generation !== this.episodeAudioGeneration || this.disposing) {
+      throw audioPreloadAbortError(canonical);
+    }
     const src = source.url;
     const key = audioWarmKey(category, canonical);
     this.episodeWarmKeys.add(key);
@@ -557,12 +586,23 @@ export class AdvSoundManager {
     }
     const howl = new Howl({
       src: [src],
+      format: audioFormat(canonical),
       html5: category === "Bgm",
       loop: category === "Bgm",
       volume: 0,
       preload: true,
     });
     this.warmHowls.set(key, howl);
+    let cancelLoad: (error: Error) => void = () => undefined;
+    const cancel = (error: Error = audioPreloadAbortError(canonical)): void => {
+      cancelLoad(error);
+      // A BGM warm Howl can be consumed by playback before its load completes.
+      // Cancel its preparation waiter without unloading the active voice.
+      if (!this.disposing && [this.bgm, ...this.se, ...this.voices].some((entry) => entry?.howl === howl)) return;
+      try {
+        howl.unload();
+      } catch {}
+    };
     const load = new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = (error?: Error): void => {
@@ -573,6 +613,7 @@ export class AdvSoundManager {
         if (error) reject(error);
         else resolve();
       };
+      cancelLoad = (error: Error): void => finish(error);
       const loaded = (): void => finish();
       const failed = (_id: number, reason: unknown): void =>
         finish(
@@ -588,8 +629,12 @@ export class AdvSoundManager {
       if (this.warmHowlLoads.get(key) === load) {
         this.warmHowlLoads.delete(key);
       }
+      if (this.warmHowlCancels.get(key) === cancel) {
+        this.warmHowlCancels.delete(key);
+      }
     });
     this.warmHowlLoads.set(key, load);
+    this.warmHowlCancels.set(key, cancel);
     await waitForAudioWarmup(load, signal, canonical);
   }
 
@@ -600,17 +645,17 @@ export class AdvSoundManager {
     }
     const pending = this.episodeAudioSourceLoads.get(canonical);
     if (pending) return waitForEpisodeAudioSource(pending, signal, canonical);
+    const generation = this.episodeAudioGeneration;
+    const lifecycle = this.episodeAudioLifecycle;
     const load = (
       this.resources
-        ? this.resources.resolveRenderable(canonical, this.episodeAudioLifecycle.signal)
+        ? this.resources.resolveRenderable(canonical, lifecycle.signal)
         : Promise.resolve({ url: canonical, release: () => undefined })
     )
       .then((source) => {
-        if (this.disposing) {
+        if (this.disposing || lifecycle.signal.aborted || generation !== this.episodeAudioGeneration) {
           source.release();
-          const error = new Error(`Audio preload was aborted: ${canonical}`);
-          error.name = "AbortError";
-          throw error;
+          throw audioPreloadAbortError(canonical);
         }
         const existing = this.episodeAudioSources.get(canonical);
         if (existing) {
@@ -627,6 +672,50 @@ export class AdvSoundManager {
       });
     this.episodeAudioSourceLoads.set(canonical, load);
     return waitForEpisodeAudioSource(load, signal, canonical);
+  }
+
+  /**
+   * Cancel the current episode audio preparation attempt while preserving
+   * sources and Howls that are already used by active playback. A later
+   * preload starts with a fresh resolver signal and generation token.
+   */
+  cancelPreload(): void {
+    this.episodeAudioGeneration += 1;
+    const previousLifecycle = this.episodeAudioLifecycle;
+    this.episodeAudioLifecycle = new AbortController();
+    previousLifecycle.abort(audioPreloadAbortError());
+
+    const activeSources = new Set<string>();
+    for (const entry of [this.bgm, ...this.se, ...this.voices]) {
+      const playableUrl = entry?.sound?.playableUrl;
+      if (!playableUrl) continue;
+      try {
+        const canonical = localPlaybackUrl(playableUrl, "audio");
+        if (canonical) activeSources.add(canonical);
+      } catch {
+        // An already-created Howl remains usable even if runtime validation
+        // changes while an old preparation attempt is being canceled.
+      }
+    }
+
+    this.episodeAudioSourceLoads.clear();
+    for (const [canonical, source] of this.episodeAudioSources) {
+      if (activeSources.has(canonical)) continue;
+      source.release();
+      this.episodeAudioSources.delete(canonical);
+    }
+
+    const abort = audioPreloadAbortError();
+    for (const cancel of this.warmHowlCancels.values()) cancel(abort);
+    this.warmHowlCancels.clear();
+    this.warmHowlLoads.clear();
+    for (const howl of this.warmHowls.values()) {
+      try {
+        howl.unload();
+      } catch {}
+    }
+    this.warmHowls.clear();
+    this.episodeWarmKeys.clear();
   }
 
   getVoiceVolume() {

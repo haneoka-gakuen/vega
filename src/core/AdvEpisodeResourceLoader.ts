@@ -178,6 +178,7 @@ export class AdvEpisodeResourceLoader {
   private backgroundRepumpRequested: boolean;
   private completedTaskKeys: Set<string>;
   private scheduledTaskKeys: Set<string>;
+  private readonly recoveryTaskKeys = new Set<string>();
   private preloadSignal?: AbortSignal;
   private preloadController: AbortController | null;
   private preloadSourceSignal?: AbortSignal;
@@ -185,9 +186,11 @@ export class AdvEpisodeResourceLoader {
   private readonly episodeResourceLeases = new Map<string, StoryResourceLease>();
   private backgroundConcurrency: number;
   private playbackIndex: number;
+  private preparationHorizon = 200;
   private readonly resources: StoryResourceResolver;
   private readonly characterProviders: readonly StoryCharacterProvider[];
-  private readonly sounds?: Pick<AdvSoundManager, "preloadSound">;
+  private readonly sounds?: Pick<AdvSoundManager, "preloadSound"> &
+    Partial<Pick<AdvSoundManager, "prepareSoundSource" | "cancelPreload">>;
   private readonly resourcePreparers: readonly StoryResourcePreparer[];
   private readonly commandResourcePreparers: readonly StoryCommandResourceRegistration[];
   private readonly ownerDocument?: Document;
@@ -197,7 +200,8 @@ export class AdvEpisodeResourceLoader {
     state: Record<string, unknown>,
     resources: StoryResourceResolver = new DefaultStoryResourceResolver(),
     characterProviders: readonly StoryCharacterProvider[] = [],
-    sounds?: Pick<AdvSoundManager, "preloadSound">,
+    sounds?: Pick<AdvSoundManager, "preloadSound"> &
+      Partial<Pick<AdvSoundManager, "prepareSoundSource" | "cancelPreload">>,
     options: AdvEpisodeResourceLoaderOptions = {},
   ) {
     this.sceneRoot = sceneRoot;
@@ -254,7 +258,14 @@ export class AdvEpisodeResourceLoader {
     };
     this.preloadSourceAbort = forwardAbort;
     signal.addEventListener("abort", forwardAbort, { once: true });
-    controller.signal.addEventListener("abort", () => this.releaseResourceLeases(), { once: true });
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        this.releaseResourceLeases();
+        this.sounds?.cancelPreload?.();
+      },
+      { once: true },
+    );
     try {
       await this.preloadEpisode(story, controller.signal);
     } catch (error) {
@@ -281,18 +292,15 @@ export class AdvEpisodeResourceLoader {
       : [];
     const textureUrls = new Set<string>();
     const fileUrls = new Map<string, string>();
-    const retainedFileUrls = new Set<string>();
     const audioRequests = new Map<string, Array<{ sound: AdvSoundEntry; category: AdvSoundCategory }>>();
-    const videoUrls = new Set<string>();
     const firstCmdIndex = new Map<string, number>();
     const noteIndex = (url: string, index: number) => {
       if (!firstCmdIndex.has(url)) firstCmdIndex.set(url, index);
     };
-    const addFile = (label: string, url: string, index: number, retainBytes = true) => {
+    const addFile = (label: string, url: string, index: number) => {
       assertLocalRuntimeUrl(label, url);
       if (!isLocalRuntimeUrl(url)) return;
       fileUrls.set(url, label);
-      if (retainBytes) retainedFileUrls.add(url);
       noteIndex(url, index);
     };
     const addTexture = (url: string, index: number) => {
@@ -304,7 +312,7 @@ export class AdvEpisodeResourceLoader {
     };
     const addAudio = (sound: AdvSoundEntry | null | undefined, category: AdvSoundCategory, index: number) => {
       const url = sound?.playableUrl || "";
-      addFile(category.toLocaleLowerCase(), url, index, false);
+      addFile(category.toLocaleLowerCase(), url, index);
       if (!url || !isLocalRuntimeUrl(url)) return;
       const requests = audioRequests.get(url) || [];
       if (!requests.some((request) => request.category === category)) {
@@ -313,8 +321,7 @@ export class AdvEpisodeResourceLoader {
       }
     };
     const addVideo = (url: string, index: number) => {
-      addFile("video", url, index, false);
-      if (url && isLocalRuntimeUrl(url)) videoUrls.add(url);
+      addFile("video", url, index);
     };
     let preparationContext: StoryResourcePreparationContext | undefined;
     let declaredResources: readonly StoryResourceDeclaration[] = [];
@@ -406,7 +413,7 @@ export class AdvEpisodeResourceLoader {
             );
             break;
           case "font":
-            addFile(label, declaration.source, 0, false);
+            addFile(label, declaration.source, 0);
             break;
           case "file":
           default:
@@ -471,7 +478,7 @@ export class AdvEpisodeResourceLoader {
     for (let index = 0; index < commands.length; index += 1) {
       collectDeclaredResourceUrls(
         commands[index],
-        (url) => addFile("asset", url, index, !audioRequests.has(url) && !videoUrls.has(url)),
+        (url) => addFile("asset", url, index),
         "",
         false,
         new WeakSet<object>(),
@@ -524,15 +531,17 @@ export class AdvEpisodeResourceLoader {
         ),
       );
     }
-    // Heavy episodes reference dozens of backgrounds, stills and voice files
-    // across the whole script; preloading every one decodes them all into
-    // memory up front, which jetsam-kills iOS WebContent and stalls low-end
-    // desktops during the loading screen. Resources beyond the horizon load
-    // on demand when playback reaches their command instead.
-    const horizonSetting = Number((story?.runtime as { preloadCommandHorizon?: unknown } | undefined)?.preloadCommandHorizon);
-    const horizonCommands = Math.max(60, Math.floor(Number.isFinite(horizonSetting) && horizonSetting > 0 ? horizonSetting : 200));
-    const withinHorizon = (url: string): boolean =>
-      (firstCmdIndex.get(url) ?? 0) <= horizonCommands;
+    // Download the complete episode, but prepare only nearby decoded/GPU
+    // objects. An encoded-file lease survives a render-object eviction.
+    const horizonSetting = Number(
+      (story?.runtime as { preloadCommandHorizon?: unknown } | undefined)?.preloadCommandHorizon,
+    );
+    const horizonCommands = Math.max(
+      60,
+      Math.floor(Number.isFinite(horizonSetting) && horizonSetting > 0 ? horizonSetting : 200),
+    );
+    this.preparationHorizon = horizonCommands;
+    const withinHorizon = (url: string): boolean => (firstCmdIndex.get(url) ?? 0) <= horizonCommands;
 
     const fontTasks: PreloadTask[] =
       preparationContext && declaredResources.some((declaration) => declaration.kind === "font")
@@ -546,45 +555,32 @@ export class AdvEpisodeResourceLoader {
           ]
         : [];
     const tasks: PreloadTask[] = [
-      ...[...textureUrls].filter(withinHorizon).map((url) => ({
-        key: `texture:${url}`,
-        label: "image",
+      ...[...fileUrls.entries()].map(([url, label]) => ({
+        key: `file:${url}`,
+        label,
         index: firstCmdIndex.get(url) ?? 0,
         run: async () => {
           await this.retainEpisodeResource(url, providerSignal);
-          if (typeof this.sceneRoot.preloadTexture === "function") {
-            await this.sceneRoot.preloadTexture(url, signal);
-          } else {
-            await this.sceneRoot.loadTexture(url, signal);
+          for (const { sound } of audioRequests.get(url) || []) {
+            await this.sounds?.prepareSoundSource?.(sound, providerSignal);
           }
+          if (!withinHorizon(url)) return;
+          if (textureUrls.has(url)) {
+            await this.sceneRoot.preloadTexture(url, providerSignal);
+          }
+          if (this.sounds) {
+            await Promise.all(
+              (audioRequests.get(url) || []).map(({ sound, category }) =>
+                this.sounds!.preloadSound(sound, category, providerSignal),
+              ),
+            );
+          }
+          // Video elements are created on demand from the retained file.
+          // Preloading all decoder instances is expensive on mobile hosts.
         },
       })),
-      ...[...fileUrls.entries()]
-        .filter(([url]) => !textureUrls.has(url) && withinHorizon(url))
-        .map(([url, label]) => ({
-          key: `file:${url}`,
-          label,
-          index: firstCmdIndex.get(url) ?? 0,
-          run: async () => {
-            if (retainedFileUrls.has(url)) {
-              await this.retainEpisodeResource(url, providerSignal);
-            }
-            if (this.sounds) {
-              await Promise.all(
-                (audioRequests.get(url) || []).map(({ sound, category }) =>
-                  this.sounds!.preloadSound(sound, category, providerSignal),
-                ),
-              );
-            }
-            if (videoUrls.has(url)) {
-              await this.sceneRoot.preloadVideo?.(url, providerSignal);
-            }
-          },
-        })),
     ];
-    this.sceneRoot.reservePreloadedTextures?.(
-      [...textureUrls].filter(withinHorizon).length,
-    );
+    this.sceneRoot.reservePreloadedTextures?.([...textureUrls].filter(withinHorizon).length);
     this.backgroundConcurrency = preloadConcurrency(
       supportsRenderReadyCharacters ? story?.runtime?.characterPreloadConcurrency : story?.runtime?.preloadConcurrency,
       supportsRenderReadyCharacters ? 1 : workerCount,
@@ -611,21 +607,22 @@ export class AdvEpisodeResourceLoader {
         }
       },
     }));
-    // Keep the full task catalogue only for lifecycle recovery. Every entry is
-    // completed before ready, so ordinary playback and seeking do not start a
-    // second, command-window preload phase.
-    const episodeTasks = [...characterTasks, ...tasks].sort((left, right) => left.index - right.index);
+    // Models can be reconstructed from local encoded files. Keep only a small
+    // opening set ready; subsequent controllers are prepared near their use.
+    const initialCountValue = Number(story?.runtime?.characterPreloadInitialCount);
+    const initialCount =
+      Number.isFinite(initialCountValue) && initialCountValue >= 0 ? Math.floor(initialCountValue) : 2;
+    const initialCharacterTasks = characterTasks.slice(0, initialCount);
+    const episodeTasks = [...characterTasks].sort((left, right) => left.index - right.index);
     this.backgroundTasks = episodeTasks;
     this.completedTaskKeys.clear();
     this.scheduledTaskKeys.clear();
 
-    // The loading screen owns the whole episode dependency set: all referenced
-    // bytes/textures and every controller's first renderer frame must be ready
-    // before the player reports ready. The two bounded pools run concurrently;
-    // the shared resolver and texture caches collapse overlapping work.
+    // All raw files finish before ready. Render preparation has its own small
+    // pool and never removes a file from the episode's download set.
     const preloadState = this.state.preload as Record<string, unknown> | undefined;
     if (preloadState) {
-      const episodeTaskCount = tasks.length + characterTasks.length + fontTasks.length;
+      const episodeTaskCount = tasks.length + initialCharacterTasks.length + fontTasks.length;
       preloadState.total = Math.max(
         preloadProgressValue(preloadState.done),
         preloadProgressValue(preloadState.total) + episodeTaskCount,
@@ -635,7 +632,7 @@ export class AdvEpisodeResourceLoader {
     await Promise.all([
       this.runPreloadTasks(tasks, signal, workerCount, true),
       this.runPreloadTasks(fontTasks, signal, fontTasks.length || 1, true),
-      this.runPreloadTasks(characterTasks, signal, this.backgroundConcurrency, true),
+      this.runPreloadTasks(initialCharacterTasks, signal, this.backgroundConcurrency, true),
     ]);
     throwIfPreloadAborted(signal);
     if (!signal?.aborted && preloadState && Array.isArray(preloadState.failures) && preloadState.failures.length) {
@@ -682,8 +679,10 @@ export class AdvEpisodeResourceLoader {
           const preloadState = this.state.preload as Record<string, unknown> | undefined;
           recordPreloadFailure(preloadState, `Renderer did not make ${task.key} ready`);
         }
-        if (completed) this.completedTaskKeys.add(task.key);
-        else allCompleted = false;
+        if (completed) {
+          this.completedTaskKeys.add(task.key);
+          this.recoveryTaskKeys.delete(task.key);
+        } else allCompleted = false;
         this.scheduledTaskKeys.delete(task.key);
         if (tracked) {
           const preloadState = this.state.preload as Record<string, unknown> | undefined;
@@ -701,7 +700,9 @@ export class AdvEpisodeResourceLoader {
     this.playbackIndex = Math.max(0, Math.floor(Number(commandIndex) || 0));
     const discarded = this.sceneRoot.advanceCharacterPreload?.(this.playbackIndex, Number.MAX_SAFE_INTEGER);
     for (const identity of discarded ?? []) {
-      this.completedTaskKeys.delete(`character:${identity}`);
+      const key = `character:${identity}`;
+      this.completedTaskKeys.delete(key);
+      this.recoveryTaskKeys.add(key);
     }
     if (this.preloadSignal?.aborted) return;
     if (this.backgroundPump) {
@@ -734,7 +735,11 @@ export class AdvEpisodeResourceLoader {
   private async runBackgroundPump() {
     while (!this.preloadSignal?.aborted) {
       const tasks = this.backgroundTasks.filter(
-        (task) => !this.completedTaskKeys.has(task.key) && !this.scheduledTaskKeys.has(task.key),
+        (task) =>
+          (this.recoveryTaskKeys.has(task.key) ||
+            (task.index >= this.playbackIndex && task.index <= this.playbackIndex + this.preparationHorizon)) &&
+          !this.completedTaskKeys.has(task.key) &&
+          !this.scheduledTaskKeys.has(task.key),
       );
       if (!tasks.length) return;
       for (const task of tasks) this.scheduledTaskKeys.add(task.key);
@@ -828,6 +833,7 @@ export class AdvEpisodeResourceLoader {
     this.backgroundWarm = null;
     this.completedTaskKeys.clear();
     this.scheduledTaskKeys.clear();
+    this.recoveryTaskKeys.clear();
   }
 
   /** Collect provider-declared character assets before playback starts. */

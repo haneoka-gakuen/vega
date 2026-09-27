@@ -97,6 +97,7 @@ type AdvSeekRequest = {
   completion: Promise<void>;
   resolve: () => void;
   reject: (reason?: unknown) => void;
+  readonly rollback: StorySeekCheckpoint;
 };
 
 type AdvSeekIndexBuild = {
@@ -1091,7 +1092,7 @@ export class AdvPlayer {
   executeCommandAtIndex(commands: AdvCommand[], index: number, signal: AbortSignal): Promise<void> | void {
     const authoredCommand = commands[index];
     const cmd = authoredCommand ? interpolateNarrativeCommand(authoredCommand, this.narrativeStore) : authoredCommand;
-    this.Loader.advanceTo(index);
+    if (!this.seekIndexBuilding) this.Loader.advanceTo(index);
     this.state.commandIndex = index + 1;
     this.state.currentCommand = cmd;
     this.Model.CurrentEpisodeListIndex = index + 1;
@@ -1675,12 +1676,14 @@ export class AdvPlayer {
     this.SceneRoot.setDeterministicReplayActive(true);
     if (!this.seekIndexCompileController) this.armSeekReplayWatchdog();
     this.SoundManager.suspendForSeek();
+    await this.SceneRoot.restoreSeekSnapshot(checkpoint.scene, options.signal);
+    if (this.disposed || options.signal?.aborted) return checkpoint.index;
+    // Publish logical ownership only after the renderer has prepared the
+    // target. A superseded scene must not install its Session or asset index.
     this.Session.restoreSnapshot(checkpoint.session);
     this.Session.choiceRecords.clear();
     for (const [key, value] of decisionOverrides) this.Session.choiceRecords.set(key, value);
     this.Loader.restoreSnapshot(checkpoint.loader);
-    await this.SceneRoot.restoreSeekSnapshot(checkpoint.scene, options.signal);
-    if (this.disposed || options.signal?.aborted) return checkpoint.index;
     if (options.restoreAudio !== false) this.SoundManager.restoreSnapshot(checkpoint.sound);
     this.restoreSeekPlayerState(checkpoint.state, options.preservePersistentNarrative !== false);
     this.state.paused = false;
@@ -1689,7 +1692,7 @@ export class AdvPlayer {
     this.Model.CurrentEpisodeListIndex = checkpoint.index;
     this.state.commandIndex = checkpoint.index;
     this.state.currentCommand = this.story.commands?.[checkpoint.index] || null;
-    this.Loader.advanceTo(checkpoint.index);
+    if (!this.seekIndexBuilding) this.Loader.advanceTo(checkpoint.index);
     this.lastSettledSeekBoundary = checkpoint.index;
     return checkpoint.index;
   }
@@ -1700,7 +1703,7 @@ export class AdvPlayer {
     this.Model.CurrentEpisodeListIndex = target;
     this.state.commandIndex = target;
     this.state.currentCommand = commands[target] || null;
-    this.Loader.advanceTo(target);
+    if (!this.seekIndexBuilding) this.Loader.advanceTo(target);
     this.lastSettledSeekBoundary = target;
     this.Model.shouldShortCut = false;
     this.Model.shortCutIndex = -1;
@@ -1890,6 +1893,24 @@ export class AdvPlayer {
       return;
     }
     previousSeek?.controller.abort();
+    const scene = previousSeek ? null : this.SceneRoot.createSeekSnapshot();
+    const rollback =
+      previousSeek?.rollback ??
+      ((scene
+        ? {
+            version: ADV_SEEK_CHECKPOINT_VERSION,
+            index: start,
+            commandCount: commands.length,
+            scene,
+            session: this.Session.createSnapshot(),
+            loader: this.Loader.createSnapshot(),
+            sound: this.checkpointSoundSnapshot(),
+            state: this.captureSeekPlayerState(),
+          }
+        : this.seekIndexFor(this.Session.choiceRecords).checkpoints.get(this.lastSettledSeekBoundary)) as
+        | StorySeekCheckpoint
+        | undefined);
+    if (!rollback) throw new Error("The current scene has no recoverable seek boundary");
     const controller = createAbortLink(this.abortController.signal);
     let resolve = previousSeek?.resolve ?? (() => {});
     let reject = previousSeek?.reject ?? ((_error?: unknown) => {});
@@ -1908,6 +1929,7 @@ export class AdvPlayer {
       completion,
       resolve,
       reject,
+      rollback,
     };
     this.cancelAutoAdvance();
     this.state.seeking = true;
@@ -1981,19 +2003,46 @@ export class AdvPlayer {
       const request = this.activeSeek;
       try {
         await this.restoreExactSeekTarget(request.target, undefined, request.controller.signal);
+        if (request.controller.signal.aborted) throw request.controller.signal.reason;
       } catch (error) {
         if (this.disposed) return;
         if (this.activeSeek !== request) continue;
-        if (this.activeSeek === request) {
-          this.activeSeek = null;
-          request.reject(error);
-          try {
-            this.finishSeekRestoration(this.currentProgressIndex(), request.paused);
-          } finally {
-            request.controller.abort();
-          }
+        let failure = error;
+        let recovered = false;
+        try {
+          await this.applyCheckpoint(request.rollback, new Map(request.rollback.session.choiceRecords), {
+            preservePersistentNarrative: false,
+            signal: this.abortController.signal,
+          });
+          recovered = !this.disposed;
+        } catch (rollbackError) {
+          failure = new AggregateError(
+            [error, rollbackError],
+            "The requested scene and the previous scene could not be restored",
+          );
         }
-        throw error;
+        if (this.disposed) return;
+        // A newer drag may have arrived while rollback was preparing. The
+        // serialized drain will now apply that target before publishing.
+        if (this.activeSeek !== request) continue;
+        this.activeSeek = null;
+        try {
+          if (recovered) this.finishSeekRestoration(request.rollback.index, request.paused);
+          else {
+            this.clearSeekReplayWatchdog();
+            this.Model.shouldShortCut = false;
+            this.Model.shortCutIndex = -1;
+            this.Model.isPause = true;
+            this.state.paused = true;
+            this.state.ready = false;
+            this.state.seeking = false;
+            this.state.error = failure instanceof Error ? failure.message : String(failure);
+          }
+        } finally {
+          request.controller.abort();
+          request.reject(failure);
+        }
+        throw failure;
       }
 
       if (this.disposed) return;
@@ -2021,17 +2070,15 @@ export class AdvPlayer {
       this.seekReplayWatchdog = undefined;
       if (this.disposed || !this.state.seeking) return;
       if (this.completedSeekRevision !== revisionAtArm) return;
-      // No seek completed since arm. Whether the owner vanished or the
-      // reconciliation is wedged on a loader pump, the deterministic replay
-      // gate is starving the whole WebGL scene; restore playability at the
-      // current boundary instead of freezing on a black frame forever.
-      console.warn("[Vega] seek restoration stalled; releasing deterministic replay");
       const request = this.activeSeek;
       if (request) {
-        this.activeSeek = null;
-        request.controller.abort();
-        request.reject(new Error(`Scene boundary ${request.target} restoration timed out`));
+        // Cancellation must flow through the owning drain and its rollback.
+        // Releasing the render gate here could publish a half-restored scene
+        // while asynchronous model work still belongs to the timed-out seek.
+        request.controller.abort(new Error(`Scene boundary ${request.target} restoration timed out`));
+        return;
       }
+      if (this.idleSeekDrain || this.state.playing) return;
       try {
         this.finishSeekRestoration(this.currentProgressIndex(), this.state.paused);
       } catch (error) {

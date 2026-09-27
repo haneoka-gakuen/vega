@@ -111,10 +111,11 @@ export interface StoryResourceResolver {
    */
   loadSharedBytes?(source: string, signal?: AbortSignal): Promise<Readonly<Uint8Array>>;
   /**
-   * Acquires canonical bytes and keeps them resident until the returned lease
-   * is released. While a lease is active, `load` and `resolveRenderable` for
-   * the same canonical source must reuse those bytes without another network
-   * or adapter request. The signal only cancels lease acquisition.
+   * Acquires the encoded file and retains it until the lease is released.
+   * Storage may be disk-backed; decoded data and GPU objects have independent
+   * lifetimes. `load` and `resolveRenderable` reuse that file without another
+   * network or adapter request unless the host externally clears storage.
+   * The signal only cancels lease acquisition.
    */
   retain(source: string, signal?: AbortSignal): Promise<StoryResourceLease>;
   /**

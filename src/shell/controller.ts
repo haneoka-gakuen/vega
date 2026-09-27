@@ -183,20 +183,24 @@ class DefaultVegaShellController implements VegaManagedShellController {
                 .join(entry.speakerSeparator ?? "・"),
             }),
       })),
-      gallery: this.galleryEntries.map((entry): VegaShellGalleryItem => ({
-        ...entry,
-        unlocked: this.narrative.isUnlocked(entry.kind, entry.id),
-      })),
-      flow: this.sceneMarkers.map((marker): VegaShellFlowNode => ({
-        id: marker.id,
-        label: marker.label,
-        sceneId: marker.id,
-        visited: this.narrative.isUnlocked("scene", marker.id) || narrative.visitedFlowNodes.includes(marker.id),
-        current: marker.id === currentScene,
-        ...(marker.chapter ? { chapter: marker.chapter } : {}),
-        ...(marker.thumbnail ? { thumbnail: marker.thumbnail } : {}),
-        ...(marker.description ? { description: marker.description } : {}),
-      })),
+      gallery: this.galleryEntries.map(
+        (entry): VegaShellGalleryItem => ({
+          ...entry,
+          unlocked: this.narrative.isUnlocked(entry.kind, entry.id),
+        }),
+      ),
+      flow: this.sceneMarkers.map(
+        (marker): VegaShellFlowNode => ({
+          id: marker.id,
+          label: marker.label,
+          sceneId: marker.id,
+          visited: this.narrative.isUnlocked("scene", marker.id) || narrative.visitedFlowNodes.includes(marker.id),
+          current: marker.id === currentScene,
+          ...(marker.chapter ? { chapter: marker.chapter } : {}),
+          ...(marker.thumbnail ? { thumbnail: marker.thumbnail } : {}),
+          ...(marker.description ? { description: marker.description } : {}),
+        }),
+      ),
       flowEdges: this.flowEdges.map((edge) => ({ ...edge })),
     };
   }
@@ -271,7 +275,7 @@ class DefaultVegaShellController implements VegaManagedShellController {
     this.returnScreen = undefined;
     if (this.screen === "game") {
       this.player.resume();
-      this.playInBackground();
+      if (this.hasStarted) this.playInBackground();
     } else {
       this.player.pause();
     }

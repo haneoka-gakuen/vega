@@ -1,28 +1,43 @@
 import type { StoryResourceLease, StoryResourceResolver } from "../rendering/StorySceneBackend";
+import { storeStoryResourceFile, type StoryResourceFile } from "./StoryResourceFile";
 
 export interface StoryResourceAdapter {
   readonly schemes: readonly string[];
+  /** Abort must close owned I/O and reject; late values are discarded by the resolver. */
   load(url: URL, signal: AbortSignal): Promise<Uint8Array>;
 }
 
+export interface StoryResourceHttpOptions {
+  /** Maximum time to wait for HTTP response headers, including connect/TLS. */
+  readonly headerTimeoutMs?: number;
+  /** Maximum idle time between body chunks. Progress resets this timer. */
+  readonly inactivityTimeoutMs?: number;
+  /** Number of additional GET attempts after a retryable network failure. */
+  readonly maxRetries?: number;
+}
+
 export interface StoryResourceCacheOptions {
-  /** Maximum number of fulfilled resources retained by the resolver. */
+  /** Maximum number of hot byte arrays. Leased encoded files are independent. */
   readonly maximumEntries?: number;
-  /** Maximum combined byte length of fulfilled resources retained by the resolver. */
+  /** Maximum combined size of hot byte arrays, excluding retained files. */
   readonly maximumBytes?: number;
   /**
    * Shares fulfilled canonical bytes across sequential resolver instances.
    * Hosts use one opaque key per mounted player/resource scope.
    */
   readonly sharedKey?: object;
+  /** Bounded HTTP policy for canonical fetches. Non-HTTP adapters are untouched. */
+  readonly http?: StoryResourceHttpOptions;
 }
 
 interface StoryResourceCacheEntry {
   /** Resolver instance that started the underlying adapter/fetch request. */
   readonly owner: object;
-  readonly pending: Promise<Uint8Array>;
-  readonly controller: AbortController;
+  pending: Promise<Uint8Array> | undefined;
+  controller: AbortController;
   bytes: Uint8Array | undefined;
+  file: StoryResourceFile | undefined;
+  archiving: Promise<void> | undefined;
   byteLength: number;
   waiters: number;
   retainers: number;
@@ -39,7 +54,11 @@ interface StoryResourceCacheState {
 const sharedResourceCaches = new WeakMap<object, StoryResourceCacheState>();
 
 const DEFAULT_CACHE_MAXIMUM_ENTRIES = 256;
-const DEFAULT_CACHE_MAXIMUM_BYTES = 128 * 1024 * 1024;
+const DEFAULT_CACHE_MAXIMUM_BYTES = 32 * 1024 * 1024;
+const DEFAULT_HTTP_HEADER_TIMEOUT_MS = 15_000;
+const DEFAULT_HTTP_INACTIVITY_TIMEOUT_MS = 15_000;
+const DEFAULT_HTTP_MAX_RETRIES = 1;
+const MAX_HTTP_RETRIES = 3;
 
 const normalizeScheme = (value: string): string => value.trim().toLowerCase().replace(/:$/, "");
 
@@ -62,6 +81,44 @@ const abortError = (source: string): Error => {
 const cacheLimit = (value: unknown, fallback: number): number => {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+};
+
+const timeoutLimit = (value: unknown, fallback: number): number => {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+};
+
+const retryLimit = (value: unknown, fallback: number): number => {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.min(MAX_HTTP_RETRIES, Math.floor(number)) : fallback;
+};
+
+const isHttpUrl = (url: URL): boolean => url.protocol === "http:" || url.protocol === "https:";
+
+const isCanonicalRenderable = (url: URL): boolean => {
+  const pathname = url.pathname.toLowerCase();
+  return /\.(?:png|jpg|jpeg|webp|gif|svg|avif|woff2?|ttf|otf)$/u.test(pathname);
+};
+
+const httpTimeoutError = (url: URL, phase: "headers" | "body", timeoutMs: number): Error => {
+  const error = new Error(`HTTP ${phase} timeout after ${timeoutMs}ms: ${url.href}`);
+  error.name = "TimeoutError";
+  return error;
+};
+
+const httpStatusError = (url: URL, response: Response): Error & { readonly status: number } => {
+  const error = new Error(`${response.status} ${response.statusText}: ${url.href}`) as Error & {
+    readonly status: number;
+  };
+  Object.defineProperty(error, "status", { value: response.status, enumerable: false });
+  return error;
+};
+
+const isRetryableHttpError = (error: unknown): boolean => {
+  if (!error || typeof error !== "object") return true;
+  const status = Number((error as { status?: unknown }).status);
+  if (Number.isFinite(status)) return status === 408 || status === 425 || status === 429 || status >= 500;
+  return (error as Error).name !== "AbortError";
 };
 
 const waitForSharedBytes = (
@@ -118,11 +175,20 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
   private readonly adapters: readonly StoryResourceAdapter[];
   private readonly cacheState: StoryResourceCacheState;
   private readonly cacheOwner = {};
+  private readonly httpHeaderTimeoutMs: number;
+  private readonly httpInactivityTimeoutMs: number;
+  private readonly httpMaxRetries: number;
 
   constructor(adapters: readonly StoryResourceAdapter[] = [], cacheOptions: StoryResourceCacheOptions = {}) {
     this.adapters = [...adapters];
     const maximumEntries = cacheLimit(cacheOptions.maximumEntries, DEFAULT_CACHE_MAXIMUM_ENTRIES);
     const maximumBytes = cacheLimit(cacheOptions.maximumBytes, DEFAULT_CACHE_MAXIMUM_BYTES);
+    this.httpHeaderTimeoutMs = timeoutLimit(cacheOptions.http?.headerTimeoutMs, DEFAULT_HTTP_HEADER_TIMEOUT_MS);
+    this.httpInactivityTimeoutMs = timeoutLimit(
+      cacheOptions.http?.inactivityTimeoutMs,
+      DEFAULT_HTTP_INACTIVITY_TIMEOUT_MS,
+    );
+    this.httpMaxRetries = retryLimit(cacheOptions.http?.maxRetries, DEFAULT_HTTP_MAX_RETRIES);
     const sharedKey = cacheOptions.sharedKey;
     let cacheState = sharedKey ? sharedResourceCaches.get(sharedKey) : undefined;
     if (!cacheState) {
@@ -193,7 +259,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     // is tied to the adapter and lifetime of the resolver that started it, so a
     // replacement resolver must start its own request instead of inheriting a
     // request that may be aborted during old-plugin disposal.
-    if (entry && !entry.settled && entry.owner !== this.cacheOwner) {
+    if (entry && !entry.file && !entry.settled && entry.owner !== this.cacheOwner) {
       entry = undefined;
     }
     if (entry) {
@@ -205,7 +271,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     }
     entry.waiters += 1;
     try {
-      return await waitForSharedBytes(entry.pending, source, signal, copy);
+      return await waitForSharedBytes(this.pendingBytes(key, entry, url), source, signal, copy);
     } finally {
       entry.waiters = Math.max(0, entry.waiters - 1);
       // Caller abort is isolated while another model still needs these bytes.
@@ -218,6 +284,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
         this.deleteCacheEntry(key, entry);
         entry.controller.abort();
       }
+      this.trimCache();
     }
   }
 
@@ -229,7 +296,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     const url = asUrl(source);
     const key = url.href;
     let entry = this.cache.get(key);
-    if (entry && !entry.settled && entry.owner !== this.cacheOwner) {
+    if (entry && !entry.file && !entry.settled && entry.owner !== this.cacheOwner) {
       entry = undefined;
     }
     if (entry) {
@@ -249,11 +316,21 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
         this.deleteCacheEntry(key, entry!);
         entry!.controller.abort();
       } else {
+        if (entry!.retainers === 0) {
+          entry!.file?.release();
+          entry!.file = undefined;
+          if (!entry!.bytes && !entry!.pending) this.deleteCacheEntry(key, entry!);
+        }
         this.trimCache();
       }
     };
     try {
-      await waitForSharedBytes(entry.pending, source, signal, false);
+      if (!entry.file) {
+        const bytes = await waitForSharedBytes(this.pendingBytes(key, entry, url), source, signal, false);
+        await this.archiveEntry(entry, bytes, key);
+      }
+      if (signal?.aborted) throw abortError(source);
+      this.trimCache();
     } catch (error) {
       release();
       throw error;
@@ -266,20 +343,21 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     signal?: AbortSignal,
   ): Promise<{ readonly url: string; readonly release: () => void }> {
     const url = asUrl(source);
-    // Plain browser URLs normally remain direct. Once canonical bytes have
-    // been preloaded or retained, however, materialize from that same entry so
-    // an <img>, media element, or third-party runtime cannot request the URL a
-    // second time behind the resolver's back.
-    if (!this.adapterFor(url) && !this.cache.has(url.href)) {
+    // Reuse already prepared bytes for every resource, including audio and
+    // video. Unprepared streaming/opaque browser URLs remain direct. Known
+    // HTTP images and fonts use the bounded canonical loader on cache misses.
+    if (!this.adapterFor(url) && !this.cache.has(url.href) && !(isHttpUrl(url) && isCanonicalRenderable(url))) {
       return { url: source, release: () => undefined };
     }
-    const bytes = await this.loadSharedBytes(source, signal);
-    // Canonical cache entries are normalized to a full ArrayBuffer-backed
-    // Uint8Array. Passing that buffer directly avoids two JavaScript copies;
-    // Blob owns the resulting immutable payload.
-    const objectUrl = URL.createObjectURL(
-      new Blob([bytes.buffer as ArrayBuffer], { type: storyResourceContentType(source, bytes) }),
-    );
+    if (signal?.aborted) throw abortError(source);
+    const entry = this.cache.get(url.href);
+    let blob = await entry?.file?.read().catch(() => undefined);
+    if (signal?.aborted) throw abortError(source);
+    if (!blob) {
+      const bytes = await this.loadSharedBytes(source, signal);
+      blob = new Blob([bytes.buffer as ArrayBuffer], { type: storyResourceContentType(source, bytes) });
+    }
+    const objectUrl = URL.createObjectURL(blob);
     let released = false;
     return {
       url: objectUrl,
@@ -297,54 +375,184 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
   }
 
   private createCacheEntry(key: string, url: URL): StoryResourceCacheEntry {
-    const controller = new AbortController();
-    let entry!: StoryResourceCacheEntry;
-    const pending = this.loadCanonical(url, controller.signal).then(
-      (value) => {
-        entry.settled = true;
-        const bytes = Uint8Array.from(value);
-        if (this.cache.get(key) !== entry) return bytes;
-        // An individually oversized resource must not flush every useful entry
-        // before being evicted itself. An active lease still takes precedence;
-        // once released, the normal trim pass removes the oversized entry.
-        if (entry.retainers === 0 && (this.maximumCacheEntries === 0 || bytes.byteLength > this.maximumCacheBytes)) {
-          this.cache.delete(key);
-          return bytes;
-        }
-        entry.bytes = bytes;
-        entry.byteLength = bytes.byteLength;
-        this.cachedByteLength += bytes.byteLength;
-        this.touchCacheEntry(key, entry);
-        this.trimCache();
-        return bytes;
-      },
-      (error: unknown) => {
-        entry.settled = true;
-        if (this.cache.get(key) === entry) this.deleteCacheEntry(key, entry);
-        throw error;
-      },
-    );
-    entry = {
+    const entry: StoryResourceCacheEntry = {
       owner: this.cacheOwner,
-      pending,
-      controller,
+      pending: undefined,
+      controller: new AbortController(),
       bytes: undefined,
+      file: undefined,
+      archiving: undefined,
       byteLength: 0,
       waiters: 0,
       retainers: 0,
       settled: false,
     };
+    this.pendingBytes(key, entry, url);
     return entry;
+  }
+
+  private archiveEntry(entry: StoryResourceCacheEntry, bytes: Uint8Array, source: string): Promise<void> {
+    if (entry.file) return Promise.resolve();
+    entry.archiving ??= storeStoryResourceFile(
+      new Blob([bytes.buffer as ArrayBuffer], { type: storyResourceContentType(source, bytes) }),
+    )
+      .then((file) => {
+        if (entry.retainers > 0) entry.file = file;
+        else file.release();
+      })
+      .finally(() => {
+        entry.archiving = undefined;
+      });
+    return entry.archiving;
+  }
+
+  private pendingBytes(key: string, entry: StoryResourceCacheEntry, url: URL): Promise<Uint8Array> {
+    if (entry.bytes) return Promise.resolve(entry.bytes);
+    if (entry.pending) return entry.pending;
+    entry.controller = new AbortController();
+    entry.settled = false;
+    const load = async (): Promise<Uint8Array> => {
+      const blob = await entry.file?.read().catch(() => undefined);
+      if (entry.controller.signal.aborted) throw abortError(key);
+      if (blob) return new Uint8Array(await blob.arrayBuffer());
+      // Browser storage can be cleared externally. Recover through the same
+      // bounded request path, never through an untracked media-element fetch.
+      entry.file?.release();
+      entry.file = undefined;
+      return this.loadCanonical(url, entry.controller.signal);
+    };
+    const pending = load()
+      .then(
+        async (value) => {
+          entry.settled = true;
+          if (entry.controller.signal.aborted) throw abortError(key);
+          const bytes = Uint8Array.from(value);
+          if (this.cache.get(key) !== entry) return bytes;
+          // An individually oversized resource must not flush every useful entry
+          // before being evicted itself. An active lease still takes precedence;
+          // once released, the normal trim pass removes the oversized entry.
+          if (entry.retainers === 0 && (this.maximumCacheEntries === 0 || bytes.byteLength > this.maximumCacheBytes)) {
+            this.cache.delete(key);
+            return bytes;
+          }
+          entry.bytes = bytes;
+          entry.byteLength = bytes.byteLength;
+          this.cachedByteLength += bytes.byteLength;
+          this.touchCacheEntry(key, entry);
+          if (entry.retainers > 0) await this.archiveEntry(entry, bytes, key);
+          this.trimCache();
+          return bytes;
+        },
+        (error: unknown) => {
+          entry.settled = true;
+          if (this.cache.get(key) === entry) this.deleteCacheEntry(key, entry);
+          throw error;
+        },
+      )
+      .finally(() => {
+        // A fulfilled Promise would itself keep the entire byte buffer alive
+        // after the memory LRU releases it. Only in-flight work is retained here.
+        if (entry.pending === pending) entry.pending = undefined;
+      });
+    entry.pending = pending;
+    return pending;
   }
 
   private async loadCanonical(url: URL, signal: AbortSignal): Promise<Uint8Array> {
     const adapter = this.adapterFor(url);
     if (adapter) return adapter.load(url, signal);
-    const response = await fetch(url.href, { signal });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}: ${url.href}`);
+    if (!isHttpUrl(url)) {
+      const response = await fetch(url.href, { signal });
+      if (!response.ok) throw httpStatusError(url, response);
+      return new Uint8Array(await response.arrayBuffer());
     }
-    return new Uint8Array(await response.arrayBuffer());
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= this.httpMaxRetries; attempt += 1) {
+      if (signal.aborted) throw abortError(url.href);
+      try {
+        return await this.loadHttpAttempt(url, signal);
+      } catch (error) {
+        if (signal.aborted) throw abortError(url.href);
+        lastError = error;
+        if (attempt >= this.httpMaxRetries || !isRetryableHttpError(error)) throw error;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`Unable to load ${url.href}`);
+  }
+
+  private async loadHttpAttempt(url: URL, signal: AbortSignal): Promise<Uint8Array> {
+    const controller = new AbortController();
+    const forwardAbort = (): void => controller.abort(signal.reason);
+    let headerTimedOut = false;
+    const headerTimer = setTimeout(() => {
+      headerTimedOut = true;
+      controller.abort();
+    }, this.httpHeaderTimeoutMs);
+    signal.addEventListener("abort", forwardAbort, { once: true });
+    try {
+      const response = await fetch(url.href, { method: "GET", signal: controller.signal });
+      clearTimeout(headerTimer);
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => undefined);
+        throw httpStatusError(url, response);
+      }
+      return await this.readHttpBody(url, response, controller);
+    } catch (error) {
+      if (signal.aborted) throw abortError(url.href);
+      if (controller.signal.aborted && headerTimedOut) {
+        throw httpTimeoutError(url, "headers", this.httpHeaderTimeoutMs);
+      }
+      throw error;
+    } finally {
+      clearTimeout(headerTimer);
+      signal.removeEventListener("abort", forwardAbort);
+    }
+  }
+
+  private async readHttpBody(url: URL, response: Response, controller: AbortController): Promise<Uint8Array> {
+    if (!response.body) {
+      return new Uint8Array(await this.withHttpInactivityTimeout(url, response.arrayBuffer(), controller));
+    }
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let byteLength = 0;
+    try {
+      while (true) {
+        const result = await this.withHttpInactivityTimeout(url, reader.read(), controller);
+        if (result.done) break;
+        if (!result.value?.byteLength) continue;
+        chunks.push(result.value);
+        byteLength += result.value.byteLength;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  }
+
+  private withHttpInactivityTimeout<T>(url: URL, pending: Promise<T>, controller: AbortController): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        controller.abort();
+        reject(httpTimeoutError(url, "body", this.httpInactivityTimeoutMs));
+      }, this.httpInactivityTimeoutMs);
+      pending.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   private touchCacheEntry(key: string, entry: StoryResourceCacheEntry): void {
@@ -357,17 +565,29 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     if (this.cache.get(key) !== entry) return;
     this.cache.delete(key);
     this.cachedByteLength = Math.max(0, this.cachedByteLength - entry.byteLength);
+    entry.bytes = undefined;
+    entry.byteLength = 0;
+    if (entry.retainers === 0) {
+      entry.file?.release();
+      entry.file = undefined;
+    }
   }
 
   private trimCache(): void {
-    while (this.cache.size > this.maximumCacheEntries || this.cachedByteLength > this.maximumCacheBytes) {
+    let memoryEntries = [...this.cache.values()].filter((entry) => entry.bytes).length;
+    while (memoryEntries > this.maximumCacheEntries || this.cachedByteLength > this.maximumCacheBytes) {
       let removed = false;
       for (const [key, entry] of this.cache) {
         // Keep in-flight work addressable so every concurrent waiter shares one
         // underlying adapter/fetch request. Temporary entry-count overflow is
         // trimmed as requests settle.
-        if (!entry.bytes || entry.retainers > 0) continue;
-        this.deleteCacheEntry(key, entry);
+        if (!entry.bytes || entry.waiters > 0 || (entry.retainers > 0 && !entry.file)) continue;
+        if (entry.retainers > 0) {
+          this.cachedByteLength = Math.max(0, this.cachedByteLength - entry.byteLength);
+          entry.bytes = undefined;
+          entry.byteLength = 0;
+        } else this.deleteCacheEntry(key, entry);
+        memoryEntries -= 1;
         removed = true;
         break;
       }

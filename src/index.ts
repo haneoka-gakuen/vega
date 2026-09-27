@@ -147,7 +147,11 @@ export type {
   StoryRendererServiceKey,
 } from "./rendering/StoryRendererExtensions";
 export { DefaultStoryResourceResolver, storyResourceContentType } from "./resources/StoryResourceResolver";
-export type { StoryResourceAdapter } from "./resources/StoryResourceResolver";
+export type {
+  StoryResourceAdapter,
+  StoryResourceCacheOptions,
+  StoryResourceHttpOptions,
+} from "./resources/StoryResourceResolver";
 export * from "./resources/StoryResourcePreparation";
 export {
   configureStoryRuntime,
