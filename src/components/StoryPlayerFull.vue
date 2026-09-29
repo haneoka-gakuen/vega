@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { AdvPlayer } from "../core/AdvPlayer";
 import { mergeAdvRuntime } from "../core/AdvConstants";
+import { GenericStoryScene } from "../rendering/dom/GenericStoryScene";
 import { createVegaPlayerState } from "../engine/VegaEngine";
 import { resolveVegaOfficialPlayerPlugins, type VegaOfficialPlayerPluginPreset } from "../engine/playerPluginPreset";
 import { createVegaPlayerPresentation, isVegaUiSlotEventTarget, mountVegaUiSlots } from "../engine/playerPresentation";
@@ -402,7 +403,11 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
       mount: presentation.stage,
       story: storyValue,
       state,
-      ...(unownedSceneBackend ? { sceneBackend: unownedSceneBackend } : {}),
+      sceneBackend:
+        unownedSceneBackend ??
+        new GenericStoryScene(mergeAdvRuntime(storyValue.runtime), state, activeResources, {
+          characterProviders: unownedPluginPreset.characterProviders,
+        }),
       resources: activeResources,
       narrativeStore,
       characterProviders: unownedPluginPreset.characterProviders,

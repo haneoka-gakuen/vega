@@ -57,6 +57,12 @@ export interface StoryCharacterModel {
   prepareFirstFrame?(): void | Promise<void>;
   playMotion?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
   playExpression?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
+  /** Opcode 68: fade the clip in and loop it until stopParameterLoopMotion. */
+  playParameterLoopMotion?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
+  /** Ends a parameter loop, easing its parameters home over the clip's fade-out. */
+  stopParameterLoopMotion?(fadeSeconds?: number): void | Promise<void>;
+  /** Opcode 69: stop/resume auto eye blink; a running blink cycle completes so the eyes settle open. */
+  setEyeBlinkStopped?(stopped: boolean, transitionSeconds?: number): void | Promise<void>;
   /**
    * Receives the complete portable state after every authored presentation
    * mutation. A host adapter can map it to 2D skeletal, 3D, or proprietary

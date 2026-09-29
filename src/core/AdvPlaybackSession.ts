@@ -59,6 +59,16 @@ export interface AdvPlaybackSessionSnapshot {
   readonly choiceRecords: Array<[number, AdvChoiceRecord]>;
   readonly movieSoundVolume: number;
   readonly FlowParameters: { isClipVideoPlaying: false; isClipVideoSkip: boolean };
+  /** Clip in progress at this boundary, so a seek can resume inside it. */
+  readonly ActiveClip?: AdvActiveClip | null;
+  readonly EyeBlinkStoppedTargets?: readonly string[];
+}
+
+/** A playing Clip and its Delay timeline target (seconds from the clip's first frame). */
+export interface AdvActiveClip {
+  readonly video: unknown;
+  readonly alpha: number;
+  readonly target: number;
 }
 
 export class AdvPlaybackSession {
@@ -75,6 +85,10 @@ export class AdvPlaybackSession {
   CurrentBgmPlayId: number;
   /** Video info from the current Movie/Clip command; shape is opaque. */
   CurrentVideoInfo: unknown;
+  /** Logical clip, maintained during shortcut replay too (seek-index compilation). */
+  ActiveClip: AdvActiveClip | null = null;
+  /** EyeBlink stop state by target name; In applies it to a newly placed character. */
+  EyeBlinkStoppedTargets = new Set<string>();
   VideoPlaying: boolean;
   WithVoice: boolean;
   TalkLog: AdvTalkLogEntry[];
@@ -340,6 +354,8 @@ export class AdvPlaybackSession {
       BgmOriginId: this.BgmOriginId,
       CurrentBgmPlayId: this.CurrentBgmPlayId,
       CurrentVideoInfo: this.CurrentVideoInfo,
+      ActiveClip: this.ActiveClip ? { ...this.ActiveClip, video: clonePlain(this.ActiveClip.video) } : null,
+      EyeBlinkStoppedTargets: [...this.EyeBlinkStoppedTargets],
       WithVoice: this.WithVoice,
       TalkLog: this.TalkLog,
       CurrentMasterChat: this.CurrentMasterChat,
@@ -397,6 +413,10 @@ export class AdvPlaybackSession {
     this.BgmOriginId = Number(snapshot.BgmOriginId) || 0;
     this.CurrentBgmPlayId = Number(snapshot.CurrentBgmPlayId) || 0;
     this.CurrentVideoInfo = clonePlain(snapshot.CurrentVideoInfo);
+    this.EyeBlinkStoppedTargets = new Set(snapshot.EyeBlinkStoppedTargets ?? []);
+    this.ActiveClip = snapshot.ActiveClip
+      ? { ...snapshot.ActiveClip, video: clonePlain(snapshot.ActiveClip.video) }
+      : null;
     this.VideoPlaying = false;
     this.WithVoice = snapshot.WithVoice !== false;
     const snapshotTalkLog = Array.isArray(snapshot.TalkLog) ? snapshot.TalkLog : [];

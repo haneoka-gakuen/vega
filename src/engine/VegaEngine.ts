@@ -1,6 +1,7 @@
 import { AdvPlayer } from "../core/AdvPlayer";
 import type { AdvCommandExecutor } from "../core/AdvCommandService";
 import { mergeAdvRuntime } from "../core/AdvConstants";
+import { GenericStoryScene } from "../rendering/dom/GenericStoryScene";
 import type { VegaNarrativeInputProvider } from "../narrative/commands";
 import { VegaLocalStorageSaveStorage, VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
 import { VegaNarrativeStore } from "../narrative/state";
@@ -10,6 +11,7 @@ import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver
 import type { AdvPlayerState, AdvStory } from "../types/AdvRuntime";
 import { createVegaShellController, type VegaManagedShellController } from "../shell/controller";
 import { VEGA_SHELL_CONTROLLER, type VegaShellController } from "../shell/contracts";
+import { VEGA_TEXT_METRICS } from "../core/AdvTextRenderValue";
 import { VegaEventBus, type VegaEventHandler, type VegaEventMap } from "./events";
 import { VegaLifetime } from "./lifecycle";
 import { createVegaPlayerPresentation, mountVegaUiSlots, type VegaPlayerPresentation } from "./playerPresentation";
@@ -261,6 +263,10 @@ export class VegaEngine {
           ? undefined
           : createBrowserNarrativeInput(presentation.root, lifetime.signal);
       if (browserInput) lifetime.use(browserInput);
+      // Without a render plugin, fall back to the portable DOM renderer.
+      sceneBackend ??= new GenericStoryScene(mergeAdvRuntime(options.story.runtime), state, resources, {
+        characterProviders,
+      });
       player = new AdvPlayer({
         mount: presentation.stage,
         story: options.story,
@@ -273,6 +279,7 @@ export class VegaEngine {
         narrativeInput: options.narrativeInput ?? browserInput?.provider,
         characterProviders,
         resourcePreparers: presentation.theme ? [presentation.theme] : [],
+        textMetrics: this.plugins.service(VEGA_TEXT_METRICS),
       });
       const constructedPlayer = player;
       lifetime.defer(() => constructedPlayer.dispose({ releaseTextures: true }));

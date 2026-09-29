@@ -69,6 +69,8 @@ export const VEGA_ADV_OPCODE = Object.freeze({
   ChatTyping: 65,
   LookTarget: 66,
   PanV2: 67,
+  MotionLoop: 68,
+  EyeBlink: 69,
 } as const);
 
 export const VEGA_NATIVE_COMPATIBILITY_RANGE = Object.freeze({ minimum: 0, maximum: 100 });

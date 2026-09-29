@@ -281,6 +281,12 @@ export interface StorySceneBackend {
   ): Promise<void>;
   playMotionForTarget(target: string, motionName?: string, fadeIn?: number, expectedIdentity?: string): void;
   playExpressionForTarget(target: string, expressionName?: string, fadeIn?: number, expectedIdentity?: string): void;
+  /** Opcode 68: loop a parameter-fade motion until a stop request replaces it. */
+  playParameterLoopForTarget(target: string, motionName: string, fadeIn?: number, expectedIdentity?: string): void;
+  /** Opcode 68 "stop": end the target's parameter loop with its authored fade-out. */
+  stopParameterLoopForTarget(target: string, fadeOut?: number, expectedIdentity?: string): void;
+  /** Opcode 69: stop auto eye blink (lids ease open over `transitionSeconds`) or resume it. */
+  setEyeBlinkStoppedForTarget(target: string, stopped: boolean, transitionSeconds?: number, expectedIdentity?: string): void;
   setCharacterPaused(target: string, paused: boolean): void;
   setCharacterForward(positionType: number): void;
   setCharacterBack(positionType: number): void;
@@ -318,14 +324,21 @@ export interface StorySceneBackend {
     reveal: boolean,
   ): Promise<void>;
 
+  /**
+   * Resolves once playback has started; a fade-in continues detached (the
+   * native Clip command does not wait for its own fade). `startSeconds` seeks
+   * the media before playing, e.g. when a seek lands inside a clip.
+   */
   showVideo(
     video: AdvVideoEntry | string,
     fadeIn?: number,
-    startRatio?: number,
+    startSeconds?: number,
     playbackRate?: number,
     signal?: AbortSignal,
     alpha?: number,
   ): Promise<void>;
+  /** Live clock of the shown video (read directly, not the per-frame state copy). */
+  videoClock?(): { mediaTime: number; paused: boolean; ended: boolean; failed?: boolean } | undefined;
   fadeVideo(alpha: number, duration?: number): Promise<void>;
   hideVideo(fadeOut?: number): Promise<void>;
   skipVideo(): boolean;

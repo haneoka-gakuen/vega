@@ -148,6 +148,16 @@ class DefaultVegaShellController implements VegaManagedShellController {
     this.applySettings();
   }
 
+  /** Current screen without building a full snapshot (safe to poll per frame). */
+  get currentScreen(): VegaShellScreen {
+    return this.screen;
+  }
+
+  /** Current narrative settings without cloning saves/backlog. */
+  get currentSettings(): Readonly<VegaNarrativeSettings> {
+    return this.narrative.settings;
+  }
+
   snapshot(): VegaShellSnapshot {
     const narrative = this.narrative.snapshot();
     const currentScene = this.sceneAt(this.player.currentProgressIndex());

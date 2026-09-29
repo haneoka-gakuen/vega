@@ -15,12 +15,15 @@ import { advAutoPlayReadDelaySeconds, autoPlayIntervalSeconds, normalizeAutoPlay
 import { AdvEpisodeResourceLoader, type AdvEpisodeResourceSnapshot } from "./AdvEpisodeResourceLoader";
 import { prepareStoryCharacterProviders } from "./AdvCharacterProviderPreparation";
 import { AdvPlaybackSession, type AdvPlaybackSessionSnapshot } from "./AdvPlaybackSession";
+import { VideoTimeline } from "./AdvVideoTimeline";
+import { DEFAULT_ADV_TEXT_METRICS, type AdvTextMetrics } from "./AdvTextRenderValue";
 import { AdvPlayerModel } from "./AdvPlayerModel";
 import { AdvPlayableDirector } from "./AdvPlayableDirector";
 import { AdvQualityConfig } from "./AdvQualityConfig";
 import { delaySeconds, type AdvCommandTransitionChannel } from "./time";
 import { lerp, resolveEase, tween } from "./easing";
 import type {
+  AdvVideoEntry,
   AdvCommand,
   AdvRuntimeConfig,
   AdvSoundEntry,
@@ -35,7 +38,6 @@ import type {
   AdvChoiceRecord,
 } from "../types/AdvRuntime";
 import { hasAdvCharacterModel } from "../types/AdvRuntime";
-import { GenericStoryScene } from "../rendering/dom/GenericStoryScene";
 import type { StoryCharacterProvider } from "../rendering/StoryCharacterModel";
 import type { StoryResourceResolver, StorySceneBackend } from "../rendering/StorySceneBackend";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
@@ -697,15 +699,6 @@ function combineAbortSignals(...parents: Array<AbortSignal | undefined>): {
   };
 }
 
-function isAudioCommand(command: unknown) {
-  return (
-    command === ADV_COMMAND.Bgm ||
-    command === ADV_COMMAND.SoundVolume ||
-    command === ADV_COMMAND.Se ||
-    command === ADV_COMMAND.Voice
-  );
-}
-
 function firstOpeningPlayableBgm(commands: AdvCommand[]) {
   const commandGroups = commands.map((command) => flattenAdvCommands([command]));
   const firstWait = commandGroups.findIndex((group) =>
@@ -753,6 +746,13 @@ export class AdvPlayer {
   private readonly characterDoFCommandOwners: Map<number, AdvCharacterDoFCommandOwner>;
   private shakeWaitController: AbortController | null;
   private clipPlaybackController: AbortController | null;
+  private readonly textMetrics: AdvTextMetrics;
+  /** Visible length of talk markup in its authored format. */
+  private visibleTextLength(source: string, format?: string): number {
+    return this.textMetrics.visibleLength(source, format || "adv");
+  }
+  /** AdvVideoTimeline of the playing Clip. */
+  private readonly videoTimeline = new VideoTimeline();
   Context: AdvCommandContext;
   disposed: boolean;
   private bootGeneration: number;
@@ -799,19 +799,23 @@ export class AdvPlayer {
     characterProviders = [],
     resourcePreparers = [],
     resolveLocalizedText = resolveStoryLocalizedText,
+    textMetrics = DEFAULT_ADV_TEXT_METRICS,
   }: {
     mount: HTMLElement;
     resolveLocalizedText?: typeof resolveStoryLocalizedText;
     story: AdvStory;
     state: AdvPlayerState;
     commandExtensions?: readonly AdvCommandExtensionRegistration[];
-    sceneBackend?: StorySceneBackend;
+    sceneBackend: StorySceneBackend;
     resources?: StoryResourceResolver;
     narrativeStore?: VegaNarrativeStore;
     narrativeInput?: VegaNarrativeInputProvider;
     characterProviders?: readonly StoryCharacterProvider[];
     resourcePreparers?: readonly StoryResourcePreparer[];
+    /** Markup-aware measurement from the text plugin; core knows no grammar. */
+    textMetrics?: AdvTextMetrics;
   }) {
+    this.textMetrics = textMetrics;
     const bindings = new Map(
       commandExtensions.filter((entry) => entry.commandType).map((entry) => [entry.commandType!, entry.opcode]),
     );
@@ -873,11 +877,9 @@ export class AdvPlayer {
     this.narrativeStore = narrativeStore;
     this.characterProviders = Object.freeze([...characterProviders]);
     this.resources = resources;
-    this.SceneRoot =
-      sceneBackend ??
-      new GenericStoryScene(this.runtime, state, resources, {
-        characterProviders: this.characterProviders,
-      });
+    // The interpreter never picks a renderer; hosts (VegaEngine, the Vue
+    // component) supply one, so core does not link the DOM renderer.
+    this.SceneRoot = sceneBackend;
     this.SoundManager = new AdvSoundManager(
       this.runtime,
       state as AdvPlayerState & {
@@ -1001,7 +1003,7 @@ export class AdvPlayer {
   private executeCommandGroupAction(command: AdvCommand, signal: AbortSignal): Promise<void> | void {
     const interpolated = interpolateNarrativeCommand(command, this.narrativeStore);
     if (!matchesNarrativeCommandCondition(interpolated, this.narrativeStore)) return;
-    if (interpolated.ignoreData && !isAudioCommand(interpolated.command)) return;
+    if (interpolated.ignoreData) return;
     if (this.disposed || signal.aborted) return;
     return this.CommandService.executeCommand(
       interpolated.command as number,
@@ -1098,7 +1100,7 @@ export class AdvPlayer {
     this.Model.CurrentEpisodeListIndex = index + 1;
     if (!cmd) return;
     if (!matchesNarrativeCommandCondition(cmd, this.narrativeStore)) return;
-    if (cmd.ignoreData && !isAudioCommand(cmd.command)) return;
+    if (cmd.ignoreData) return;
     if (this.seekIndexBuilding && this.seekSoundProjection) {
       this.seekSoundProjection.frameStamp += 1;
     } else {
@@ -1219,6 +1221,11 @@ export class AdvPlayer {
     readonly ordinal: number;
     readonly maximum: number;
   } {
+    // Polled every frame by hosts; recompute only when an input changes.
+    const progressIndex = this.currentProgressIndex();
+    const key = `${this.Session.choiceRecords.size}|${progressIndex}|${this.lastSettledSeekBoundary}|${this.state.commandCount}|${this.seekIndexBuilding}`;
+    const cached = this.seekProgressCache;
+    if (cached && cached.key === key && cached.boundaryCount === this.seekProgressBoundaryCount()) return cached.value;
     const boundaries = this.seekIndexFor(this.Session.choiceRecords).boundaries;
     const maximum = Math.max(0, boundaries.length - 1);
     let ordinal = boundaries.lastIndexOf(this.currentProgressIndex());
@@ -1227,12 +1234,26 @@ export class AdvPlayer {
     }
     if (ordinal < 0) ordinal = 0;
     ordinal = Math.max(0, Math.min(maximum, ordinal));
-    return {
+    const value = Object.freeze({
       ratio: maximum > 0 ? ordinal / maximum : 0,
       label: this.state.commandCount ? `${ordinal} / ${maximum}` : "",
       ordinal,
       maximum,
-    };
+    });
+    this.seekProgressCache = { key, boundaryCount: boundaries.length, value, boundaries };
+    return value;
+  }
+
+  private seekProgressCache: {
+    key: string;
+    boundaryCount: number;
+    value: { readonly ratio: number; readonly label: string; readonly ordinal: number; readonly maximum: number };
+    boundaries: readonly number[];
+  } | null = null;
+
+  /** Boundary count of the cached index (boundaries grow while the index compiles). */
+  private seekProgressBoundaryCount(): number {
+    return this.seekProgressCache?.boundaries.length ?? -1;
   }
 
   private captureSeekPlayerState(): AdvPlayerSeekStateSnapshot {
@@ -1300,7 +1321,7 @@ export class AdvPlayer {
   private seekCompilationBarrier(authored: AdvCommand): string {
     const cmd = interpolateNarrativeCommand(authored, this.narrativeStore);
     if (!matchesNarrativeCommandCondition(cmd, this.narrativeStore)) return "";
-    if (cmd.ignoreData && !isAudioCommand(cmd.command)) return "";
+    if (cmd.ignoreData) return "";
     const opcode = Number(cmd.command);
     if (opcode === VEGA_SYSTEM_OPCODE.Input) return "unresolved-input";
     if (opcode === ADV_COMMAND.ChoiceShow && !this.seekChoice(cmd)) {
@@ -2269,6 +2290,7 @@ export class AdvPlayer {
       this.Session.VideoPlaying = false;
       this.Session.FlowParameters.setClipVideoPlaying(false);
       this.Session.FlowParameters.setClipSkip(false);
+      this.videoTimeline.end(videoInfo);
     });
   }
 
@@ -2311,12 +2333,43 @@ export class AdvPlayer {
     });
   }
 
+  /**
+   * A seek boundary inside a Clip: show the clip at the boundary's timeline
+   * target and resume its Delay timeline there, instead of continuing with
+   * no video and wall-clock delays.
+   */
+  private resumeActiveClip(): void {
+    const clip = this.Session.ActiveClip;
+    if (!clip || this.disposed) return;
+    const videoInfo = clip.video;
+    this.cancelClipPlaybackWatch();
+    this.Session.CurrentVideoInfo = videoInfo;
+    this.Session.VideoPlaying = true;
+    this.Session.FlowParameters.setClipVideoPlaying(true);
+    // Begin now so Delays issued while the element loads wait on its clock.
+    this.videoTimeline.begin(videoInfo, clip.target, clip.target);
+    const signal = this.abortController.signal;
+    void this.SceneRoot.showVideo(videoInfo as AdvVideoEntry | string, 0, clip.target, this.Model.getCurrentSpeedRate(), signal, clip.alpha)
+      .then(() => {
+        if (this.disposed || this.Session.CurrentVideoInfo !== videoInfo) return;
+        this.watchClipPlaybackCompletion(videoInfo);
+      })
+      .catch((error: unknown) => {
+        if (this.Session.CurrentVideoInfo !== videoInfo) return;
+        this.videoTimeline.end(videoInfo);
+        this.Session.VideoPlaying = false;
+        this.Session.FlowParameters.setClipVideoPlaying(false);
+        if (!signal.aborted) console.warn("[Vega] clip could not resume after seek", error);
+      });
+  }
+
   maybeFinishActiveSeek(_commands: AdvCommand[]) {
     const seek = this.activeSeek;
     if (!seek || this.Model.CurrentEpisodeListIndex < seek.target) return false;
     this.activeSeek = null;
     try {
       this.finishSeekRestoration(seek.target, seek.paused);
+      this.resumeActiveClip();
       seek.resolve();
     } catch (error) {
       seek.reject(error);
@@ -2443,7 +2496,8 @@ export class AdvPlayer {
           const seconds =
             Math.max(
               finite(this.runtime.minTalkDisplayTime, 1.6),
-              this.state.talk.text.length * finite(this.runtime.waitTalkTextUnitTime, 0.04),
+              this.visibleTextLength(this.state.talk.text, this.state.talk.textFormat) *
+                finite(this.runtime.waitTalkTextUnitTime, 0.04),
             ) + this.autoPlayIntervalSeconds;
           this.autoAdvanceAfter(seconds);
           await this.Model.waitForNext(this.abortController.signal);
@@ -3058,16 +3112,19 @@ export class AdvPlayer {
     const characterDelay =
       (Number.isFinite(authoredRate) && authoredRate > 0 ? 1 / authoredRate : 0.05) /
       Math.max(0.01, this.Model.getCurrentSpeedRate() * this.textSpeedRate);
-    const suffix = full.slice(prefix.length);
-    const characters = presentation?.textReveal?.unit === "utf16-code-unit" ? suffix.split("") : Array.from(suffix);
-    let displayed = prefix;
+    // Reveal by visible unit through the text plugin: renderers receive a
+    // well-formed markup prefix, never a half-typed tag.
+    const format = String(talk.textFormat || "adv");
+    const codeUnits = presentation?.textReveal?.unit === "utf16-code-unit";
+    const total = codeUnits ? full.length : this.textMetrics.visibleLength(full, format);
+    const start = codeUnits ? prefix.length : this.textMetrics.visibleLength(prefix, format);
     try {
-      for (const character of characters) {
+      for (let units = start + 1; units <= total; units += 1) {
         if (finished || !ownsPresentation()) return;
         if (presentation?.textReveal?.delayFirstUnit) await delaySeconds(characterDelay, signal);
         if (finished || !ownsPresentation()) return;
-        displayed += character;
-        if (ownsPresentation()) talk.displayedText = displayed;
+        if (ownsPresentation())
+          talk.displayedText = codeUnits ? full.slice(0, units) : this.textMetrics.sliceVisible(full, units, format);
         if (!presentation?.textReveal?.delayFirstUnit) await delaySeconds(characterDelay, signal);
       }
       if (!finished && ownsPresentation()) {
@@ -3302,6 +3359,8 @@ export class AdvPlayer {
         // its first resource await. Queue the authored layout presentation now
         // so a newly loaded model has it on its first visible frame.
         playCharacterPresentation(cmd, ctx, target);
+        // AdvInCommand re-applies the session's EyeBlink stop to the new controller.
+        if (ctx.Session.EyeBlinkStoppedTargets.has(target)) ctx.SceneRoot.setEyeBlinkStoppedForTarget(target, true, 0);
         if (ctx.Model.shouldShortCut && this.seekIndexBuilding) {
           // Seek-index compilation is a logical fast-forward: awaiting each
           // browser model load here serialized the whole 2000-command replay
@@ -3388,6 +3447,37 @@ export class AdvPlayer {
       const fadeIn = ctx.Model.shouldShortCut ? 0 : finite(cmd.motionFadeIn, 0);
       for (const target of targetKeys(cmd)) {
         ctx.SceneRoot.playExpressionForTarget(target, cmd.expressionName as string, fadeIn);
+      }
+    });
+
+    // Opcode 68 carries both loop directions: parameter1 "stop" (authored in
+    // mixed case) ends the loop, a motion name starts it. The stop rows may
+    // repeat the motion name; the loop itself is per target, not per clip.
+    register(ADV_COMMAND.MotionLoop, (cmd, ctx) => {
+      const fadeIn = ctx.Model.shouldShortCut ? 0 : finite(cmd.motionFadeIn, 0);
+      const stop = String(cmd.params?.[0] ?? "").toLowerCase() === "stop";
+      for (const target of targetKeys(cmd)) {
+        if (stop) ctx.SceneRoot.stopParameterLoopForTarget(target, fadeIn);
+        else if (cmd.motionName) ctx.SceneRoot.playParameterLoopForTarget(target, cmd.motionName as string, fadeIn);
+      }
+    });
+
+    register(ADV_COMMAND.EyeBlink, (cmd, ctx) => {
+      // AdvEyeBlinkCommand: "stop"/"resume" are explicit; an empty parameter
+      // toggles the session's per-name state, which a later In re-applies.
+      const mode = String(cmd.params?.[0] ?? "")
+        .trim()
+        .toLowerCase();
+      if (mode && mode !== "stop" && mode !== "resume") {
+        console.warn(`[Vega] EyeBlink ignores unknown parameter ${JSON.stringify(mode)}`);
+        return;
+      }
+      for (const target of targetKeys(cmd)) {
+        if (!target) continue;
+        const stop = mode === "stop" || (mode === "" && !ctx.Session.EyeBlinkStoppedTargets.has(target));
+        if (stop) ctx.Session.EyeBlinkStoppedTargets.add(target);
+        else ctx.Session.EyeBlinkStoppedTargets.delete(target);
+        ctx.SceneRoot.setEyeBlinkStoppedForTarget(target, stop, ctx.Model.shouldShortCut ? 0 : 0.2);
       }
     });
 
@@ -3542,7 +3632,9 @@ export class AdvPlayer {
         );
         if (!cmd.noWait && ownsPresentation() && manualAdvanceGeneration === this.manualAdvanceGeneration)
           await this.waitForReadableAdvance(
-            cmd.talkPresentation?.autoAdvanceAfterTextReveal && !preserveInstantAutoTiming ? 0 : text.text.length,
+            cmd.talkPresentation?.autoAdvanceAfterTextReveal && !preserveInstantAutoTiming
+              ? 0
+              : this.visibleTextLength(text.text, ctx.state.talk.textFormat),
             voicePlayIds,
             voicePlaybackScopeVersion,
             commandSignal,
@@ -3625,11 +3717,9 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Subtitles, async (cmd, ctx, signal) => {
-      if (ctx.Model.shouldShortCut) {
-        ctx.state.subtitles.visible = false;
-        return;
-      }
-      if (!(ctx.state.video as Record<string, unknown>)?.src) return;
+      // AdvSubtitlesCommand.Execute. The caption is logical state, kept during
+      // shortcut replay so a boundary inside a clip restores the right line.
+      // A row without a valid AdvTextID clears the caption and never waits.
       if (!hasSemanticAdvText(cmd, localizedText)) {
         clearSubtitlesState(ctx.state.subtitles);
         return;
@@ -3637,13 +3727,29 @@ export class AdvPlayer {
       const text = localizedText(cmd.text || "");
       ctx.state.subtitles.sourceText = clonePlain(cmd.text);
       updateSubtitlesState(ctx.state.subtitles, text.text, text.lang, ctx.Model.isSubtitlesEnabled);
-      if (cmd.noWait) return;
-      if (ctx.Model.isAutoEnabled)
-        await delaySeconds(
+      if (ctx.Model.shouldShortCut || cmd.noWait) return;
+      const waitSignal = signal || this.abortController.signal;
+      if (!ctx.Session.VideoPlaying) {
+        // Without a playing video the row waits like a talk line.
+        await this.waitForRead(this.visibleTextLength(text.text), 0, waitSignal);
+        return;
+      }
+      // Over a playing clip: a tap or the clip's end, then (clip still
+      // playing) a second tap; after the clip ended, auto mode lingers
+      // _waitSubtitlesLingeringTimeOnAutoPlay instead of waiting for a tap.
+      const ended = this.SceneRoot.waitVideoEnded(waitSignal).catch(() => {});
+      await Promise.race([this.Model.waitForNext(waitSignal), ended]);
+      if (waitSignal.aborted) return;
+      if (ctx.Session.VideoPlaying) {
+        await this.Model.waitForNext(waitSignal);
+      } else if (ctx.Model.isAutoEnabled) {
+        await this.delayWithSpeedAdjustment(
           finite(ctx.runtime.waitSubtitlesLingeringTimeOnAutoPlay, 0.1) / ctx.Model.getCurrentSpeedRate(),
-          this.abortController.signal,
+          waitSignal,
         );
-      else await this.Model.waitForNext(signal || this.abortController.signal);
+      } else {
+        await this.Model.waitForNext(waitSignal);
+      }
     });
 
     register(ADV_COMMAND.Bgm, async (cmd, ctx) => {
@@ -3730,19 +3836,29 @@ export class AdvPlayer {
 
     register(ADV_COMMAND.SoundVolume, async (cmd, ctx, signal) => {
       const duration = commandDuration(ctx, cmd, 0);
+      // AdvSoundVolumeCommand: empty or "all" fades Bgm and Voice; "se" is a
+      // no-op in the game. Category names are trimmed ("Voice " exists in data).
+      const rawCategory = String(param(cmd, 0) ?? "")
+        .trim()
+        .toLowerCase();
+      const categories: Array<"Bgm" | "Voice"> =
+        rawCategory === "" || rawCategory === "all"
+          ? ["Bgm", "Voice"]
+          : rawCategory === "bgm"
+            ? ["Bgm"]
+            : rawCategory === "voice"
+              ? ["Voice"]
+              : [];
+      if (!categories.length) return;
+      const volume = clamp01(optionalFinite(param(cmd, 1), 1), 1);
       if (this.seekIndexBuilding && this.seekSoundProjection) {
-        const rawCategory = String(param(cmd, 0)).trim().toLowerCase();
-        const category =
-          rawCategory === "bgm" ? "Bgm" : rawCategory === "se" ? "Se" : rawCategory === "voice" ? "Voice" : "";
-        if (category) {
-          const volumes = new Map(this.seekSoundProjection.categoryVolumes);
-          volumes.set(category, clamp01(optionalFinite(param(cmd, 1), 1), 1));
-          this.seekSoundProjection.categoryVolumes = [...volumes.entries()];
-        }
+        const volumes = new Map(this.seekSoundProjection.categoryVolumes);
+        for (const category of categories) volumes.set(category, volume);
+        this.seekSoundProjection.categoryVolumes = [...volumes.entries()];
         return;
       }
       await this.runCommandTask(cmd, async () => {
-        ctx.SoundManager.setCategoryVolume(param(cmd, 0), optionalFinite(param(cmd, 1), 1), duration);
+        for (const category of categories) ctx.SoundManager.setCategoryVolume(category, volume, duration);
         if (duration > 0) await delaySeconds(duration, signal || this.abortController.signal);
       });
     });
@@ -4268,41 +4384,49 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Delay, async (cmd, ctx, signal) => {
-      // Index compilation and other shortcut replays advance logical time
-      // without waiting on authored presentation clocks. In particular, a
-      // video timestamp must never fall through to the ordinary timer once
-      // shortcut Clip handling has hidden the video element.
+      const duration = finite(cmd.duration, 0);
+      // AdvDelayCommand reads Duration only; Parameter1 is an authoring note.
+      // Inside a clip the raw Duration advances the video timeline, also
+      // while shortcutting so a seek boundary knows its media time.
+      if (ctx.Session.ActiveClip) {
+        ctx.Session.ActiveClip = { ...ctx.Session.ActiveClip, target: ctx.Session.ActiveClip.target + Math.max(0, duration) };
+      }
       if (ctx.Model.shouldShortCut || this.seekIndexBuilding) return;
-      const authored = param(cmd, 0);
-      const video = ctx.state.video as { currentTime?: unknown; src?: unknown };
-      const inClip = Boolean(video?.src);
-      if (inClip && authored !== undefined && authored !== "") {
-        // Inside a playing clip, param[0] is an absolute video timestamp.
-        // Poll until the video clock reaches T (or the video/signal ends).
-        const target = finite(authored, 0);
-        const pollSignal = signal || this.abortController.signal;
-        const started = nowSeconds();
-        while (
-          !pollSignal.aborted &&
-          !this.disposed &&
-          Boolean((ctx.state.video as { src?: unknown }).src) &&
-          finite((ctx.state.video as { currentTime?: unknown }).currentTime, 0) < target
-        ) {
-          await delaySeconds(1 / 30, pollSignal);
-          if (nowSeconds() - started > 600) break;
-        }
+      const pollSignal = signal || this.abortController.signal;
+      if (this.videoTimeline.isActive) {
+        const until = this.videoTimeline.advance(duration);
+        // The wait holds while the player is paused (the element pauses with it).
+        const remaining = await this.videoTimeline.waitUntil(
+          until,
+          () => {
+            const clock = this.SceneRoot.videoClock?.();
+            if (clock) return clock;
+            const video = ctx.state.video as { src?: unknown; currentTime?: unknown; ended?: unknown; playing?: unknown };
+            return video?.src
+              ? { mediaTime: finite(video.currentTime, 0), paused: !video.playing, ended: Boolean(video.ended) }
+              : { mediaTime: undefined, paused: false, ended: true };
+          },
+          (frameSignal) => delaySeconds(1 / 120, frameSignal),
+          nowSeconds,
+          pollSignal,
+        );
+        if (remaining > 0) await ctx.Session.DelayTokens.delay(remaining, pollSignal);
         return;
       }
-      const sec = ctx.Model.calcDuration(finite(cmd.duration, 0), 0);
-      if (authored !== undefined && authored !== "" && !inClip) {
-        const paramSec = finite(authored, 0);
-        if (paramSec > sec) {
-          await ctx.Session.DelayTokens.delay(paramSec, signal || this.abortController.signal);
-          return;
-        }
+      if (duration <= 0) return;
+      // DelayWithPauseSpeedAdjustment: holds while paused, rescales on speed
+      // changes, and CancelDelay aborts it through the common token.
+      const cancel = ctx.Session.DelayTokens.commonDelayCancellationTokenSource.signal;
+      const link = createAbortLink(pollSignal);
+      const abort = (): void => link.abort();
+      cancel.addEventListener("abort", abort, { once: true });
+      if (cancel.aborted) link.abort();
+      try {
+        await this.delayWithSpeedAdjustment(duration / Math.max(0.01, ctx.Model.getCurrentSpeedRate()), link.signal);
+      } finally {
+        cancel.removeEventListener("abort", abort);
+        link.abort();
       }
-      if (sec <= 0) return;
-      await ctx.Session.DelayTokens.delay(sec, signal || this.abortController.signal);
     });
 
     register(ADV_COMMAND.CancelDelay, async (_cmd, ctx) => {
@@ -4537,7 +4661,7 @@ export class AdvPlayer {
         if (ctx.SoundManager && cmd.chatSound && !ctx.Model.shouldShortCut) ctx.SoundManager.playSe(cmd.chatSound);
         if (!cmd.noWait)
           await this.waitForReadableAdvance(
-            text.text.length,
+            this.visibleTextLength(text.text),
             voicePlayIds,
             voicePlaybackScopeVersion,
             signal || this.abortController.signal,
@@ -4663,17 +4787,29 @@ export class AdvPlayer {
       const clip = cmd.video || cmd.clip;
       const src = localPlaybackUrl(clip?.playableUrl || clip?.src || clip?.url, "video");
       const fade = ctx.Model.calcDuration(finite(param(cmd, 0), 0), 0);
+      const hasVideoId = hasAuthoredVideoId(cmd, src);
       if (ctx.Model.shouldShortCut) {
         this.cancelClipPlaybackWatch();
+        this.videoTimeline.end();
         await ctx.SceneRoot.hideVideo(0);
         ctx.Session.CurrentVideoInfo = null;
         ctx.Session.VideoPlaying = false;
         ctx.Session.FlowParameters.setClipVideoPlaying(false);
         ctx.Session.FlowParameters.setClipSkip(false);
+        // Keep the logical clip so a boundary inside it restores the video.
+        // As in live playback, a Clip row while one is active stops it.
+        ctx.Session.ActiveClip =
+          hasVideoId && src && !ctx.Session.ActiveClip
+            ? {
+                video: clip ? { ...clip, playableUrl: src, src } : src,
+                alpha: clamp01(optionalFinite(param(cmd, 1), 1), 1),
+                target: 0,
+              }
+            : null;
+        if (!hasVideoId) clearSubtitlesState(ctx.state.subtitles);
         return;
       }
 
-      const hasVideoId = hasAuthoredVideoId(cmd, src);
       if (hasVideoId && !ctx.Session.VideoPlaying) {
         if (!src) throw new Error(`ADV clip video ${String(cmd.videoId)} has no resolved local asset`);
         const alpha = clamp01(optionalFinite(param(cmd, 1), 1), 1);
@@ -4682,6 +4818,7 @@ export class AdvPlayer {
         ctx.Session.CurrentVideoInfo = videoInfo;
         ctx.Session.VideoPlaying = true;
         ctx.Session.FlowParameters.setClipVideoPlaying(true);
+        ctx.Session.ActiveClip = { video: videoInfo, alpha, target: 0 };
         try {
           await ctx.SceneRoot.showVideo(videoInfo, fade, 0, ctx.Model.getCurrentSpeedRate(), signal, alpha);
         } catch (error) {
@@ -4693,6 +4830,7 @@ export class AdvPlayer {
           throw error;
         }
         if (this.disposed || signal?.aborted || ctx.Session.CurrentVideoInfo !== videoInfo) return;
+        this.videoTimeline.begin(videoInfo, this.SceneRoot.videoClock?.()?.mediaTime ?? 0);
         this.watchClipPlaybackCompletion(videoInfo);
         return;
       }
@@ -4709,6 +4847,8 @@ export class AdvPlayer {
         );
       }
       this.cancelClipPlaybackWatch();
+      this.videoTimeline.end();
+      ctx.Session.ActiveClip = null;
       await ctx.SceneRoot.hideVideo(fade);
       ctx.Session.CurrentVideoInfo = null;
       ctx.Session.VideoPlaying = false;
@@ -4839,7 +4979,9 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.TalkWindow, async (cmd, ctx) => {
-      ctx.state.talk.window = cmd.talkWindow || "default";
+      // The pipeline carries the window prefab in TargetAssetName
+      // ("UICenterTalkWindow" / "UIDefaultTalkWindow").
+      ctx.state.talk.window = cmd.talkWindow || (cmd.targetAssetName as string | undefined) || "default";
     });
 
     register(ADV_COMMAND.StageEnv, async (cmd, ctx) => {

@@ -14,7 +14,8 @@ export type AdvBaseQualityMode = (typeof AdvBaseQualityMode)[keyof typeof AdvBas
  * The asset lists the fields Best -> Worst; these tables intentionally follow
  * the enum's Worst -> Best numeric order.
  */
-export const ADV_TARGET_FRAME_RATE_BY_QUALITY = [30, 30, 45, 60, 60] as const;
+// AdvPlayerSettings (Intl 1.0.1 unity.sqlite): the ADV runs at 30 fps on every tier.
+export const ADV_TARGET_FRAME_RATE_BY_QUALITY = [30, 30, 30, 30, 30] as const;
 export const ADV_RENDER_SCALE_BY_QUALITY = [1, 1, 1, 1, 1] as const;
 
 export type AdvQualityNumberTable = readonly [number, number, number, number, number];
@@ -27,7 +28,7 @@ export type AdvQualityNumberTable = readonly [number, number, number, number, nu
 // blur, and post stack take the same fully enabled branch as a
 // High-scored Unity device. Hosts can still select any serialized mode.
 export const DETERMINISTIC_BROWSER_BASE_QUALITY_MODE = AdvBaseQualityMode.High;
-export const DETERMINISTIC_BROWSER_TARGET_FRAME_RATE = 60;
+export const DETERMINISTIC_BROWSER_TARGET_FRAME_RATE = 30;
 
 export function normalizeBaseQualityMode(value: unknown): AdvBaseQualityMode {
   const mode = Number(value);

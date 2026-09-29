@@ -302,12 +302,13 @@ export const DEFAULT_ADV_RUNTIME = Object.freeze({
   rendererResolutionScale: 1,
   renderScaleByQuality: ADV_RENDER_SCALE_BY_QUALITY,
   rendererResolutionMax: 3,
-  rendererPixelCountMax: 10_000_000,
+  // The game renders the ADV at 1920x1080 (render scale 1.0). Allow modest
+  // supersampling for high-DPI text sharpness, not 4K-class fill.
+  rendererPixelCountMax: 2_600_000,
   // Deterministic browser mode keeps Unity's authored render scale.
   // Adaptive scaling remains available as an explicit host opt-in.
   adaptiveRenderScaleEnabled: false,
   adaptiveRenderScaleMin: 0.72,
-  // AdvPlayerSettings.asset assigns 60 fps to High.
   targetFrameRate: DETERMINISTIC_BROWSER_TARGET_FRAME_RATE,
   targetFrameRateByQuality: ADV_TARGET_FRAME_RATE_BY_QUALITY,
   lowTargetFrameRate: 30,

@@ -76,23 +76,13 @@ export type {
 export * from "./engine/plugins";
 export * from "./marketplace";
 export { advCommandGroupCommands, resolveAdvCommandGroup, sortAdvCommandGroupActions } from "./core/AdvCommandGroup";
-export { advTextRenderSource, createAdvTextRenderValue } from "./core/AdvTextRenderValue";
-export type { AdvTextRenderMetadata, AdvTextRenderValue } from "./core/AdvTextRenderValue";
+export { advTextRenderSource, createAdvTextRenderValue, DEFAULT_ADV_TEXT_METRICS, VEGA_TEXT_METRICS } from "./core/AdvTextRenderValue";
+export type { AdvTextMetrics, AdvTextRenderMetadata, AdvTextRenderValue } from "./core/AdvTextRenderValue";
 export { AdvCommandGroupScheduler } from "./core/AdvCommandGroupScheduler";
 export type { AdvCommandGroupSchedulerOptions } from "./core/AdvCommandGroupScheduler";
 export { hasSemanticAdvText, splitAdvTargetNames } from "./core/AdvCommandText";
 export { flattenAdvCommands, iterateAdvCommands } from "./core/AdvCommandTraversal";
 export { AdvPlaybackSession } from "./core/AdvPlaybackSession";
-export { advTextSizePercent, advTextLengthCss, parseAdvRichText } from "./core/AdvRichText";
-export type {
-  AdvRichTextBreakNode,
-  AdvRichTextNode,
-  AdvRichTextRubyNode,
-  AdvRichTextSizeNode,
-  AdvRichTextStyleNode,
-  AdvRichTextSpaceNode,
-  AdvRichTextTextNode,
-} from "./core/AdvRichText";
 export { AdvPlayer } from "./core/AdvPlayer";
 export { AdvPlayerModel } from "./core/AdvPlayerModel";
 export { AdvPlayableDirector, sortAdvTimelineSignals } from "./core/AdvPlayableDirector";

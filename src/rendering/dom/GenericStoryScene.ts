@@ -1344,6 +1344,21 @@ export class GenericStoryScene implements StorySceneBackend {
     this.applyCharacterPresentation(character);
   }
 
+  /** Opcode 68: static portraits have no parameter loop; keep the name visible for the DOM portrait. */
+  playParameterLoopForTarget(target: string, motionName: string, fadeIn = 0, expectedIdentity?: string): void {
+    this.playMotionForTarget(target, motionName, fadeIn, expectedIdentity);
+  }
+
+  stopParameterLoopForTarget(target: string, _fadeOut?: number, _expectedIdentity?: string): void {
+    const character = this.characters.get(target);
+    if (character) character.host.dataset.motion = "";
+  }
+
+  setEyeBlinkStoppedForTarget(target: string, stopped: boolean, transitionSeconds = 0, _expectedIdentity?: string): void {
+    const character = this.characters.get(target);
+    void character?.model.setEyeBlinkStopped?.(stopped, transitionSeconds);
+  }
+
   playExpressionForTarget(target: string, expressionName = "", _fadeIn = -1, expectedIdentity?: string): void {
     const character = this.characters.get(target);
     const pending = this.pendingCharacters.get(target);
@@ -1700,7 +1715,7 @@ export class GenericStoryScene implements StorySceneBackend {
   async showVideo(
     video: AdvVideoEntry | string,
     fadeIn = 0,
-    startRatio = 0,
+    startSeconds = 0,
     playbackRate = 1,
     signal?: AbortSignal,
     alpha = 1,
@@ -1728,9 +1743,20 @@ export class GenericStoryScene implements StorySceneBackend {
     this.setVideoLayout(this.state.video.layout);
     this.videoLease = lease;
     await this.waitForVideoReady(element, HTMLMediaElement.HAVE_FUTURE_DATA, "canplay", signal);
-    if (startRatio > 0 && Number.isFinite(element.duration)) element.currentTime = element.duration * clamp(startRatio);
+    if (startSeconds > 0)
+      element.currentTime = Number.isFinite(element.duration)
+        ? Math.min(startSeconds, Math.max(0, element.duration - 0.001))
+        : startSeconds;
     await element.play();
-    await setTransition(element, "opacity", String(clamp(alpha)), this.deterministicReplay ? 0 : fadeIn, signal);
+    void setTransition(element, "opacity", String(clamp(alpha)), this.deterministicReplay ? 0 : fadeIn, signal).catch(
+      () => {},
+    );
+  }
+
+  videoClock(): { mediaTime: number; paused: boolean; ended: boolean; failed: boolean } | undefined {
+    const video = this.video;
+    if (!video) return undefined;
+    return { mediaTime: video.currentTime, paused: video.paused, ended: video.ended, failed: Boolean(video.error) };
   }
 
   async fadeVideo(alpha: number, duration = 0): Promise<void> {

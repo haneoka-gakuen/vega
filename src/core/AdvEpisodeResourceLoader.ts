@@ -1364,6 +1364,10 @@ function recordAnimationCommandUsage(usage: CharacterAnimationUsage, command: Ad
   } else if (opcode === ADV_COMMAND.Expression) {
     const expressionName = firstStringValue(command.expressionName);
     if (expressionName) usage.expressions.add(expressionName);
+  } else if (opcode === ADV_COMMAND.MotionLoop) {
+    // Opcode 68 loops a motion clip; warm it with the ordinary motions.
+    const motionName = firstStringValue(command.motionName);
+    if (motionName) usage.motions.add(motionName);
   }
   if (commandInvokesCharacterPresentation(command)) {
     const motionName = firstStringValue(command.characterPresentation?.motionName);
@@ -1391,7 +1395,10 @@ function commandInvokesCharacterPresentation(command: AdvCommand): boolean {
 function commandHasCharacterAnimation(command: AdvCommand): boolean {
   const opcode = Number(command.command);
   return (
-    opcode === ADV_COMMAND.Motion || opcode === ADV_COMMAND.Expression || commandInvokesCharacterPresentation(command)
+    opcode === ADV_COMMAND.Motion ||
+    opcode === ADV_COMMAND.MotionLoop ||
+    opcode === ADV_COMMAND.Expression ||
+    commandInvokesCharacterPresentation(command)
   );
 }
 

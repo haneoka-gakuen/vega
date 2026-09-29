@@ -54,7 +54,10 @@ export interface VegaShellSnapshot {
 }
 
 export interface VegaShellController {
+  /** Full snapshot: clones saves and backlog. Prefer the getters for per-frame reads. */
   snapshot(): VegaShellSnapshot;
+  readonly currentScreen?: VegaShellScreen;
+  readonly currentSettings?: Readonly<VegaNarrativeSettings>;
   subscribe(listener: (snapshot: VegaShellSnapshot) => void): VegaDisposable;
   start(): Promise<void>;
   continue(): Promise<void>;

@@ -23,18 +23,8 @@ export {
   evaluateAdvChatOutExpo,
 } from "./core/AdvChatTransition";
 export type { AdvChatWindowTransitionKind } from "./core/AdvChatTransition";
-export { advTextSizePercent, advTextLengthCss, parseAdvRichText } from "./core/AdvRichText";
-export type {
-  AdvRichTextBreakNode,
-  AdvRichTextNode,
-  AdvRichTextRubyNode,
-  AdvRichTextSizeNode,
-  AdvRichTextStyleNode,
-  AdvRichTextSpaceNode,
-  AdvRichTextTextNode,
-} from "./core/AdvRichText";
-export { advTextRenderSource, createAdvTextRenderValue } from "./core/AdvTextRenderValue";
-export type { AdvTextRenderMetadata, AdvTextRenderValue } from "./core/AdvTextRenderValue";
+export { advTextRenderSource, createAdvTextRenderValue, DEFAULT_ADV_TEXT_METRICS, VEGA_TEXT_METRICS } from "./core/AdvTextRenderValue";
+export type { AdvTextMetrics, AdvTextRenderMetadata, AdvTextRenderValue } from "./core/AdvTextRenderValue";
 export {
   estimateVegaVisemeFrame,
   type VegaViseme,

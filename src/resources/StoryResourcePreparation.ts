@@ -228,11 +228,13 @@ export const runtimeStoryResourcePreparer: StoryResourcePreparer = Object.freeze
         runtime.chatAssets?.masters?.[String(command.targetChatID ?? "")] ??
         runtime.chatAssets?.presetsByRef?.[String(command.chatPresetRef ?? "")];
       const isChatCommand = Boolean(
-        command.targetChatID !== undefined ||
-        command.chatMemoryId ||
-        command.chatWindowAssetName ||
-        command.chatIconAssetName ||
-        master,
+        // Authored exports carry `targetChatID: 0` on every command; only a
+        // positive id selects a MasterAdvChat preset at playback time.
+        Number(command.targetChatID) > 0 ||
+          command.chatMemoryId ||
+          command.chatWindowAssetName ||
+          command.chatIconAssetName ||
+          master,
       );
       if (!isChatCommand) continue;
       const reference = String(

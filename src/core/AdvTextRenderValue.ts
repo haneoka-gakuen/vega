@@ -1,3 +1,5 @@
+import { defineVegaService } from "../engine/plugins";
+
 /** Plugin-neutral metadata attached to authored story text. */
 export interface AdvTextRenderMetadata {
   /** Explicit renderer format. Legacy ADV markup remains the default. */
@@ -41,3 +43,54 @@ export const advTextRenderSource = (value: unknown): string => {
   }
   return typeof value === "string" ? value : String(value ?? "");
 };
+
+/**
+ * Format-owned text measurements the interpreter needs without knowing any
+ * markup grammar: typewriter reveal and auto-advance reading time.
+ */
+export interface AdvTextMetrics {
+  /** Visible units (glyphs) of `source` in `format`. */
+  visibleLength(source: string, format: string): number;
+  /** Well-formed prefix of `source` revealing `units` visible units. */
+  sliceVisible(source: string, units: number, format: string): string;
+}
+
+/**
+ * Grammar-agnostic fallback: angle-bracket spans are treated as markup that
+ * reveals atomically; everything else is one unit per code point.
+ */
+export const DEFAULT_ADV_TEXT_METRICS: AdvTextMetrics = Object.freeze({
+  visibleLength(source: string): number {
+    let count = 0;
+    for (let index = 0; index < source.length; ) {
+      if (source[index] === "<") {
+        const end = source.indexOf(">", index);
+        if (end < 0) break;
+        index = end + 1;
+        continue;
+      }
+      index += (source.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
+      count += 1;
+    }
+    return count;
+  },
+  sliceVisible(source: string, units: number): string {
+    let count = 0;
+    let index = 0;
+    while (index < source.length) {
+      if (source[index] === "<") {
+        const end = source.indexOf(">", index);
+        if (end < 0) break;
+        index = end + 1;
+        continue;
+      }
+      if (count >= units) break;
+      index += (source.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
+      count += 1;
+    }
+    return source.slice(0, index);
+  },
+});
+
+/** Service a text plugin provides so the interpreter can measure its markup. */
+export const VEGA_TEXT_METRICS = defineVegaService<AdvTextMetrics>("vega.text-metrics.v1");
