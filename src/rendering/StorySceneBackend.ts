@@ -349,6 +349,11 @@ export interface StorySceneBackend {
   fadeVideo(alpha: number, duration?: number): Promise<void>;
   hideVideo(fadeOut?: number): Promise<void>;
   skipVideo(): boolean;
+  /**
+   * Raw media-only seek for renderer-owned Movie playback. Logical Clips must
+   * be sought through AdvPlayer.seekTo()/the indexed story path so command
+   * cursor, cumulative media targets, and subtitles are restored together.
+   */
   seekVideoRatio(ratio: unknown): boolean;
   waitVideoEnded(signal?: AbortSignal): Promise<void>;
 

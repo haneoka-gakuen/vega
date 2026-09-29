@@ -2766,6 +2766,11 @@ export class AdvPlayer {
   }
 
   seekVideoRatio(ratio: unknown) {
+    // A Clip's subtitles are admitted by the command interpreter at indexed
+    // media targets. Assigning currentTime alone cannot reconstruct that
+    // cursor, so raw media scrubbing is intentionally unavailable for Clips;
+    // callers must use resolveSeekRatio() + seekTo() instead.
+    if (this.Session.ActiveClip || this.Session.FlowParameters.isClipVideoPlaying) return false;
     return this.SceneRoot.seekVideoRatio(ratio);
   }
 
