@@ -286,7 +286,12 @@ export interface StorySceneBackend {
   /** Opcode 68 "stop": end the target's parameter loop with its authored fade-out. */
   stopParameterLoopForTarget(target: string, fadeOut?: number, expectedIdentity?: string): void;
   /** Opcode 69: stop auto eye blink (lids ease open over `transitionSeconds`) or resume it. */
-  setEyeBlinkStoppedForTarget(target: string, stopped: boolean, transitionSeconds?: number, expectedIdentity?: string): void;
+  setEyeBlinkStoppedForTarget(
+    target: string,
+    stopped: boolean,
+    transitionSeconds?: number,
+    expectedIdentity?: string,
+  ): void;
   setCharacterPaused(target: string, paused: boolean): void;
   setCharacterForward(positionType: number): void;
   setCharacterBack(positionType: number): void;
@@ -339,6 +344,8 @@ export interface StorySceneBackend {
   ): Promise<void>;
   /** Live clock of the shown video (read directly, not the per-frame state copy). */
   videoClock?(): { mediaTime: number; paused: boolean; ended: boolean; failed?: boolean } | undefined;
+  /** Pause/resume the current element without replacing its media clock. */
+  setVideoPaused?(paused: boolean): void;
   fadeVideo(alpha: number, duration?: number): Promise<void>;
   hideVideo(fadeOut?: number): Promise<void>;
   skipVideo(): boolean;

@@ -746,6 +746,8 @@ export class AdvPlayer {
   private readonly characterDoFCommandOwners: Map<number, AdvCharacterDoFCommandOwner>;
   private shakeWaitController: AbortController | null;
   private clipPlaybackController: AbortController | null;
+  private clipStartupController: AbortController | null = null;
+  private clipPlaybackError: Error | null = null;
   private readonly textMetrics: AdvTextMetrics;
   /** Visible length of talk markup in its authored format. */
   private visibleTextLength(source: string, format?: string): number {
@@ -1092,6 +1094,7 @@ export class AdvPlayer {
   }
 
   executeCommandAtIndex(commands: AdvCommand[], index: number, signal: AbortSignal): Promise<void> | void {
+    if (this.clipPlaybackError && !this.Model.shouldShortCut) throw this.clipPlaybackError;
     const authoredCommand = commands[index];
     const cmd = authoredCommand ? interpolateNarrativeCommand(authoredCommand, this.narrativeStore) : authoredCommand;
     if (!this.seekIndexBuilding) this.Loader.advanceTo(index);
@@ -1678,6 +1681,10 @@ export class AdvPlayer {
       signal?: AbortSignal;
     } = {},
   ): Promise<number> {
+    this.cancelClipStartup();
+    this.cancelClipPlaybackWatch();
+    this.videoTimeline.end();
+    this.clipPlaybackError = null;
     this.restoredDialoguePending = false;
     this.cancelAutoAdvance();
     this.commandGroupScheduler.cancelAll();
@@ -1929,8 +1936,7 @@ export class AdvPlayer {
             state: this.captureSeekPlayerState(),
           }
         : this.seekIndexFor(this.Session.choiceRecords).checkpoints.get(this.lastSettledSeekBoundary)) as
-        | StorySeekCheckpoint
-        | undefined);
+        StorySeekCheckpoint | undefined);
     if (!rollback) throw new Error("The current scene has no recoverable seek boundary");
     const controller = createAbortLink(this.abortController.signal);
     let resolve = previousSeek?.resolve ?? (() => {});
@@ -2024,6 +2030,9 @@ export class AdvPlayer {
       const request = this.activeSeek;
       try {
         await this.restoreExactSeekTarget(request.target, undefined, request.controller.signal);
+        this.Model.isPause = request.paused;
+        this.state.paused = request.paused;
+        await this.resumeActiveClip(request.controller.signal);
         if (request.controller.signal.aborted) throw request.controller.signal.reason;
       } catch (error) {
         if (this.disposed) return;
@@ -2121,6 +2130,9 @@ export class AdvPlayer {
   }
 
   unblockForSeek() {
+    this.cancelClipStartup();
+    this.cancelClipPlaybackWatch();
+    this.videoTimeline.end();
     this.playbackCommandController?.abort();
     this.SceneRoot.setDeterministicReplayActive(true);
     this.armSeekReplayWatchdog();
@@ -2273,6 +2285,12 @@ export class AdvPlayer {
     controller?.abort();
   }
 
+  private cancelClipStartup(): void {
+    const controller = this.clipStartupController;
+    this.clipStartupController = null;
+    controller?.abort();
+  }
+
   private watchClipPlaybackCompletion(videoInfo: unknown): void {
     this.cancelClipPlaybackWatch();
     const controller = createAbortLink(this.abortController.signal);
@@ -2290,7 +2308,16 @@ export class AdvPlayer {
       this.Session.VideoPlaying = false;
       this.Session.FlowParameters.setClipVideoPlaying(false);
       this.Session.FlowParameters.setClipSkip(false);
-      this.videoTimeline.end(videoInfo);
+      // Keep the terminal observation available to the pending Delay. Ending
+      // its owner here would conflate media failure/end with reaching a cue.
+      clearSubtitlesState(this.state.subtitles);
+      if (this.SceneRoot.videoClock) {
+        const clock = this.SceneRoot.videoClock();
+        if (!clock || clock.failed) {
+          this.clipPlaybackError = new Error(clock?.failed ? "Clip playback failed" : "Clip was detached");
+          this.state.error = this.clipPlaybackError.message;
+        }
+      }
     });
   }
 
@@ -2338,29 +2365,59 @@ export class AdvPlayer {
    * target and resume its Delay timeline there, instead of continuing with
    * no video and wall-clock delays.
    */
-  private resumeActiveClip(): void {
+  private async resumeActiveClip(signal?: AbortSignal): Promise<void> {
     const clip = this.Session.ActiveClip;
     if (!clip || this.disposed) return;
-    const videoInfo = clip.video;
+    await this.startClipPlayback(clip.video, clip.alpha, clip.target, 0, signal);
+  }
+
+  private async startClipPlayback(
+    videoInfo: unknown,
+    alpha: number,
+    target: number,
+    fade: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    this.cancelClipStartup();
     this.cancelClipPlaybackWatch();
+    this.videoTimeline.end();
+    this.clipPlaybackError = null;
+    const controller = createAbortLink(this.abortController.signal, signal);
+    this.clipStartupController = controller;
     this.Session.CurrentVideoInfo = videoInfo;
     this.Session.VideoPlaying = true;
     this.Session.FlowParameters.setClipVideoPlaying(true);
-    // Begin now so Delays issued while the element loads wait on its clock.
-    this.videoTimeline.begin(videoInfo, clip.target, clip.target);
-    const signal = this.abortController.signal;
-    void this.SceneRoot.showVideo(videoInfo as AdvVideoEntry | string, 0, clip.target, this.Model.getCurrentSpeedRate(), signal, clip.alpha)
-      .then(() => {
-        if (this.disposed || this.Session.CurrentVideoInfo !== videoInfo) return;
-        this.watchClipPlaybackCompletion(videoInfo);
-      })
-      .catch((error: unknown) => {
-        if (this.Session.CurrentVideoInfo !== videoInfo) return;
+    try {
+      await this.SceneRoot.showVideo(
+        videoInfo as AdvVideoEntry | string,
+        fade,
+        target,
+        this.Model.getCurrentSpeedRate(),
+        controller.signal,
+        alpha,
+      );
+      if (this.disposed || controller.signal.aborted || this.clipStartupController !== controller) return;
+      // The requested media origin is zero, even if play() resolves after
+      // the first frame. Do not add startup latency to all authored cues.
+      this.videoTimeline.begin(videoInfo, target, target);
+      this.watchClipPlaybackCompletion(videoInfo);
+    } catch (error) {
+      if (controller.signal.aborted || this.clipStartupController !== controller) return;
+      if (this.Session.CurrentVideoInfo === videoInfo) {
         this.videoTimeline.end(videoInfo);
+        this.Session.CurrentVideoInfo = null;
+        this.Session.ActiveClip = null;
         this.Session.VideoPlaying = false;
         this.Session.FlowParameters.setClipVideoPlaying(false);
-        if (!signal.aborted) console.warn("[Vega] clip could not resume after seek", error);
-      });
+        clearSubtitlesState(this.state.subtitles);
+        this.clipPlaybackError = error instanceof Error ? error : new Error(String(error));
+        this.state.error = this.clipPlaybackError.message;
+      }
+      throw error;
+    } finally {
+      if (this.clipStartupController === controller) this.clipStartupController = null;
+      controller.abort();
+    }
   }
 
   maybeFinishActiveSeek(_commands: AdvCommand[]) {
@@ -2369,7 +2426,6 @@ export class AdvPlayer {
     this.activeSeek = null;
     try {
       this.finishSeekRestoration(seek.target, seek.paused);
-      this.resumeActiveClip();
       seek.resolve();
     } catch (error) {
       seek.reject(error);
@@ -2434,6 +2490,7 @@ export class AdvPlayer {
     this.cancelDoFCommandOwners();
     this.cancelShakeWait();
     this.cancelClipPlaybackWatch();
+    this.cancelClipStartup();
     this.choiceResolver?.(ABORTED_CHOICE);
     this.choiceResolver = null;
     this.releasePlaybackResumeWaiters();
@@ -2587,12 +2644,14 @@ export class AdvPlayer {
     if (this.activeSeek) this.activeSeek.paused = true;
     this.Model.isPause = true;
     this.state.paused = true;
+    this.SceneRoot.setVideoPaused?.(true);
   }
 
   resume() {
     if (this.activeSeek) this.activeSeek.paused = false;
     this.Model.isPause = false;
     this.state.paused = false;
+    this.SceneRoot.setVideoPaused?.(false);
     this.releasePlaybackResumeWaiters();
   }
 
@@ -2681,6 +2740,21 @@ export class AdvPlayer {
   skipCurrentVideo(): boolean {
     if (this.disposed || !this.SceneRoot.skipVideo()) return false;
     this.cancelAutoAdvance();
+    if (this.Session.ActiveClip) {
+      // A clip skip retires its cue stream at the matching next Clip row.
+      // Cancelling just the media wait would admit later subtitles without
+      // a picture, while retaining the delay would strand the skip.
+      const commands = this.story.commands || [];
+      const stop = commands.findIndex(
+        (command, index) => index >= this.Model.CurrentEpisodeListIndex && Number(command.command) === ADV_COMMAND.Clip,
+      );
+      this.cancelClipStartup();
+      this.cancelClipPlaybackWatch();
+      this.videoTimeline.end();
+      clearSubtitlesState(this.state.subtitles);
+      this.Model.CurrentEpisodeListIndex = stop >= 0 ? stop : commands.length;
+      this.playbackCommandController?.abort();
+    }
     this.Session.FlowParameters.setClipSkip(true);
     this.Session.FlowParameters.setClipVideoPlaying(false);
     this.Session.VideoPlaying = false;
@@ -3740,6 +3814,7 @@ export class AdvPlayer {
       const ended = this.SceneRoot.waitVideoEnded(waitSignal).catch(() => {});
       await Promise.race([this.Model.waitForNext(waitSignal), ended]);
       if (waitSignal.aborted) return;
+      if (this.clipPlaybackError) throw this.clipPlaybackError;
       if (ctx.Session.VideoPlaying) {
         await this.Model.waitForNext(waitSignal);
       } else if (ctx.Model.isAutoEnabled) {
@@ -4385,32 +4460,47 @@ export class AdvPlayer {
 
     register(ADV_COMMAND.Delay, async (cmd, ctx, signal) => {
       const duration = finite(cmd.duration, 0);
-      // AdvDelayCommand reads Duration only; Parameter1 is an authoring note.
-      // Inside a clip the raw Duration advances the video timeline, also
+      // Inside a clip the raw Duration advances the media timeline, also
       // while shortcutting so a seek boundary knows its media time.
       if (ctx.Session.ActiveClip) {
-        ctx.Session.ActiveClip = { ...ctx.Session.ActiveClip, target: ctx.Session.ActiveClip.target + Math.max(0, duration) };
+        ctx.Session.ActiveClip = {
+          ...ctx.Session.ActiveClip,
+          target: ctx.Session.ActiveClip.target + Math.max(0, duration),
+        };
       }
       if (ctx.Model.shouldShortCut || this.seekIndexBuilding) return;
       const pollSignal = signal || this.abortController.signal;
       if (this.videoTimeline.isActive) {
         const until = this.videoTimeline.advance(duration);
         // The wait holds while the player is paused (the element pauses with it).
-        const remaining = await this.videoTimeline.waitUntil(
+        const result = await this.videoTimeline.waitUntil(
           until,
           () => {
-            const clock = this.SceneRoot.videoClock?.();
-            if (clock) return clock;
-            const video = ctx.state.video as { src?: unknown; currentTime?: unknown; ended?: unknown; playing?: unknown };
+            if (this.SceneRoot.videoClock) {
+              return this.SceneRoot.videoClock() ?? { mediaTime: undefined, paused: false, ended: false };
+            }
+            const video = ctx.state.video as {
+              src?: unknown;
+              currentTime?: unknown;
+              ended?: unknown;
+              playing?: unknown;
+            };
             return video?.src
               ? { mediaTime: finite(video.currentTime, 0), paused: !video.playing, ended: Boolean(video.ended) }
               : { mediaTime: undefined, paused: false, ended: true };
           },
-          (frameSignal) => delaySeconds(1 / 120, frameSignal),
-          nowSeconds,
+          (frameSignal) => delaySeconds(1 / 60, frameSignal),
           pollSignal,
         );
-        if (remaining > 0) await ctx.Session.DelayTokens.delay(remaining, pollSignal);
+        if (result !== "reached" && result !== "cancelled") {
+          clearSubtitlesState(ctx.state.subtitles);
+          ctx.Session.VideoPlaying = false;
+          ctx.Session.FlowParameters.setClipVideoPlaying(false);
+          const error = new Error(`Clip ${result} before subtitle time ${until.toFixed(3)}s`);
+          this.clipPlaybackError = error;
+          ctx.state.error = error.message;
+          throw error;
+        }
         return;
       }
       if (duration <= 0) return;
@@ -4789,6 +4879,7 @@ export class AdvPlayer {
       const fade = ctx.Model.calcDuration(finite(param(cmd, 0), 0), 0);
       const hasVideoId = hasAuthoredVideoId(cmd, src);
       if (ctx.Model.shouldShortCut) {
+        this.cancelClipStartup();
         this.cancelClipPlaybackWatch();
         this.videoTimeline.end();
         await ctx.SceneRoot.hideVideo(0);
@@ -4814,24 +4905,8 @@ export class AdvPlayer {
         if (!src) throw new Error(`ADV clip video ${String(cmd.videoId)} has no resolved local asset`);
         const alpha = clamp01(optionalFinite(param(cmd, 1), 1), 1);
         const videoInfo = clip ? { ...clip, playableUrl: src, src } : src;
-        this.cancelClipPlaybackWatch();
-        ctx.Session.CurrentVideoInfo = videoInfo;
-        ctx.Session.VideoPlaying = true;
-        ctx.Session.FlowParameters.setClipVideoPlaying(true);
         ctx.Session.ActiveClip = { video: videoInfo, alpha, target: 0 };
-        try {
-          await ctx.SceneRoot.showVideo(videoInfo, fade, 0, ctx.Model.getCurrentSpeedRate(), signal, alpha);
-        } catch (error) {
-          if (ctx.Session.CurrentVideoInfo === videoInfo) {
-            ctx.Session.CurrentVideoInfo = null;
-            ctx.Session.VideoPlaying = false;
-            ctx.Session.FlowParameters.setClipVideoPlaying(false);
-          }
-          throw error;
-        }
-        if (this.disposed || signal?.aborted || ctx.Session.CurrentVideoInfo !== videoInfo) return;
-        this.videoTimeline.begin(videoInfo, this.SceneRoot.videoClock?.()?.mediaTime ?? 0);
-        this.watchClipPlaybackCompletion(videoInfo);
+        await this.startClipPlayback(videoInfo, alpha, 0, fade, signal);
         return;
       }
 
@@ -4847,6 +4922,7 @@ export class AdvPlayer {
         );
       }
       this.cancelClipPlaybackWatch();
+      this.cancelClipStartup();
       this.videoTimeline.end();
       ctx.Session.ActiveClip = null;
       await ctx.SceneRoot.hideVideo(fade);

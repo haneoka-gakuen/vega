@@ -1354,7 +1354,12 @@ export class GenericStoryScene implements StorySceneBackend {
     if (character) character.host.dataset.motion = "";
   }
 
-  setEyeBlinkStoppedForTarget(target: string, stopped: boolean, transitionSeconds = 0, _expectedIdentity?: string): void {
+  setEyeBlinkStoppedForTarget(
+    target: string,
+    stopped: boolean,
+    transitionSeconds = 0,
+    _expectedIdentity?: string,
+  ): void {
     const character = this.characters.get(target);
     void character?.model.setEyeBlinkStopped?.(stopped, transitionSeconds);
   }
