@@ -1936,7 +1936,8 @@ export class AdvPlayer {
             state: this.captureSeekPlayerState(),
           }
         : this.seekIndexFor(this.Session.choiceRecords).checkpoints.get(this.lastSettledSeekBoundary)) as
-        StorySeekCheckpoint | undefined);
+        | StorySeekCheckpoint
+        | undefined);
     if (!rollback) throw new Error("The current scene has no recoverable seek boundary");
     const controller = createAbortLink(this.abortController.signal);
     let resolve = previousSeek?.resolve ?? (() => {});
@@ -3943,36 +3944,14 @@ export class AdvPlayer {
       });
     });
 
-    register(ADV_COMMAND.FadeOut, (cmd, ctx, signal) => {
-      return this.runCommandTask(cmd, async () => {
-        const color = htmlColor(param(cmd, 0), "#000000");
-        const duration = commandDuration(ctx, cmd, 0);
-        const transitionGeneration = ++this.coverTransitionGeneration;
-        const rule = cmd.ruleTransition || (ctx.runtime.defaultRuleTransition as AdvRuleTransitionEntry | undefined);
-        if (rule && (rule.texture || rule.maskTexture || rule.gradient != null)) {
-          await ctx.SceneRoot.runRuleTransition(rule, color, duration, true);
-          if (
-            this.disposed ||
-            signal?.aborted ||
-            this.abortController.signal.aborted ||
-            transitionGeneration !== this.coverTransitionGeneration
-          )
-            return;
-          ctx.SceneRoot.stopCommandEffects();
-          ctx.state.effect = null;
-          return;
-        }
-        const from = ctx.state.cover.opacity;
-        await tween({
-          duration,
-          ease: resolveEase(param(cmd, 1), 6),
-          signal: signal || this.abortController.signal,
-          update: (t) => {
-            if (transitionGeneration !== this.coverTransitionGeneration) return;
-            ctx.state.cover.opacity = lerp(from, 1, t);
-            ctx.SceneRoot.setCover(color, ctx.state.cover.opacity);
-          },
-        });
+    register(ADV_COMMAND.FadeOut, async (cmd, ctx, signal) => {
+      // FadeOut completes its transition before playback advances.
+      const color = htmlColor(param(cmd, 0), "#000000");
+      const duration = commandDuration(ctx, cmd, 0);
+      const transitionGeneration = ++this.coverTransitionGeneration;
+      const rule = cmd.ruleTransition || (ctx.runtime.defaultRuleTransition as AdvRuleTransitionEntry | undefined);
+      if (rule && (rule.texture || rule.maskTexture || rule.gradient != null)) {
+        await ctx.SceneRoot.runRuleTransition(rule, color, duration, true);
         if (
           this.disposed ||
           signal?.aborted ||
@@ -3980,11 +3959,32 @@ export class AdvPlayer {
           transitionGeneration !== this.coverTransitionGeneration
         )
           return;
-        ctx.state.cover.opacity = 1;
-        ctx.SceneRoot.setCover(color, 1);
         ctx.SceneRoot.stopCommandEffects();
         ctx.state.effect = null;
+        return;
+      }
+      const from = ctx.state.cover.opacity;
+      await tween({
+        duration,
+        ease: resolveEase(param(cmd, 1), 6),
+        signal: signal || this.abortController.signal,
+        update: (t) => {
+          if (transitionGeneration !== this.coverTransitionGeneration) return;
+          ctx.state.cover.opacity = lerp(from, 1, t);
+          ctx.SceneRoot.setCover(color, ctx.state.cover.opacity);
+        },
       });
+      if (
+        this.disposed ||
+        signal?.aborted ||
+        this.abortController.signal.aborted ||
+        transitionGeneration !== this.coverTransitionGeneration
+      )
+        return;
+      ctx.state.cover.opacity = 1;
+      ctx.SceneRoot.setCover(color, 1);
+      ctx.SceneRoot.stopCommandEffects();
+      ctx.state.effect = null;
     });
 
     register(ADV_COMMAND.FadeIn, async (cmd, ctx, signal) => {
