@@ -1,5 +1,10 @@
 import type { StoryResourceLease, StoryResourceResolver } from "../rendering/StorySceneBackend";
 import { storeStoryResourceFile, type StoryResourceFile } from "./StoryResourceFile";
+import {
+  retainOptionalStoryResourceBytes,
+  type OptionalStoryResourceOptions,
+  type StoryResourceBytesLease,
+} from "./StoryResourceAlternatives";
 
 export interface StoryResourceAdapter {
   readonly schemes: readonly string[];
@@ -121,19 +126,14 @@ const isRetryableHttpError = (error: unknown): boolean => {
   return (error as Error).name !== "AbortError";
 };
 
-const waitForSharedBytes = (
-  pending: Promise<Uint8Array>,
+const waitForSharedResource = <Value>(
+  pending: Promise<Value>,
   source: string,
   signal?: AbortSignal,
-  copy = true,
-): Promise<Uint8Array> => {
+): Promise<Value> => {
   if (signal?.aborted) return Promise.reject(abortError(source));
-  // The retained byte array is private immutable cache state. Every caller gets
-  // an owned copy so an SDK parser that writes into its input cannot corrupt a
-  // later model constructed from the same preloaded resource. A lease-only
-  // waiter does not consume the value and can skip that otherwise wasted copy.
-  if (!signal) return pending.then((bytes) => (copy ? bytes.slice() : bytes));
-  return new Promise<Uint8Array>((resolve, reject) => {
+  if (!signal) return pending;
+  return new Promise<Value>((resolve, reject) => {
     let settled = false;
     const finish = (callback: () => void): void => {
       if (settled) return;
@@ -144,11 +144,21 @@ const waitForSharedBytes = (
     const aborted = () => finish(() => reject(abortError(source)));
     signal.addEventListener("abort", aborted, { once: true });
     pending.then(
-      (bytes) => finish(() => resolve(copy ? bytes.slice() : bytes)),
+      (value) => finish(() => resolve(value)),
       (error: unknown) => finish(() => reject(error)),
     );
   });
 };
+
+const waitForSharedBytes = (
+  pending: Promise<Uint8Array>,
+  source: string,
+  signal?: AbortSignal,
+  copy = true,
+): Promise<Uint8Array> =>
+  // SDK parsers receive an owned copy; lease-only/read-only consumers reuse
+  // the canonical bytes. Storage and byte waits share cancellation semantics.
+  waitForSharedResource(pending, source, signal).then((bytes) => (copy ? bytes.slice() : bytes));
 
 export const storyResourceContentType = (source: string, bytes?: Readonly<Uint8Array>): string => {
   const embedded = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+)[;,]/iu.exec(source)?.[1];
@@ -247,6 +257,11 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     return this.acquireBytes(source, signal, false);
   }
 
+  /** Optional provider facade; format/capability selection stays with its caller. */
+  retainOptionalBytes(source: string, options: OptionalStoryResourceOptions): Promise<StoryResourceBytesLease> {
+    return retainOptionalStoryResourceBytes(this, source, options);
+  }
+
   private async acquireBytes(source: string, signal: AbortSignal | undefined, copy: boolean): Promise<Uint8Array> {
     if (signal?.aborted) throw abortError(source);
     if (!this.canLoad(source)) {
@@ -327,7 +342,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     try {
       if (!entry.file) {
         const bytes = await waitForSharedBytes(this.pendingBytes(key, entry, url), source, signal, false);
-        await this.archiveEntry(entry, bytes, key);
+        await waitForSharedResource(this.archiveEntry(entry, bytes, key), source, signal);
       }
       if (signal?.aborted) throw abortError(source);
       this.trimCache();
@@ -351,7 +366,13 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     }
     if (signal?.aborted) throw abortError(source);
     const entry = this.cache.get(url.href);
-    let blob = await entry?.file?.read().catch(() => undefined);
+    let blob = entry?.file
+      ? await waitForSharedResource(
+          entry.file.read().catch(() => undefined),
+          source,
+          signal,
+        )
+      : undefined;
     if (signal?.aborted) throw abortError(source);
     if (!blob) {
       const bytes = await this.loadSharedBytes(source, signal);
@@ -426,7 +447,9 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
         async (value) => {
           entry.settled = true;
           if (entry.controller.signal.aborted) throw abortError(key);
-          const bytes = Uint8Array.from(value);
+          // HTTP and disk readers already return owned buffers. Adapter input
+          // may be reused or mutated by its host, so isolate only that path.
+          const bytes = this.adapterFor(url) ? Uint8Array.from(value) : value;
           if (this.cache.get(key) !== entry) return bytes;
           // An individually oversized resource must not flush every useful entry
           // before being evicted itself. An active lease still takes precedence;

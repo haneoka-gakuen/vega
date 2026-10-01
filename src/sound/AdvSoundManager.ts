@@ -70,6 +70,7 @@ type ManagedHowl = {
   analyzer: VegaVoiceAnalyzer | null;
   stopTimer: ReturnType<typeof setTimeout> | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
+  loadTimer: ReturnType<typeof setTimeout> | null;
   stopping: boolean;
   playbackStarted: boolean;
   playbackSettled: boolean;
@@ -93,6 +94,10 @@ type EpisodeAudioSource = {
   readonly url: string;
   readonly release: () => void;
 };
+
+const AUDIO_LOAD_TIMEOUT_MS = 30_000;
+const MAXIMUM_WARM_HOWLS = 24;
+const MAXIMUM_WARM_DECODED_BYTES = 16 * 1024 * 1024;
 
 /** Snapshot type for save/restore of BGM state */
 export type AdvSoundSnapshot = {
@@ -514,6 +519,10 @@ export class AdvSoundManager {
     if (!canonical) return null;
     const key = audioWarmKey(category, canonical);
     const warmed = this.warmHowls.get(key);
+    if (warmed) {
+      this.warmHowls.delete(key);
+      this.warmHowls.set(key, warmed);
+    }
     if (warmed && category === "Bgm") {
       this.warmHowls.delete(key);
       try {
@@ -551,8 +560,8 @@ export class AdvSoundManager {
   }
 
   /**
-   * Load and retain one episode anchor for a distinct authored audio URL.
-   * WebAudio anchors keep decoded SE/voice buffers in Howler's shared cache;
+   * Load one recyclable anchor for a distinct authored audio URL.
+   * WebAudio anchors keep nearby SE/voice buffers in Howler's shared cache;
    * BGM anchors retain the streaming HTMLMediaElement and are consumed by play.
    */
   async preloadSound(
@@ -577,7 +586,11 @@ export class AdvSoundManager {
       return;
     }
     const resident = this.warmHowls.get(key);
-    if (resident?.state() === "loaded") return;
+    if (resident?.state() === "loaded") {
+      this.warmHowls.delete(key);
+      this.warmHowls.set(key, resident);
+      return;
+    }
     if (resident) {
       try {
         resident.unload();
@@ -605,9 +618,15 @@ export class AdvSoundManager {
     };
     const load = new Promise<void>((resolve, reject) => {
       let settled = false;
+      const timer = setTimeout(() => {
+        const error = new Error(`ADV ${category} audio preparation timed out: ${canonical}`);
+        error.name = "TimeoutError";
+        cancel(error);
+      }, AUDIO_LOAD_TIMEOUT_MS);
       const finish = (error?: Error): void => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         howl.off("load", loaded);
         howl.off("loaderror", failed);
         if (error) reject(error);
@@ -625,17 +644,57 @@ export class AdvSoundManager {
       howl.once("loaderror", failed);
       if (howl.state() === "loaded") finish();
       else howl.load();
-    }).finally(() => {
-      if (this.warmHowlLoads.get(key) === load) {
-        this.warmHowlLoads.delete(key);
-      }
-      if (this.warmHowlCancels.get(key) === cancel) {
-        this.warmHowlCancels.delete(key);
-      }
-    });
+    })
+      .catch((error: unknown) => {
+        if (this.warmHowls.get(key) === howl) {
+          this.warmHowls.delete(key);
+          this.episodeWarmKeys.delete(key);
+        }
+        if (![this.bgm, ...this.se, ...this.voices].some((entry) => entry?.howl === howl)) {
+          try {
+            howl.unload();
+          } catch {}
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.warmHowlLoads.get(key) === load) {
+          this.warmHowlLoads.delete(key);
+        }
+        if (this.warmHowlCancels.get(key) === cancel) {
+          this.warmHowlCancels.delete(key);
+        }
+        this.trimWarmHowls();
+      });
     this.warmHowlLoads.set(key, load);
     this.warmHowlCancels.set(key, cancel);
     await waitForAudioWarmup(load, signal, canonical);
+  }
+
+  /** Encoded episode files survive eviction; active playback owns its own Howl. */
+  private trimWarmHowls(): void {
+    const decodedSize = (key: string, howl: Howl): number => {
+      if (key.startsWith("Bgm\u0000")) return 0;
+      // A conservative stereo PCM estimate avoids reaching into Howler's
+      // private global buffer cache. The count budget also bounds media nodes.
+      const seconds = Number(howl.duration());
+      return Number.isFinite(seconds) && seconds > 0
+        ? seconds * (Number(Howler.ctx?.sampleRate) || 48_000) * 2 * Float32Array.BYTES_PER_ELEMENT
+        : 0;
+    };
+    let decodedBytes = 0;
+    for (const [key, howl] of this.warmHowls) decodedBytes += decodedSize(key, howl);
+    for (const [key, howl] of this.warmHowls) {
+      if (this.warmHowls.size <= MAXIMUM_WARM_HOWLS && decodedBytes <= MAXIMUM_WARM_DECODED_BYTES) break;
+      if (this.warmHowlLoads.has(key)) continue;
+      if ([this.bgm, ...this.se, ...this.voices].some((entry) => entry?.howl === howl)) continue;
+      this.warmHowls.delete(key);
+      this.episodeWarmKeys.delete(key);
+      decodedBytes -= decodedSize(key, howl);
+      try {
+        howl.unload();
+      } catch {}
+    }
   }
 
   private async resolveEpisodeAudioSource(canonical: string, signal?: AbortSignal): Promise<EpisodeAudioSource> {
@@ -740,6 +799,7 @@ export class AdvSoundManager {
       analyzer: null,
       stopTimer: null,
       cleanupTimer: null,
+      loadTimer: null,
       stopping: false,
       playbackStarted: false,
       playbackSettled: false,
@@ -750,13 +810,27 @@ export class AdvSoundManager {
     // `entry.sound` is the same object the player holds in voices[]/bgm/se, so
     // maxSoundDurationSeconds picks this up.
     const fillDuration = (): void => {
+      if (entry.loadTimer) clearTimeout(entry.loadTimer);
+      entry.loadTimer = null;
       const duration = Number(howl.duration());
       if (Number.isFinite(duration) && duration > 0 && entry.sound) {
         (entry.sound as { durationMs?: number }).durationMs = Math.round(duration * 1000);
       }
     };
     if (howl.state() === "loaded") fillDuration();
-    else howl.once("load", fillDuration);
+    else {
+      howl.once("load", fillDuration);
+      entry.loadTimer = setTimeout(() => {
+        if (entry.category === "Voice") this.settleVoicePlayback(entry.playId, "failed");
+        this.forceStopEntry(entry, false);
+      }, AUDIO_LOAD_TIMEOUT_MS);
+    }
+    const failed = (): void => {
+      if (entry.category === "Voice") this.settleVoicePlayback(entry.playId, "failed");
+      this.forceStopEntry(entry, false);
+    };
+    howl.once("loaderror", failed);
+    howl.once("playerror", failed);
     return entry;
   }
 
@@ -780,12 +854,14 @@ export class AdvSoundManager {
     this.clearBgmFade(entry);
     if (entry.stopTimer) clearTimeout(entry.stopTimer);
     if (entry.cleanupTimer) clearTimeout(entry.cleanupTimer);
+    if (entry.loadTimer) clearTimeout(entry.loadTimer);
     try {
       entry.analyzer?.dispose();
     } catch {}
     entry.analyzer = null;
     entry.stopTimer = null;
     entry.cleanupTimer = null;
+    entry.loadTimer = null;
     if (entry.category === "Bgm") {
       if (this.bgm === entry) this.bgm = null;
       if (!this.bgm) this.state.audio.bgm = "";
@@ -986,11 +1062,11 @@ export class AdvSoundManager {
     this.forceStopEntry(entry);
   }
 
-  forceStopEntry(entry: ManagedHowl) {
+  forceStopEntry(entry: ManagedHowl, recycleBgm = true) {
     if (entry.category === "Voice") this.settleVoicePlayback(entry.playId, "stopped");
     try {
       entry.howl.stop();
-      if (!this.returnBgmToWarmPool(entry)) entry.howl.unload();
+      if (!recycleBgm || !this.returnBgmToWarmPool(entry)) entry.howl.unload();
     } catch {}
     this.removeEntry(entry);
   }
@@ -1007,6 +1083,7 @@ export class AdvSoundManager {
       entry.howl.loop(true);
       entry.howl.volume(0);
       this.warmHowls.set(key, entry.howl);
+      this.trimWarmHowls();
       return true;
     } catch {
       return false;
@@ -1242,8 +1319,6 @@ export class AdvSoundManager {
         entry.howl.unload();
       } catch {}
     };
-    entry.howl.once("loaderror", fail);
-    entry.howl.once("playerror", fail);
     const markPlaybackStarted = (): void => {
       const howl = entry.howl as HowlExtended;
       const active = entry.howlId > 0 ? howl._soundById(entry.howlId) : null;

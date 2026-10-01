@@ -10,6 +10,12 @@ import type { StoryResourceResolver } from "../rendering/StorySceneBackend";
 import { isCanonicalStoryResourceUrl } from "../runtime";
 import type { StoryResolvedText } from "../runtime";
 
+export {
+  retainOptionalStoryResourceBytes,
+  type OptionalStoryResourceOptions,
+  type StoryResourceBytesLease,
+} from "./StoryResourceAlternatives";
+
 export type StoryResourceKind = "file" | "texture" | "audio" | "video" | "font";
 
 /**
@@ -231,10 +237,10 @@ export const runtimeStoryResourcePreparer: StoryResourcePreparer = Object.freeze
         // Authored exports carry `targetChatID: 0` on every command; only a
         // positive id selects a MasterAdvChat preset at playback time.
         Number(command.targetChatID) > 0 ||
-          command.chatMemoryId ||
-          command.chatWindowAssetName ||
-          command.chatIconAssetName ||
-          master,
+        command.chatMemoryId ||
+        command.chatWindowAssetName ||
+        command.chatIconAssetName ||
+        master,
       );
       if (!isChatCommand) continue;
       const reference = String(
