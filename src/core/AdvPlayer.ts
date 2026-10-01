@@ -4757,12 +4757,6 @@ export class AdvPlayer {
         const sender = targetDisplayName(cmd, ctx.runtime, localizedText);
         const text = commandText(cmd, "", localizedText);
         const soundInfos: AdvSoundEntry[] = cmd.voices || [];
-        const voicePlaybackScopeVersion = ctx.Session.beginVoicePlaybackScope();
-        ctx.SoundManager.stopVoices();
-        const voiceEntries = ctx.Model.shouldShortCut
-          ? []
-          : soundInfos.map((voice) => ctx.SoundManager.playVoice(voice)).filter(isPresent);
-        const voicePlayIds = voiceEntries.map((entry) => entry.playId);
         const readCount = Math.max(0, Math.trunc(finite(param(cmd, 0), 0)));
         const self = chatSenderIsSelf(ctx.state.chat.participants, cmd.targetName) || firstTarget(cmd).startsWith("my");
         const iconAsset = chatIconAssetName(cmd, ctx.runtime, (cmd.targetAssetName as string) || "");
@@ -4781,7 +4775,13 @@ export class AdvPlayer {
         entries[entries.length - 1].icon = iconAsset;
         entries[entries.length - 1].iconAssetName = iconAsset;
         if (!visibleChatMemory(ctx, memoryId)) return;
-        this.cancelChatTyping();
+        if (self) this.cancelChatTyping();
+        const voicePlaybackScopeVersion = ctx.Session.beginVoicePlaybackScope();
+        ctx.SoundManager.stopVoices();
+        const voiceEntries = ctx.Model.shouldShortCut
+          ? []
+          : soundInfos.map((voice) => ctx.SoundManager.playVoice(voice)).filter(isPresent);
+        const voicePlayIds = voiceEntries.map((entry) => entry.playId);
         ctx.state.chat.messages.push({
           sourceCommand: presentationSource(cmd),
           id: `${cmd.index}`,
@@ -4838,15 +4838,16 @@ export class AdvPlayer {
           Boolean(ctx.state.chat.visible),
         );
         const readCount = Math.max(0, Math.trunc(finite(param(cmd, 0), 0)));
-        ctx.Session.chatMemoryApplyRead(memoryId, cmd.targetChatID || 0, readCount);
+        if (readCount > 0) ctx.Session.chatMemoryApplyRead(memoryId, cmd.targetChatID || 0, readCount);
         if (!visibleChatMemory(ctx, memoryId)) return;
-        ctx.state.chat.readVisible = true;
-        const readApplied = Math.max(1, readCount);
-        for (const msg of ctx.state.chat.messages)
-          if (msg.self) {
-            msg.read = true;
-            msg.readCount = Math.max(finite(msg.readCount, 0), readApplied);
-          }
+        if (readCount > 0) {
+          ctx.state.chat.readVisible = true;
+          for (const msg of ctx.state.chat.messages)
+            if (msg.self) {
+              msg.read = true;
+              msg.readCount = Math.max(finite(msg.readCount, 0), readCount);
+            }
+        }
         if (!cmd.noWait) await this.waitForChatRead(0, 0, signal || this.abortController.signal);
       });
     });
@@ -4871,7 +4872,7 @@ export class AdvPlayer {
         entries[entries.length - 1].icon = iconAsset;
         entries[entries.length - 1].iconAssetName = iconAsset;
         if (!visibleChatMemory(ctx, memoryId)) return;
-        this.cancelChatTyping();
+        if (self) this.cancelChatTyping();
         ctx.state.chat.messages.push({
           sourceCommand: presentationSource(cmd),
           id: `${cmd.index}-stamp`,
