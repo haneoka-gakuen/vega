@@ -90,12 +90,20 @@ export class VegaLifetime {
     if (!this.signal.aborted) this.controller.abort(reason);
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
     if (this.disposal) return this.disposal;
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    // Abort listeners run synchronously and may call dispose again. Install
+    // the shared waiter before handing control to any listener or finalizer.
+    const disposal = (this.disposal = new Promise<void>((done, failed) => {
+      resolve = done;
+      reject = failed;
+    }));
     this.state = "disposing";
     this.abort();
-    this.disposal = this.disposeOwned();
-    return this.disposal;
+    void this.disposeOwned().then(resolve, reject);
+    return disposal;
   }
 
   private async disposeOwned(): Promise<void> {
