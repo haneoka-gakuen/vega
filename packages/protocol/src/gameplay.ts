@@ -17,6 +17,8 @@ export interface VegaNarrativeSettings {
   readonly reducedMotion: boolean;
   readonly highContrast: boolean;
   readonly instantText?: boolean;
+  /** Visible browser text, suitable for translation extensions. Default false. */
+  readonly webText?: boolean;
   readonly textSize?: number;
   readonly subtitlesEnabled?: boolean;
   readonly bgmEnabled?: boolean;

@@ -561,6 +561,7 @@ class DefaultVegaShellController implements VegaManagedShellController {
     if (this.root?.dataset) {
       this.root.dataset.vegaReducedMotion = String(settings.reducedMotion);
       this.root.dataset.vegaHighContrast = String(settings.highContrast);
+      this.root.dataset.vegaWebText = String(Boolean(settings.webText));
       this.root.style.setProperty("--vega-text-size", String(settings.textSize ?? 1));
       this.root.lang = settings.uiLanguage === "auto" ? "" : settings.uiLanguage;
     }
