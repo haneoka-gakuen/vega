@@ -3029,7 +3029,14 @@ export class AdvPlayer {
     if (this.Model.isAutoEnabled) {
       const unit = finite(this.runtime.waitTalkTextUnitTime, 0.04) / this.Model.getCurrentSpeedRate();
       const min = finite(this.runtime.minTalkDisplayTime, 1.6) / this.Model.getCurrentSpeedRate();
-      this.autoAdvanceAfter(Math.max(min, textLength * unit, finite(minimumAutoSeconds, 0)));
+      this.autoAdvanceAfter(
+        advAutoPlayReadDelaySeconds(
+          min,
+          textLength * unit,
+          finite(minimumAutoSeconds, 0),
+          this.autoPlayIntervalSeconds,
+        ),
+      );
     }
     await this.Model.waitForNext(signal);
   }
@@ -3140,7 +3147,10 @@ export class AdvPlayer {
       });
       if (controller.signal.aborted || !ownsScope()) return false;
       if (completedNaturally) {
-        await this.delayWithSpeedAdjustment(finite(this.runtime.waitAfterVoiceTime, 0), controller.signal);
+        await this.delayWithSpeedAdjustment(
+          finite(this.runtime.waitAfterVoiceTime, 0) / Math.max(0.01, this.Model.getCurrentSpeedRate()),
+          controller.signal,
+        );
       }
       return !controller.signal.aborted && ownsScope();
     };
@@ -4792,7 +4802,7 @@ export class AdvPlayer {
             voicePlayIds,
             voicePlaybackScopeVersion,
             signal || this.abortController.signal,
-            0,
+            this.autoPlayIntervalSeconds,
           );
       });
     });

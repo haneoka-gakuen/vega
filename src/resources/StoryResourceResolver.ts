@@ -47,6 +47,7 @@ interface StoryResourceCacheEntry {
   waiters: number;
   retainers: number;
   settled: boolean;
+  renderable?: { readonly url: string; users: number; revoked: boolean };
 }
 
 interface StoryResourceCacheState {
@@ -334,6 +335,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
         if (entry!.retainers === 0) {
           entry!.file?.release();
           entry!.file = undefined;
+          this.releaseCachedRenderable(entry!);
           if (!entry!.bytes && !entry!.pending) this.deleteCacheEntry(key, entry!);
         }
         this.trimCache();
@@ -353,6 +355,12 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     return Object.freeze({ release });
   }
 
+  /** Synchronous UI lookup; only an episode file owner keeps this URL prepared. */
+  resolvePreparedRenderable(source: string): string | undefined {
+    const entry = this.cache.get(asUrl(source).href);
+    return entry && entry.retainers > 0 && !entry.renderable?.revoked ? entry.renderable?.url : undefined;
+  }
+
   async resolveRenderable(
     source: string,
     signal?: AbortSignal,
@@ -366,6 +374,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     }
     if (signal?.aborted) throw abortError(source);
     const entry = this.cache.get(url.href);
+    if (entry?.renderable && !entry.renderable.revoked) return this.borrowCachedRenderable(entry);
     let blob = entry?.file
       ? await waitForSharedResource(
           entry.file.read().catch(() => undefined),
@@ -378,6 +387,13 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
       const bytes = await this.loadSharedBytes(source, signal);
       blob = new Blob([bytes.buffer as ArrayBuffer], { type: storyResourceContentType(source, bytes) });
     }
+    if (signal?.aborted) throw abortError(source);
+    // A concurrent reader may have prepared the URL while this file read ran.
+    // Session ownership keeps one identity across GPU warmup and later DOM UI.
+    if (entry && this.cache.get(url.href) === entry && entry.retainers > 0) {
+      entry.renderable ??= { url: URL.createObjectURL(blob), users: 0, revoked: false };
+      return this.borrowCachedRenderable(entry);
+    }
     const objectUrl = URL.createObjectURL(blob);
     let released = false;
     return {
@@ -388,6 +404,28 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
         URL.revokeObjectURL(objectUrl);
       },
     };
+  }
+
+  private borrowCachedRenderable(entry: StoryResourceCacheEntry): { url: string; release(): void } {
+    const prepared = entry.renderable!;
+    prepared.users += 1;
+    let released = false;
+    return {
+      url: prepared.url,
+      release: () => {
+        if (released) return;
+        released = true;
+        prepared.users -= 1;
+        this.releaseCachedRenderable(entry, prepared);
+      },
+    };
+  }
+
+  private releaseCachedRenderable(entry: StoryResourceCacheEntry, prepared = entry.renderable): void {
+    if (!prepared || prepared.revoked || prepared.users > 0 || entry.retainers > 0) return;
+    prepared.revoked = true;
+    if (entry.renderable === prepared) entry.renderable = undefined;
+    URL.revokeObjectURL(prepared.url);
   }
 
   private adapterFor(url: URL): StoryResourceAdapter | undefined {
@@ -593,6 +631,7 @@ export class DefaultStoryResourceResolver implements StoryResourceResolver {
     if (entry.retainers === 0) {
       entry.file?.release();
       entry.file = undefined;
+      this.releaseCachedRenderable(entry);
     }
   }
 

@@ -33,15 +33,26 @@ export interface AdvSoundDescriptor {
   volume?: number;
 }
 
+export interface AdvSoundPreparationEntry {
+  readonly index: number;
+  readonly category: AdvSoundCategory;
+  readonly sound: AdvSoundDescriptor;
+}
+
 /** Audio configuration from the story runtime */
 interface AdvSoundRuntime {
   audio?: {
     categoryVolumes?: Partial<Record<AdvSoundCategory, number>>;
+    preparationPlan?: readonly AdvSoundPreparationEntry[];
   };
 }
 
 /** Mutable audio state shared with the story engine */
 interface AdvSoundState {
+  commandIndex?: number;
+  currentCommand?: { index?: number } | null;
+  loading?: boolean;
+  ready?: boolean;
   audio: {
     bgm: string;
     se: string;
@@ -414,6 +425,11 @@ export class AdvSoundManager {
   private readonly bgmFades: Map<ManagedHowl, BgmFadeState>;
   private readonly voicePlaybackCompletions: Map<number, VoicePlaybackCompletion>;
   private readonly voicePlaybackWaiters: Map<number, Set<(completion: VoicePlaybackCompletion) => void>>;
+  private readonly preparationPlan: readonly AdvSoundPreparationEntry[];
+  private upcomingKeys = new Set<string>();
+  private preparingUpcoming = new Set<string>();
+  private deferredUpcoming = new Set<string>();
+  private preparationIndex = -1;
 
   constructor(runtime: AdvSoundRuntime | null | undefined, state: AdvSoundState, resources?: StoryResourceResolver) {
     // Register Howler's gesture listeners as soon as a player exists. The
@@ -456,6 +472,18 @@ export class AdvSoundManager {
     this.bgmFades = new Map();
     this.voicePlaybackCompletions = new Map();
     this.voicePlaybackWaiters = new Map();
+    this.preparationPlan = (runtime?.audio?.preparationPlan ?? [])
+      .filter(
+        (entry) =>
+          entry &&
+          Number.isFinite(entry.index) &&
+          entry.index >= 0 &&
+          (entry.category === "Voice" || entry.category === "Se") &&
+          entry.sound?.playableUrl,
+      )
+      .slice()
+      .sort((left, right) => left.index - right.index);
+    this.prepareForCommand(0);
   }
 
   setMovieSoundVolume(volume: number | undefined | null) {
@@ -466,6 +494,56 @@ export class AdvSoundManager {
 
   advanceFrame() {
     this.frameStamp += 1;
+    this.prepareForCommand(
+      this.state.loading || !this.state.ready ? 0 : (this.state.currentCommand?.index ?? this.state.commandIndex ?? 0),
+    );
+  }
+
+  /** Keep a small authored lookahead ready; encoded episode sources remain independent. */
+  prepareForCommand(index: number): void {
+    if (!this.preparationPlan.length || this.disposing) return;
+    const next = Math.max(0, Math.floor(index));
+    if (next === this.preparationIndex) return;
+    this.preparationIndex = next;
+    this.deferredUpcoming.clear();
+    const keys = new Set<string>();
+    for (const entry of this.preparationPlan) {
+      if (entry.index < next || entry.category === "Bgm") continue;
+      keys.add(audioWarmKey(entry.category, localPlaybackUrl(entry.sound.playableUrl, "audio")));
+      if (keys.size >= 4) break;
+    }
+    this.upcomingKeys = keys;
+    this.trimWarmHowls();
+    this.pumpUpcoming();
+  }
+
+  private pumpUpcoming(): void {
+    if (this.disposing) return;
+    for (const entry of this.preparationPlan) {
+      if (this.preparingUpcoming.size >= 2) break;
+      const canonical = localPlaybackUrl(entry.sound.playableUrl, "audio");
+      const key = audioWarmKey(entry.category, canonical);
+      if (
+        !this.upcomingKeys.has(key) ||
+        this.deferredUpcoming.has(key) ||
+        this.preparingUpcoming.has(key) ||
+        this.warmHowls.has(key) ||
+        !this.episodeAudioSources.has(canonical) ||
+        [this.bgm, ...this.se, ...this.voices].some((active) => active?.sound?.playableUrl === canonical)
+      )
+        continue;
+      this.preparingUpcoming.add(key);
+      const generation = this.episodeAudioGeneration;
+      void this.preloadSound(entry.sound, entry.category, this.episodeAudioLifecycle.signal)
+        .catch(() => {
+          if (generation === this.episodeAudioGeneration) this.deferredUpcoming.add(key);
+        })
+        .finally(() => {
+          if (generation !== this.episodeAudioGeneration) return;
+          this.preparingUpcoming.delete(key);
+          this.pumpUpcoming();
+        });
+    }
   }
 
   isLastBgmOrSePlaybackFrame() {
@@ -500,6 +578,8 @@ export class AdvSoundManager {
     for (const source of this.episodeAudioSources.values()) source.release();
     this.episodeAudioSources.clear();
     this.episodeAudioSourceLoads.clear();
+    this.upcomingKeys.clear();
+    this.deferredUpcoming.clear();
     this.syncSessionSePlayIds();
   }
 
@@ -521,16 +601,13 @@ export class AdvSoundManager {
     const warmed = this.warmHowls.get(key);
     if (warmed) {
       this.warmHowls.delete(key);
-      this.warmHowls.set(key, warmed);
-    }
-    if (warmed && category === "Bgm") {
-      this.warmHowls.delete(key);
       try {
         warmed.loop(loop);
         warmed.volume(this.effectiveVolume(sound));
       } catch {}
       return warmed;
     }
+    if (this.episodeAudioSources.has(canonical)) this.episodeWarmKeys.add(key);
     const src = this.episodeAudioSources.get(canonical)?.url ?? canonical;
     return new Howl({
       src: [src],
@@ -557,6 +634,8 @@ export class AdvSoundManager {
   async prepareSoundSource(sound: AdvSoundDescriptor, signal?: AbortSignal): Promise<void> {
     const canonical = localPlaybackUrl(sound.playableUrl, "audio");
     if (canonical) await this.resolveEpisodeAudioSource(canonical, signal);
+    if (this.preparationIndex < 0) this.prepareForCommand(this.state.ready ? (this.state.commandIndex ?? 0) : 0);
+    this.pumpUpcoming();
   }
 
   /**
@@ -579,6 +658,7 @@ export class AdvSoundManager {
     }
     const src = source.url;
     const key = audioWarmKey(category, canonical);
+    if (this.preparationPlan.length && category !== "Bgm" && !this.upcomingKeys.has(key)) return;
     this.episodeWarmKeys.add(key);
     const pending = this.warmHowlLoads.get(key);
     if (pending) {
@@ -643,7 +723,7 @@ export class AdvSoundManager {
       howl.once("load", loaded);
       howl.once("loaderror", failed);
       if (howl.state() === "loaded") finish();
-      else howl.load();
+      else if (howl.state() === "unloaded") howl.load();
     })
       .catch((error: unknown) => {
         if (this.warmHowls.get(key) === howl) {
@@ -684,11 +764,18 @@ export class AdvSoundManager {
     };
     let decodedBytes = 0;
     for (const [key, howl] of this.warmHowls) decodedBytes += decodedSize(key, howl);
-    for (const [key, howl] of this.warmHowls) {
+    const priority = [...this.upcomingKeys];
+    const candidates = [...this.warmHowls].sort(
+      ([left], [right]) =>
+        Number(this.upcomingKeys.has(left)) - Number(this.upcomingKeys.has(right)) ||
+        (this.upcomingKeys.has(left) ? priority.indexOf(right) - priority.indexOf(left) : 0),
+    );
+    for (const [key, howl] of candidates) {
       if (this.warmHowls.size <= MAXIMUM_WARM_HOWLS && decodedBytes <= MAXIMUM_WARM_DECODED_BYTES) break;
       if (this.warmHowlLoads.has(key)) continue;
       if ([this.bgm, ...this.se, ...this.voices].some((entry) => entry?.howl === howl)) continue;
       this.warmHowls.delete(key);
+      if (this.upcomingKeys.has(key)) this.deferredUpcoming.add(key);
       this.episodeWarmKeys.delete(key);
       decodedBytes -= decodedSize(key, howl);
       try {
@@ -742,6 +829,10 @@ export class AdvSoundManager {
     this.episodeAudioGeneration += 1;
     const previousLifecycle = this.episodeAudioLifecycle;
     this.episodeAudioLifecycle = new AbortController();
+    this.preparationIndex = -1;
+    this.upcomingKeys.clear();
+    this.preparingUpcoming.clear();
+    this.deferredUpcoming.clear();
     previousLifecycle.abort(audioPreloadAbortError());
 
     const activeSources = new Set<string>();
@@ -826,6 +917,7 @@ export class AdvSoundManager {
       }, AUDIO_LOAD_TIMEOUT_MS);
     }
     const failed = (): void => {
+      if (entry.playbackSettled) return;
       if (entry.category === "Voice") this.settleVoicePlayback(entry.playId, "failed");
       this.forceStopEntry(entry, false);
     };
@@ -862,6 +954,7 @@ export class AdvSoundManager {
     entry.stopTimer = null;
     entry.cleanupTimer = null;
     entry.loadTimer = null;
+    entry.howl.off();
     if (entry.category === "Bgm") {
       if (this.bgm === entry) this.bgm = null;
       if (!this.bgm) this.state.audio.bgm = "";
@@ -1062,25 +1155,26 @@ export class AdvSoundManager {
     this.forceStopEntry(entry);
   }
 
-  forceStopEntry(entry: ManagedHowl, recycleBgm = true) {
+  forceStopEntry(entry: ManagedHowl, recycle = true) {
     if (entry.category === "Voice") this.settleVoicePlayback(entry.playId, "stopped");
     try {
       entry.howl.stop();
-      if (!recycleBgm || !this.returnBgmToWarmPool(entry)) entry.howl.unload();
+      if (!recycle || !this.returnEntryToWarmPool(entry)) entry.howl.unload();
     } catch {}
     this.removeEntry(entry);
+    this.trimWarmHowls();
   }
 
-  private returnBgmToWarmPool(entry: ManagedHowl): boolean {
-    if (this.disposing || entry.category !== "Bgm") return false;
+  private returnEntryToWarmPool(entry: ManagedHowl): boolean {
+    if (this.disposing) return false;
     const canonical = localPlaybackUrl(entry.sound?.playableUrl, "audio");
-    const key = audioWarmKey("Bgm", canonical);
+    const key = audioWarmKey(entry.category, canonical);
     if (!canonical || !this.episodeWarmKeys.has(key)) return false;
     const existing = this.warmHowls.get(key);
     if (existing && existing !== entry.howl) return false;
     if (entry.howl.state() !== "loaded") return false;
     try {
-      entry.howl.loop(true);
+      entry.howl.loop(entry.category === "Bgm");
       entry.howl.volume(0);
       this.warmHowls.set(key, entry.howl);
       this.trimWarmHowls();
@@ -1263,9 +1357,10 @@ export class AdvSoundManager {
     if (!entry) return null;
     this.addSeEntry(entry);
     entry.howl.once("end", () => {
+      if (entry.playbackSettled) return;
       if (!entry.stopping) this.removeEntry(entry);
       try {
-        entry.howl.unload();
+        if (!this.returnEntryToWarmPool(entry)) entry.howl.unload();
       } catch {}
     });
     entry.howl.play();
@@ -1306,10 +1401,11 @@ export class AdvSoundManager {
     if (!entry) return null;
     this.addVoiceEntry(entry);
     entry.howl.once("end", () => {
+      if (entry.playbackSettled) return;
       this.settleVoicePlayback(entry.playId, "ended");
       if (!entry.stopping) this.removeEntry(entry);
       try {
-        entry.howl.unload();
+        if (!this.returnEntryToWarmPool(entry)) entry.howl.unload();
       } catch {}
     });
     const fail = (): void => {
@@ -1320,6 +1416,7 @@ export class AdvSoundManager {
       } catch {}
     };
     const markPlaybackStarted = (): void => {
+      if (entry.playbackSettled) return;
       const howl = entry.howl as HowlExtended;
       const active = entry.howlId > 0 ? howl._soundById(entry.howlId) : null;
       if (active?._paused === false && active._ended !== true) {
@@ -1328,6 +1425,7 @@ export class AdvSoundManager {
     };
     entry.howl.once("load", markPlaybackStarted);
     entry.howl.once("play", (id: number) => {
+      if (entry.playbackSettled) return;
       entry.howlId = Number.isFinite(id) ? id : entry.howlId;
       entry.playbackStarted = true;
       entry.analyzer = attachVoiceAnalyzer(entry);
