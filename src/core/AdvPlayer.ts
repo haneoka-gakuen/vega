@@ -874,6 +874,7 @@ export class AdvPlayer {
     this.state = state;
     this.runtime = mergeAdvRuntime(story?.runtime);
     this.Model = new AdvPlayerModel();
+    this.Model.isPause = state.paused === true;
     this.Session = new AdvPlaybackSession(this.runtime);
     this.CommandService = new AdvCommandService();
     this.narrativeStore = narrativeStore;
@@ -1075,8 +1076,9 @@ export class AdvPlayer {
         if (!isActive()) return;
         const startCheckpoint = this.seekIndexFor(decisions).checkpoints.get(0) as StorySeekCheckpoint | undefined;
         if (!startCheckpoint) throw new Error("The scene index is missing command boundary 0");
-        await this.applyCheckpoint(startCheckpoint, decisions);
-        this.finishSeekRestoration(0);
+        await this.applyCheckpoint(startCheckpoint, decisions, { signal });
+        if (!isActive()) return;
+        this.finishSeekRestoration(0, this.Model.isPause);
       }
       this.state.loading = false;
       this.state.ready = true;
@@ -1094,6 +1096,7 @@ export class AdvPlayer {
   }
 
   executeCommandAtIndex(commands: AdvCommand[], index: number, signal: AbortSignal): Promise<void> | void {
+    if (this.disposed || signal.aborted) return;
     if (this.clipPlaybackError && !this.Model.shouldShortCut) throw this.clipPlaybackError;
     const authoredCommand = commands[index];
     const cmd = authoredCommand ? interpolateNarrativeCommand(authoredCommand, this.narrativeStore) : authoredCommand;
@@ -1562,7 +1565,7 @@ export class AdvPlayer {
         this.seekSoundProjection = null;
         if (!this.disposed) {
           try {
-            this.finishSeekRestoration(returnCheckpoint.index);
+            this.finishSeekRestoration(returnCheckpoint.index, this.Model.isPause);
           } catch (error) {
             restoreError ||= error;
           }
@@ -1714,8 +1717,6 @@ export class AdvPlayer {
     this.Loader.restoreSnapshot(checkpoint.loader);
     if (options.restoreAudio !== false) this.SoundManager.restoreSnapshot(checkpoint.sound);
     this.restoreSeekPlayerState(checkpoint.state, options.preservePersistentNarrative !== false);
-    this.state.paused = false;
-    this.Model.isPause = false;
     this.Model.changeIdleState();
     this.Model.CurrentEpisodeListIndex = checkpoint.index;
     this.state.commandIndex = checkpoint.index;
@@ -1977,11 +1978,10 @@ export class AdvPlayer {
           }
         });
       }
-    } else {
-      this.Model.isPause = false;
-      this.state.paused = false;
-      this.releasePlaybackResumeWaiters();
     }
+    // A seek can proceed while paused; waking the interpreter does not change
+    // the user's pause intent or start the restored media.
+    this.releasePlaybackResumeWaiters();
     await completion;
   }
 
@@ -1998,6 +1998,7 @@ export class AdvPlayer {
     const commands = this.story?.commands || [];
     const target = Math.max(0, Math.min(commands.length, Math.floor(Number(targetIndex) || 0)));
     if (target === request.target) return true;
+    if (!this.seekIndexFor(this.Session.choiceRecords).checkpoints.has(target)) return false;
     this.cancelAutoAdvance();
     this.state.seeking = true;
     this.Model.shouldShortCut = true;
@@ -2031,6 +2032,8 @@ export class AdvPlayer {
       const request = this.activeSeek;
       try {
         await this.restoreExactSeekTarget(request.target, undefined, request.controller.signal);
+        if (this.activeSeek !== request) continue;
+        if (request.controller.signal.aborted) throw request.controller.signal.reason;
         this.Model.isPause = request.paused;
         this.state.paused = request.paused;
         await this.resumeActiveClip(request.controller.signal);
@@ -2135,6 +2138,7 @@ export class AdvPlayer {
     this.cancelClipPlaybackWatch();
     this.videoTimeline.end();
     this.playbackCommandController?.abort();
+    this.PlayableDirector.deactivate();
     this.SceneRoot.setDeterministicReplayActive(true);
     this.armSeekReplayWatchdog();
     this.SceneRoot.cancelTransitionsForSeek?.();
@@ -2539,10 +2543,7 @@ export class AdvPlayer {
     this.Model.shouldShortCut = false;
     try {
       const commands = this.story?.commands || [];
-      while (
-        !this.abortController.signal.aborted &&
-        (this.Model.CurrentEpisodeListIndex < commands.length || this.restoredDialoguePending)
-      ) {
+      while (!this.abortController.signal.aborted) {
         await this.waitWhilePlaybackPaused(this.abortController.signal);
         if (this.disposed || this.abortController.signal.aborted) return;
         if (this.activeSeek) {
@@ -2552,6 +2553,17 @@ export class AdvPlayer {
           const resume = this.activeSeek?.resume;
           if (this.maybeFinishActiveSeek(commands) && !resume) return;
           continue;
+        }
+        if (this.Model.CurrentEpisodeListIndex >= commands.length && !this.restoredDialoguePending) {
+          await this.commandGroupScheduler.waitForIdle(this.abortController.signal);
+          if (this.disposed || this.abortController.signal.aborted) return;
+          if (this.activeSeek) continue;
+          await this.SceneRoot.clearCommandPostEffects(0);
+          if (this.disposed || this.abortController.signal.aborted) return;
+          if (this.activeSeek) continue;
+          this.state.finished = true;
+          this.retainFinishedRenderState();
+          return;
         }
         if (this.restoredDialoguePending) {
           this.restoredDialoguePending = false;
@@ -2566,6 +2578,7 @@ export class AdvPlayer {
           continue;
         }
         const index = this.Model.CurrentEpisodeListIndex;
+        const generation = this.seekGeneration;
         const command = commands[index];
         if (command) {
           await this.notifyExecutionBoundary({
@@ -2575,11 +2588,24 @@ export class AdvPlayer {
           });
           await this.waitWhilePlaybackPaused(this.abortController.signal);
           if (this.disposed || this.abortController.signal.aborted) return;
+          // Observers and pause waits can yield to progress controls. Retire
+          // the captured cursor before admitting a command from the old scene.
+          if (this.activeSeek || generation !== this.seekGeneration || index !== this.Model.CurrentEpisodeListIndex)
+            continue;
         }
         if (!this.playbackCommandController || this.playbackCommandController.signal.aborted) {
           this.playbackCommandController = createAbortLink(this.abortController.signal);
         }
-        const execution = this.executeCommandAtIndex(commands, index, this.playbackCommandController.signal);
+        const commandController = this.playbackCommandController;
+        const execution = this.executeCommandAtIndex(commands, index, commandController.signal);
+        // Observe cancellation immediately: a started observer may itself
+        // await asynchronous UI work while the command's wait rejects.
+        const observedExecution = execution
+          ? Promise.resolve(execution).then(
+              () => ({ failed: false as const }),
+              (error: unknown) => ({ failed: true as const, error }),
+            )
+          : null;
         const executedCommand = this.state.currentCommand || command;
         if (command) {
           await this.notifyExecutionBoundary({
@@ -2588,7 +2614,14 @@ export class AdvPlayer {
             command: executedCommand,
           });
         }
-        if (execution) await execution;
+        if (observedExecution) {
+          const result = await observedExecution;
+          if (result.failed) {
+            // Timeline/media waits can reject on cancellation. The pending
+            // seek owns recovery after retiring this command's signal.
+            if (!this.activeSeek || !commandController.signal.aborted) throw result.error;
+          }
+        }
         if (command) {
           await this.notifyExecutionBoundary({
             phase: "after",
@@ -2620,14 +2653,6 @@ export class AdvPlayer {
           continue;
         }
       }
-      if (this.disposed || this.abortController.signal.aborted) return;
-      await this.commandGroupScheduler.waitForIdle(this.abortController.signal);
-      if (this.disposed || this.abortController.signal.aborted) return;
-      await this.SceneRoot.clearCommandPostEffects(0);
-      if (!this.disposed && !this.abortController.signal.aborted) {
-        this.state.finished = true;
-        this.retainFinishedRenderState();
-      }
     } finally {
       if (!this.disposed) this.state.playing = false;
     }
@@ -2653,7 +2678,10 @@ export class AdvPlayer {
   }
 
   resume() {
-    if (this.activeSeek) this.activeSeek.paused = false;
+    if (this.activeSeek) {
+      this.activeSeek.paused = false;
+      this.activeSeek.resume = true;
+    }
     this.Model.isPause = false;
     this.state.paused = false;
     this.SceneRoot.setVideoPaused?.(false);
@@ -2679,7 +2707,7 @@ export class AdvPlayer {
   }
 
   private waitWhilePlaybackPaused(signal: AbortSignal): Promise<void> {
-    if (!this.Model.isPause || signal.aborted || this.disposed) return Promise.resolve();
+    if (!this.Model.isPause || this.activeSeek || signal.aborted || this.disposed) return Promise.resolve();
     return new Promise((resolve) => {
       const finish = (): void => {
         this.playbackResumeWaiters.delete(finish);
@@ -2688,7 +2716,7 @@ export class AdvPlayer {
       };
       this.playbackResumeWaiters.add(finish);
       signal.addEventListener("abort", finish, { once: true });
-      if (!this.Model.isPause || signal.aborted || this.disposed) finish();
+      if (!this.Model.isPause || this.activeSeek || signal.aborted || this.disposed) finish();
     });
   }
 

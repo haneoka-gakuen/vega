@@ -431,6 +431,8 @@ export class GenericStoryScene implements StorySceneBackend {
   private readonly sceneController = new AbortController();
   private state: AdvPlayerState;
   private root: HTMLDivElement | null = null;
+  private mount: HTMLElement | null = null;
+  private resizeObserver: ResizeObserver | null = null;
   private backgroundLayer: HTMLDivElement | null = null;
   private characterLayer: HTMLDivElement | null = null;
   private stillLayer: HTMLDivElement | null = null;
@@ -583,12 +585,24 @@ export class GenericStoryScene implements StorySceneBackend {
     mount.append(root);
     this.releaseStyles = acquireGenericSceneStyles(mount.ownerDocument);
     this.root = root;
-    this.applyCameraTransform();
+    this.mount = mount;
+    const view = mount.ownerDocument.defaultView;
+    const observer = (view as (Window & { ResizeObserver?: typeof ResizeObserver }) | null)?.ResizeObserver;
+    if (observer) {
+      this.resizeObserver = new observer(() => this.resize());
+      this.resizeObserver.observe(mount);
+    }
+    view?.addEventListener("resize", this.onResize);
+    this.resize();
   }
 
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.mount?.ownerDocument.defaultView?.removeEventListener("resize", this.onResize);
+    this.mount = null;
     this.sceneController.abort();
     this.resetShakeState();
     this.stopCommandEffects();
@@ -662,8 +676,33 @@ export class GenericStoryScene implements StorySceneBackend {
   }
 
   resize(): void {
+    if (this.destroyed || !this.mount || !this.root) return;
+    // Use the layout box so a host's CSS rotation or scale does not change
+    // the renderer's coordinate system or its UI-slot viewport.
+    const surfaceWidth = Math.max(1, this.mount.clientWidth || 1);
+    const surfaceHeight = Math.max(1, this.mount.clientHeight || 1);
+    const view = this.mount.ownerDocument.defaultView;
+    const portrait = view?.matchMedia?.("(orientation: portrait)").matches ?? surfaceHeight > surfaceWidth;
+    const layout = this.runtime.layout;
+    const designAspect = finite(layout.designViewportAspect, surfaceWidth / surfaceHeight);
+    const requestedAspect = finite(portrait ? layout.portraitTargetAspect : layout.landscapeTargetAspect, designAspect);
+    const targetAspect = requestedAspect > 0 ? requestedAspect : surfaceWidth / surfaceHeight;
+    const band = Math.max(0, (surfaceHeight - surfaceWidth / targetAspect) / 2);
+    const y = band > 1 ? band : 0;
+    const width = surfaceWidth;
+    const height = Math.max(1, surfaceHeight - y * 2);
+    Object.assign(this.state.viewport, { x: 0, y, width, height, surfaceWidth, surfaceHeight });
+    Object.assign(this.root.style, {
+      inset: "auto",
+      left: "0px",
+      top: `${y}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+    });
     this.applyCameraTransform();
   }
+
+  private readonly onResize = (): void => this.resize();
 
   setDeterministicReplayActive(active: boolean): void {
     if (this.deterministicReplay === active) return;

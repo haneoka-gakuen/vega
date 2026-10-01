@@ -223,6 +223,7 @@ export class VegaEngine {
     const resources = new DefaultStoryResourceResolver(this.plugins.contributions("resource"));
     let presentation: VegaPlayerPresentation | undefined;
     let player: AdvPlayer | undefined;
+    let constructedPlayerDisposal: Promise<void> | undefined;
     let sceneBackend: StorySceneBackend | undefined;
     let shell: VegaManagedShellController | VegaShellController | undefined;
     try {
@@ -282,7 +283,30 @@ export class VegaEngine {
         textMetrics: this.plugins.service(VEGA_TEXT_METRICS),
       });
       const constructedPlayer = player;
-      lifetime.defer(() => constructedPlayer.dispose({ releaseTextures: true }));
+      const disposeConstructedPlayer = (): Promise<void> => {
+        if (!constructedPlayerDisposal) {
+          try {
+            constructedPlayerDisposal = constructedPlayer.dispose({ releaseTextures: true });
+          } catch (error) {
+            constructedPlayerDisposal = Promise.reject(error);
+          }
+        }
+        return constructedPlayerDisposal;
+      };
+      // Abort retires Loader/audio/command ownership before a UI finalizer
+      // can wait on it. The deferred cleanup still awaits scene destruction.
+      const onPlayerAbort = (): void => {
+        void disposeConstructedPlayer().catch((error) => {
+          console.error("[Vega] player disposal after lifetime abort failed", error);
+        });
+      };
+      if (lifetime.signal.aborted) onPlayerAbort();
+      else lifetime.signal.addEventListener("abort", onPlayerAbort, { once: true });
+      lifetime.defer(() => {
+        lifetime.signal.removeEventListener("abort", onPlayerAbort);
+        return disposeConstructedPlayer();
+      });
+      throwIfAborted(lifetime.signal);
       const playerServices = playerServiceMap(options.services);
       const configuredShell = playerServices.get(VEGA_SHELL_CONTROLLER.id) as VegaShellController | undefined;
       const engineShell = this.plugins.service(VEGA_SHELL_CONTROLLER);
@@ -329,9 +353,17 @@ export class VegaEngine {
           playerServices.has(key.id) ? (playerServices.get(key.id) as never) : this.plugins.service(key),
       });
       await constructedPlayer.boot();
+      throwIfAborted(lifetime.signal);
     } catch (error) {
-      if (!player && sceneBackend) await sceneBackend.destroy({ releaseTextures: true });
-      await lifetime.dispose().catch(() => undefined);
+      const cleanup = [lifetime.dispose()];
+      if (!player && sceneBackend)
+        cleanup.push(Promise.resolve().then(() => sceneBackend!.destroy({ releaseTextures: true })));
+      if (constructedPlayerDisposal) cleanup.push(constructedPlayerDisposal);
+      const failures = (await Promise.allSettled(cleanup))
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (failures.length)
+        throw new AggregateError([error, ...failures], "Vega player construction and cleanup failed");
       throw error;
     }
     if (!player) throw new Error("Vega player construction completed without a player");
@@ -350,9 +382,14 @@ export class VegaEngine {
     };
     try {
       await this.events.emit("player:create", { playerId: id });
+      throwIfAborted(lifetime.signal);
       return handle;
     } catch (error) {
-      await this.disposePlayer(active).catch(() => undefined);
+      try {
+        await this.disposePlayer(active);
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Vega player publication and cleanup failed");
+      }
       throw error;
     }
   }
