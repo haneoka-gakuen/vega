@@ -2398,9 +2398,13 @@ export class AdvPlayer {
         alpha,
       );
       if (this.disposed || controller.signal.aborted || this.clipStartupController !== controller) return;
-      // The requested media origin is zero, even if play() resolves after
-      // the first frame. Do not add startup latency to all authored cues.
-      this.videoTimeline.begin(videoInfo, target, target);
+      // Native PlayClip captures GetDisplayedFrameNo after playback starts.
+      // Keep that displayed-frame origin when restoring a cumulative target;
+      // backends without a media clock use the requested boundary.
+      const displayedTime = this.SceneRoot.videoClock?.()?.mediaTime;
+      const mediaTime =
+        displayedTime !== undefined && Number.isFinite(displayedTime) && displayedTime >= 0 ? displayedTime : target;
+      this.videoTimeline.begin(videoInfo, mediaTime, target);
       this.watchClipPlaybackCompletion(videoInfo);
     } catch (error) {
       if (controller.signal.aborted || this.clipStartupController !== controller) return;
