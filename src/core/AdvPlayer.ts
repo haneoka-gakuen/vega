@@ -3061,6 +3061,22 @@ export class AdvPlayer {
     return this.talkPresentationGeneration;
   }
 
+  private waitForChatTypingUpdate(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return Promise.resolve();
+    if (typeof requestAnimationFrame !== "function") return delaySeconds(1 / 60, signal);
+    return new Promise((resolve) => {
+      let frame = 0;
+      const finish = (): void => {
+        if (frame) cancelAnimationFrame(frame);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      signal.addEventListener("abort", finish, { once: true });
+      frame = requestAnimationFrame(finish);
+      if (signal.aborted) finish();
+    });
+  }
+
   private async typeChatTypingText(
     text: string,
     lang: string | undefined,
@@ -3071,10 +3087,10 @@ export class AdvPlayer {
     this.cancelChatTyping();
     ctx.state.chat.typingLang = lang;
     const generation = ++this.chatTypingGeneration;
-    const characters = Array.from(String(text || ""));
-    if (!characters.length || ctx.Model.shouldShortCut || signal.aborted) {
+    const total = this.visibleTextLength(text, "adv");
+    if (!total || ctx.Model.shouldShortCut || signal.aborted) {
       if (visibleChatMemory(ctx, memoryId)) ctx.state.chat.typing = text;
-      return characters.length;
+      return total;
     }
 
     let finished = false;
@@ -3089,21 +3105,37 @@ export class AdvPlayer {
     this.Model.currentTypingController = controller;
     const characterDelay =
       ADV_CHAT_TYPING_DELAY_SECONDS / Math.max(ctx.Model.getCurrentSpeedRate(), ADV_CHAT_MIN_PLAYBACK_SPEED);
-    let displayed = "";
+    let previousPrefix = this.textMetrics.sliceVisible(text, 0, "adv");
+    const ownsTyping = () =>
+      !signal.aborted && generation === this.chatTypingGeneration && visibleChatMemory(ctx, memoryId);
     try {
-      for (const character of characters) {
-        if (finished) break;
-        await delaySeconds(characterDelay, signal);
-        if (signal.aborted || generation !== this.chatTypingGeneration || !visibleChatMemory(ctx, memoryId)) {
-          return characters.length;
+      for (let units = 1; units <= total; units += 1) {
+        if (finished || !ownsTyping()) break;
+        const prefix = this.textMetrics.sliceVisible(text, units, "adv");
+        let characterOffset = previousPrefix.length;
+        while (prefix[characterOffset] === "<") {
+          const end = prefix.indexOf(">", characterOffset);
+          // Skip only spans the text port says have no visible unit. A br
+          // or literal noparse character must retain its nonletter delay.
+          if (end < 0 || this.visibleTextLength(prefix.slice(0, end + 1), "adv") >= units) break;
+          characterOffset = end + 1;
         }
-        if (finished) break;
-        displayed += character;
-        ctx.state.chat.typing = displayed;
+        const character = String.fromCodePoint(prefix.codePointAt(characterOffset) ?? 0);
+        previousPrefix = prefix;
+        ctx.state.chat.typing = prefix;
+        await this.waitForChatTypingUpdate(signal);
+        if (finished || !ownsTyping()) break;
+        // Native TypingTask reveals first, yields Update, then delays units
+        // other than ASCII letters. Markup is measured by the text port.
+        if (!/^[A-Za-z]$/.test(character)) {
+          const until = nowSeconds() + Math.round(characterDelay * 1000) / 1000;
+          do {
+            await this.waitForChatTypingUpdate(signal);
+          } while (!finished && ownsTyping() && nowSeconds() < until);
+        }
       }
-      if (!finished && generation === this.chatTypingGeneration && visibleChatMemory(ctx, memoryId))
-        ctx.state.chat.typing = text;
-      return characters.length;
+      if (!finished && ownsTyping()) ctx.state.chat.typing = text;
+      return total;
     } finally {
       if (this.chatTypingController === controller) this.chatTypingController = null;
       if (this.Model.currentTypingController === controller) this.Model.currentTypingController = null;
