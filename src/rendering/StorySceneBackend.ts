@@ -1,3 +1,5 @@
+import type { StoryResourceResolver } from "../resources/StoryResourcePort";
+export type { StoryResourceLease, StoryResourceResolver } from "../resources/StoryResourcePort";
 import type { StoryScreenEffectDefinition } from "./StoryScreenEffects";
 import type {
   AdvBackgroundEntry,
@@ -89,48 +91,6 @@ export interface StoryScenePreviewOptions {
   readonly height: number;
   readonly format: "image/png" | "image/jpeg" | "image/webp";
   readonly quality?: number;
-}
-
-/**
- * Host-neutral resource port used by both the scene and the episode preloader.
- *
- * A resolver may serve network URLs, an archive, an editor's in-memory project,
- * or a desktop application protocol. Core playback never imports an adapter.
- */
-export interface StoryResourceResolver {
-  canLoad(source: string): boolean;
-  load(source: string, signal?: AbortSignal): Promise<Uint8Array>;
-  /**
-   * Returns the resolver's canonical resident bytes without making an owned
-   * copy. This is an optional fast path for trusted renderer/runtime code that
-   * only reads its input. Consumers must never mutate the returned view or its
-   * backing buffer; untrusted SDKs should continue to use `load`.
-   *
-   * Implementations that cannot guarantee a stable immutable view may omit
-   * this method. Callers must fall back to `load` in that case.
-   */
-  loadSharedBytes?(source: string, signal?: AbortSignal): Promise<Readonly<Uint8Array>>;
-  /**
-   * Acquires the encoded file and retains it until the lease is released.
-   * Storage may be disk-backed; decoded data and GPU objects have independent
-   * lifetimes. `load` and `resolveRenderable` reuse that file without another
-   * network or adapter request unless the host externally clears storage.
-   * The signal only cancels lease acquisition.
-   */
-  retain(source: string, signal?: AbortSignal): Promise<StoryResourceLease>;
-  /**
-   * Produces a URL accepted by browser media elements. The returned release
-   * hook must be called by the scene when that media is replaced or destroyed.
-   */
-  resolveRenderable(
-    source: string,
-    signal?: AbortSignal,
-  ): Promise<{ readonly url: string; readonly release: () => void }>;
-}
-
-/** An idempotent ownership handle for resident canonical resource bytes. */
-export interface StoryResourceLease {
-  release(): void;
 }
 
 /**

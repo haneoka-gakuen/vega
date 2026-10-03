@@ -6,6 +6,7 @@ import type { VegaNarrativeInputProvider } from "../narrative/commands";
 import { VegaLocalStorageSaveStorage, VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
 import { VegaNarrativeStore } from "../narrative/state";
 import type { StorySceneBackend } from "../rendering/StorySceneBackend";
+import type { StoryResourceResolver } from "../resources/StoryResourcePort";
 import type { StoryRendererExtensionRegistry, StoryRendererServiceKey } from "../rendering/StoryRendererExtensions";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { AdvPlayerState, AdvStory } from "../types/AdvRuntime";
@@ -53,6 +54,8 @@ export type VegaInputHandler = VegaEventHandler<VegaInputEvent>;
 
 export interface VegaPlayerOptions {
   readonly mount: HTMLElement;
+  /** Caller-owned complete resource port. Omitted ports use the default resolver. */
+  readonly resources?: StoryResourceResolver;
   readonly story: AdvStory;
   readonly resolveLocalizedText?: AdvPlayer["resolveLocalizedText"];
   readonly state?: AdvPlayerState;
@@ -220,7 +223,7 @@ export class VegaEngine {
         enumerateCommandResources,
       }),
     );
-    const resources = new DefaultStoryResourceResolver(this.plugins.contributions("resource"));
+    const resources = options.resources ?? new DefaultStoryResourceResolver(this.plugins.contributions("resource"));
     let presentation: VegaPlayerPresentation | undefined;
     let player: AdvPlayer | undefined;
     let constructedPlayerDisposal: Promise<void> | undefined;

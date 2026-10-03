@@ -84,6 +84,11 @@
       "import": "./dist/renderer-kit.js",
       "default": "./dist/renderer-kit.js"
     },
+    "./host-resources": {
+      "types": "./dist/host-resources-entry.d.ts",
+      "import": "./dist/host-resources.js",
+      "default": "./dist/host-resources.js"
+    },
     "./deneb-runtime": {
       "types": "./dist/deneb-runtime-entry.d.ts",
       "import": "./dist/deneb-runtime/deneb-runtime.js",
