@@ -190,7 +190,7 @@ class DefaultVegaShellController implements VegaManagedShellController {
               speaker: entry.speakerSources
                 .map((value) => this.player.resolveLocalizedText(value).text)
                 .filter(Boolean)
-                .join(entry.speakerSeparator ?? "・"),
+                .join(this.player.getDisplayNameJoiner(entry.speakerSeparator ?? "・")),
             }),
       })),
       gallery: this.galleryEntries.map(

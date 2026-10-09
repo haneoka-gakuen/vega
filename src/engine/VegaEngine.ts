@@ -58,6 +58,8 @@ export interface VegaPlayerOptions {
   readonly resources?: StoryResourceResolver;
   readonly story: AdvStory;
   readonly resolveLocalizedText?: AdvPlayer["resolveLocalizedText"];
+  /** Display punctuation only; preserves authored target bindings. */
+  readonly displayNameJoiner?: unknown;
   readonly state?: AdvPlayerState;
   readonly narrativeStore?: VegaNarrativeStore;
   readonly narrativeInput?: VegaNarrativeInputProvider;
@@ -275,6 +277,7 @@ export class VegaEngine {
         mount: presentation.stage,
         story: options.story,
         resolveLocalizedText: options.resolveLocalizedText,
+        displayNameJoiner: options.displayNameJoiner,
         state,
         commandExtensions,
         sceneBackend,

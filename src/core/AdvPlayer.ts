@@ -419,7 +419,7 @@ function presentationSource(cmd: AdvCommand): AdvCommand {
 function targetDisplayName(cmd: AdvCommand, runtime: AdvRuntimeConfig, resolve = localizedText): StoryResolvedText {
   if (cmd.targetStatus === 2) return { text: "" };
   if (cmd.targetStatus === 1) return { text: "???" };
-  const split = runtime.targetNameSplitKey || "・";
+  const split = resolve(runtime.displayNameJoiner ?? (runtime.targetNameSplitKey || "・")).text;
   const commandTextNames = localizedTextEntries(commandTargetTextNames(cmd), resolve);
   if (commandTextNames.length) return joinLocalizedText(commandTextNames, split);
   const names = (cmd.targets || [])
@@ -429,7 +429,7 @@ function targetDisplayName(cmd: AdvCommand, runtime: AdvRuntimeConfig, resolve =
 }
 
 function chatWindowDisplayName(cmd: AdvCommand, runtime: AdvRuntimeConfig, resolve = localizedText): StoryResolvedText {
-  const split = runtime.targetNameSplitKey || "・";
+  const split = resolve(runtime.displayNameJoiner ?? (runtime.targetNameSplitKey || "・")).text;
   const commandTextNames = localizedTextEntries(commandTargetTextNames(cmd), resolve);
   if (commandTextNames.length) return joinLocalizedText(commandTextNames, split);
   const targetTextNames = localizedTextIds(commandTargetTextIds(cmd), resolve);
@@ -801,10 +801,12 @@ export class AdvPlayer {
     characterProviders = [],
     resourcePreparers = [],
     resolveLocalizedText = resolveStoryLocalizedText,
+    displayNameJoiner,
     textMetrics = DEFAULT_ADV_TEXT_METRICS,
   }: {
     mount: HTMLElement;
     resolveLocalizedText?: typeof resolveStoryLocalizedText;
+    displayNameJoiner?: unknown;
     story: AdvStory;
     state: AdvPlayerState;
     commandExtensions?: readonly AdvCommandExtensionRegistration[];
@@ -873,6 +875,7 @@ export class AdvPlayer {
     this.story = story;
     this.state = state;
     this.runtime = mergeAdvRuntime(story?.runtime);
+    if (displayNameJoiner !== undefined) this.runtime.displayNameJoiner = displayNameJoiner;
     this.Model = new AdvPlayerModel();
     this.Model.isPause = state.paused === true;
     this.Session = new AdvPlaybackSession(this.runtime);
@@ -2839,6 +2842,12 @@ export class AdvPlayer {
     };
   }
 
+  getDisplayNameJoiner(legacyJoiner?: string): string {
+    return this.resolveLocalizedText(
+      this.runtime.displayNameJoiner ?? legacyJoiner ?? (this.runtime.targetNameSplitKey || "・"),
+    ).text;
+  }
+
   dialogueSources(command: AdvCommand): { text: unknown; texts: unknown[]; speakers: unknown[]; separator: string } {
     const names = arrayValue(commandTargetTextNames(command)).filter((value) =>
       this.resolveLocalizedText(value).text.trim(),
@@ -2859,7 +2868,7 @@ export class AdvPlayer {
               : targets.length
                 ? targets
                 : [command.targetName ?? ""],
-      separator: this.runtime.targetNameSplitKey || "・",
+      separator: this.getDisplayNameJoiner(),
     };
   }
 
