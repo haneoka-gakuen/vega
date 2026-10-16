@@ -7,3 +7,6 @@ coverage/
 .env.*
 !.env.example
 .dependencies/
+/target/
+/src/generated/
+**/.dart_tool/

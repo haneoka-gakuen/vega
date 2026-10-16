@@ -1,0 +1,13 @@
+[package]
+name = "vega-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vega_runtime"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+vega-core = { path = "../vega-core" }

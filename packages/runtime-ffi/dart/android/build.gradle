@@ -1,0 +1,54 @@
+group = "org.vega.runtime"
+version = "0.1.0"
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "org.vega.runtime"
+    compileSdk = 36
+    ndkVersion = "28.2.13676358"
+    defaultConfig { minSdk = 21 }
+}
+
+def workspace = file("../../../..").canonicalFile
+def rustOutput = layout.buildDirectory.dir("rust-jni")
+def cargoOutput = layout.buildDirectory.dir("rust")
+android.sourceSets.main.jniLibs.srcDir(rustOutput.get().asFile)
+
+def rustTriples = [
+    "arm64-v8a": ["aarch64-linux-android", "aarch64-linux-android"],
+    "armeabi-v7a": ["armv7-linux-androideabi", "armv7a-linux-androideabi"],
+    "x86_64": ["x86_64-linux-android", "x86_64-linux-android"],
+]
+def rustTasks = rustTriples.collect { abi, triple ->
+    tasks.register("buildVegaRuntime_${abi.replace('-', '_')}", Exec) {
+        inputs.files(new File(workspace, "Cargo.toml"), new File(workspace, "Cargo.lock"))
+        inputs.dir(new File(workspace, "crates/vega-core"))
+        inputs.dir(new File(workspace, "crates/vega-native"))
+        def destination = rustOutput.map { it.file("${abi}/libvega_runtime.so") }
+        outputs.file(destination)
+        doFirst {
+            def ndk = androidComponents.sdkComponents.ndkDirectory.get().asFile
+            def os = System.getProperty("os.name")
+            def host = os.startsWith("Mac") ? "darwin-x86_64" :
+                os.startsWith("Windows") ? "windows-x86_64" : "linux-x86_64"
+            def suffix = os.startsWith("Windows") ? ".cmd" : ""
+            def linker = new File(ndk, "toolchains/llvm/prebuilt/${host}/bin/${triple[1]}21-clang${suffix}")
+            environment("CARGO_TARGET_${triple[0].toUpperCase().replace('-', '_')}_LINKER", linker.absolutePath)
+            environment("CARGO_TARGET_${triple[0].toUpperCase().replace('-', '_')}_RUSTFLAGS",
+                "-C link-arg=-Wl,-z,max-page-size=16384")
+            environment("CARGO_BUILD_JOBS", "1")
+            environment("CARGO_TARGET_DIR", cargoOutput.get().asFile.absolutePath)
+            def cargo = System.getenv("VEGA_CARGO_EXECUTABLE") ?: "cargo"
+            commandLine(cargo, "build", "--release", "--locked", "-p", "vega-native",
+                "--manifest-path", new File(workspace, "Cargo.toml"), "--target", triple[0])
+        }
+        doLast {
+            copy {
+                from(cargoOutput.map { it.file("${triple[0]}/release/libvega_runtime.so") })
+                into(destination.get().asFile.parentFile)
+            }
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn(rustTasks) }
