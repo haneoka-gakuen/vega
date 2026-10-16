@@ -84,6 +84,7 @@ export {
 
 export * from "./rendering/StoryScreenEffects";
 export * from "./rendering/StoryFrameLayout";
+export type * from "./rendering/StoryCanvasParticles";
 export * from "./rendering/StoryStillPresentation";
 export * from "./rendering/StoryPlaneLayout";
 

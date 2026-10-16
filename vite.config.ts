@@ -21,6 +21,8 @@ export default defineConfig({
         index: source("index.ts"),
         audio: source("audio-entry.ts"),
         engine: source("engine-entry.ts"),
+        web: source("web-entry.ts"),
+        "web-ui": source("web-ui-entry.ts"),
         "host-resources": source("host-resources-entry.ts"),
         marketplace: source("marketplace-entry.ts"),
         plugin: source("plugin-entry.ts"),

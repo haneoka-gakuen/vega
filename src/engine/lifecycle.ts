@@ -86,7 +86,7 @@ export class VegaLifetime {
     });
   }
 
-  abort(reason: unknown = new DOMException(`Lifetime disposed: ${this.name}`, "AbortError")): void {
+  abort(reason: unknown = Object.assign(new Error(`Lifetime disposed: ${this.name}`), { name: "AbortError" })): void {
     if (!this.signal.aborted) this.controller.abort(reason);
   }
 

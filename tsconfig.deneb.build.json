@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "outDir": "dist/deneb-runtime-types"
+  },
+  "include": ["src/deneb-runtime-entry.ts", "src/types/**/*.d.ts"]
+}

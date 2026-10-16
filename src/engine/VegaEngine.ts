@@ -1,23 +1,15 @@
-import { AdvPlayer } from "../core/AdvPlayer";
+import type { VegaNarrativeSettings } from "@haneoka/vega-protocol";
+import type { VegaNarrativeStore } from "../narrative/state";
+import type { VegaSaveStorage } from "../narrative/save";
+import type { StoryResolvedText } from "../runtime";
+import type { VegaShellController } from "../shell/contracts";
+import type { VegaExecutionDriver } from "../execution/ports";
 import type { AdvCommandExecutor } from "../core/AdvCommandService";
-import { mergeAdvRuntime } from "../core/AdvConstants";
-import { GenericStoryScene } from "../rendering/dom/GenericStoryScene";
 import type { VegaNarrativeInputProvider } from "../narrative/commands";
-import { VegaLocalStorageSaveStorage, VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
-import { VegaNarrativeStore } from "../narrative/state";
-import type { StorySceneBackend } from "../rendering/StorySceneBackend";
 import type { StoryResourceResolver } from "../resources/StoryResourcePort";
-import type { StoryRendererExtensionRegistry, StoryRendererServiceKey } from "../rendering/StoryRendererExtensions";
-import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { AdvPlayerState, AdvStory } from "../types/AdvRuntime";
-import { createVegaShellController, type VegaManagedShellController } from "../shell/controller";
-import { VEGA_SHELL_CONTROLLER, type VegaShellController } from "../shell/contracts";
-import { VEGA_TEXT_METRICS } from "../core/AdvTextRenderValue";
 import { VegaEventBus, type VegaEventHandler, type VegaEventMap } from "./events";
 import { VegaLifetime } from "./lifecycle";
-import { createVegaPlayerPresentation, mountVegaUiSlots, type VegaPlayerPresentation } from "./playerPresentation";
-import { createBrowserNarrativeInput } from "./browserNarrativeInput";
-import { selectVegaRenderContribution } from "./playerPluginPreset";
 import {
   VEGA_STORAGE_PORT,
   VegaPluginHost,
@@ -32,6 +24,8 @@ let playerSequence = 0;
 
 export interface VegaEngineOptions {
   readonly id?: string;
+  /** Composition port supplied by the selected platform host. */
+  readonly playerHost?: VegaPlayerHost;
   /** Plugins supplied by applications always receive third-party authority. */
   readonly plugins?: readonly VegaPlugin[];
   /** Only Vega distribution code should populate this trusted list. */
@@ -53,12 +47,15 @@ export interface VegaEngineStorage {
 export type VegaInputHandler = VegaEventHandler<VegaInputEvent>;
 
 export interface VegaPlayerOptions {
-  readonly mount: HTMLElement;
-  /** Caller-owned complete resource port. Omitted ports use the default resolver. */
+  /** Opaque presentation surface interpreted only by the selected host. */
+  readonly surface: unknown;
+  /** Driver ownership transfers to the created player; the host supplies its default. */
+  readonly executionDriver?: VegaExecutionDriver;
+  /** Caller-owned complete resource port. The host supplies any default. */
   readonly resources?: StoryResourceResolver;
   readonly story: AdvStory;
-  readonly resolveLocalizedText?: AdvPlayer["resolveLocalizedText"];
-  /** Display punctuation only; preserves authored target bindings. */
+  readonly resolveLocalizedText?: (value: unknown) => StoryResolvedText;
+  /** Localizable display joiner; does not change authored target bindings. */
   readonly displayNameJoiner?: unknown;
   readonly state?: AdvPlayerState;
   readonly narrativeStore?: VegaNarrativeStore;
@@ -89,7 +86,7 @@ export interface VegaPlayerShellOptions {
   readonly storage?: VegaSaveStorage;
   readonly projectId?: string;
   readonly settingsId?: string;
-  readonly initialSettings?: Parameters<typeof createVegaShellController>[0]["initialSettings"];
+  readonly initialSettings?: Partial<VegaNarrativeSettings>;
   readonly title?: string;
   readonly initialScreen?: "title" | "game";
   readonly onExitRequest?: () => void | Promise<void>;
@@ -97,12 +94,27 @@ export interface VegaPlayerShellOptions {
 
 export interface VegaPlayerHandle {
   readonly id: string;
-  readonly player: AdvPlayer;
+  readonly player: unknown;
   readonly lifetime: VegaLifetime;
-  readonly root: HTMLElement;
-  readonly slots: ReadonlyMap<string, HTMLElement>;
+  readonly root: unknown;
+  readonly slots: ReadonlyMap<string, unknown>;
   readonly shell?: VegaShellController;
   dispose(): Promise<void>;
+}
+
+/** Platform-owned presentation/runtime handle; core never reads its surface. */
+export interface VegaHostedPlayer {
+  readonly player: unknown;
+  readonly root: unknown;
+  readonly slots: ReadonlyMap<string, unknown>;
+  readonly shell?: VegaShellController;
+}
+
+export interface VegaPlayerHost {
+  create(
+    context: { readonly engine: VegaEngine; readonly id: string; readonly lifetime: VegaLifetime },
+    options: VegaPlayerOptions,
+  ): Promise<VegaHostedPlayer>;
 }
 
 export type VegaEnginePhase = "created" | "starting" | "ready" | "failed" | "disposing" | "disposed";
@@ -124,13 +136,14 @@ export class VegaEngine {
   private readonly pendingPluginInstalls = new Set<Promise<void>>();
   private readonly activePlayers = new Map<string, ActivePlayer>();
   private readonly volatileStorage = new Map<string, unknown>();
-  private defaultSaveStorage: VegaSaveStorage | undefined;
+  private readonly playerHost?: VegaPlayerHost;
   private inputDispatchTail: Promise<void> = Promise.resolve();
   private phaseValue: VegaEnginePhase = "created";
   private startPromise: Promise<this> | null = null;
   private disposal: Promise<void> | null = null;
 
   constructor(options: VegaEngineOptions = {}) {
+    this.playerHost = options.playerHost;
     this.id = options.id || `vega-${++engineSequence}`;
     this.lifetime = new VegaLifetime(this.id);
     this.events = new VegaEventBus<VegaEventMap>();
@@ -210,182 +223,27 @@ export class VegaEngine {
     if (this.phaseValue !== "ready") {
       throw new ReferenceError(`Vega engine ${this.id} cannot create a player while ${this.phaseValue}`);
     }
+    if (!this.playerHost)
+      throw new TypeError("Vega requires a player host; browser applications use @haneoka/vega/web");
     const id = `${this.id}/player-${++playerSequence}`;
     const lifetime = this.lifetime.child(`players/player-${playerSequence}`);
-    const state = options.state ?? createVegaPlayerState();
-    const narrativeStore = options.narrativeStore ?? new VegaNarrativeStore();
-    const commandExtensions = [...this.plugins.commandExtensions.values()].map(
-      ({ opcode, commandType, execute, authority, replaySafe, prepareStoryResources, enumerateCommandResources }) => ({
-        opcode,
-        commandType,
-        execute,
-        authority,
-        replaySafe,
-        prepareStoryResources,
-        enumerateCommandResources,
-      }),
-    );
-    const resources = options.resources ?? new DefaultStoryResourceResolver(this.plugins.contributions("resource"));
-    let presentation: VegaPlayerPresentation | undefined;
-    let player: AdvPlayer | undefined;
-    let constructedPlayerDisposal: Promise<void> | undefined;
-    let sceneBackend: StorySceneBackend | undefined;
-    let shell: VegaManagedShellController | VegaShellController | undefined;
+    let hosted: VegaHostedPlayer;
     try {
-      presentation = createVegaPlayerPresentation({
-        engineId: this.id,
-        playerId: id,
-        mount: options.mount,
-        lifetime,
-        themes: this.plugins.contributions("theme"),
-        theme: options.theme,
-        uiSlots: this.plugins.contributions("ui-slot"),
-      });
-      const renderContribution = selectVegaRenderContribution(
-        this.plugins.contributions("render"),
-        options.renderBackend,
-      );
-      const characterProviders = this.plugins.contributions("character");
-      if (renderContribution) {
-        const rendererExtensions: StoryRendererExtensionRegistry = Object.freeze({
-          effects: Object.freeze([...this.plugins.contributions("effect")]),
-          service: <T>(key: StoryRendererServiceKey<T>) => this.plugins.service(key),
-        });
-        const context = {
-          runtime: mergeAdvRuntime(options.story.runtime),
-          state,
-          resources,
-          characterProviders,
-          rendererExtensions,
-          signal: lifetime.signal,
-        };
-        sceneBackend = await renderContribution.create(context, lifetime.signal);
-        if (!sceneBackend || typeof sceneBackend.setup !== "function" || typeof sceneBackend.destroy !== "function") {
-          throw new TypeError(`Vega render contribution ${renderContribution.id} did not create a scene backend`);
-        }
-      }
-      const browserInput =
-        options.narrativeInput || !presentation.root.ownerDocument?.defaultView
-          ? undefined
-          : createBrowserNarrativeInput(presentation.root, lifetime.signal);
-      if (browserInput) lifetime.use(browserInput);
-      // Without a render plugin, fall back to the portable DOM renderer.
-      sceneBackend ??= new GenericStoryScene(mergeAdvRuntime(options.story.runtime), state, resources, {
-        characterProviders,
-      });
-      player = new AdvPlayer({
-        mount: presentation.stage,
-        story: options.story,
-        resolveLocalizedText: options.resolveLocalizedText,
-        displayNameJoiner: options.displayNameJoiner,
-        state,
-        commandExtensions,
-        sceneBackend,
-        resources,
-        narrativeStore,
-        narrativeInput: options.narrativeInput ?? browserInput?.provider,
-        characterProviders,
-        resourcePreparers: presentation.theme ? [presentation.theme] : [],
-        textMetrics: this.plugins.service(VEGA_TEXT_METRICS),
-      });
-      const constructedPlayer = player;
-      const disposeConstructedPlayer = (): Promise<void> => {
-        if (!constructedPlayerDisposal) {
-          try {
-            constructedPlayerDisposal = constructedPlayer.dispose({ releaseTextures: true });
-          } catch (error) {
-            constructedPlayerDisposal = Promise.reject(error);
-          }
-        }
-        return constructedPlayerDisposal;
-      };
-      // Abort retires Loader/audio/command ownership before a UI finalizer
-      // can wait on it. The deferred cleanup still awaits scene destruction.
-      const onPlayerAbort = (): void => {
-        void disposeConstructedPlayer().catch((error) => {
-          console.error("[Vega] player disposal after lifetime abort failed", error);
-        });
-      };
-      if (lifetime.signal.aborted) onPlayerAbort();
-      else lifetime.signal.addEventListener("abort", onPlayerAbort, { once: true });
-      lifetime.defer(() => {
-        lifetime.signal.removeEventListener("abort", onPlayerAbort);
-        return disposeConstructedPlayer();
-      });
-      throwIfAborted(lifetime.signal);
-      const playerServices = playerServiceMap(options.services);
-      const configuredShell = playerServices.get(VEGA_SHELL_CONTROLLER.id) as VegaShellController | undefined;
-      const engineShell = this.plugins.service(VEGA_SHELL_CONTROLLER);
-      const uiRequiresShell = this.plugins
-        .contributions("ui-slot")
-        .some((contribution) =>
-          contribution.requiredServices?.some(({ id: serviceId }) => serviceId === VEGA_SHELL_CONTROLLER.id),
-        );
-      if (configuredShell || engineShell) {
-        shell = configuredShell ?? engineShell;
-      } else if (options.shell !== false && (options.shell !== undefined || uiRequiresShell)) {
-        const shellOptions = options.shell || {};
-        shell = await createVegaShellController({
-          player: constructedPlayer,
-          story: options.story,
-          narrativeStore,
-          storage:
-            shellOptions.storage ?? (this.defaultSaveStorage ??= browserSaveStorage() ?? new VegaMemorySaveStorage()),
-          projectId: shellOptions.projectId,
-          settingsId: shellOptions.settingsId,
-          initialSettings: shellOptions.initialSettings,
-          title: shellOptions.title,
-          initialScreen: shellOptions.initialScreen,
-          root: presentation.root,
-          signal: lifetime.signal,
-          onExitRequest: async () => {
-            await shellOptions.onExitRequest?.();
-            await this.events.emit("shell:exit-request", { engineId: this.id, playerId: id });
-          },
-        });
-        lifetime.use(shell);
-        playerServices.set(VEGA_SHELL_CONTROLLER.id, shell);
-      }
-      await mountVegaUiSlots({
-        resources,
-        contributions: this.plugins.contributions("ui-slot"),
-        presentation,
-        lifetime,
-        engineId: this.id,
-        playerId: id,
-        player: constructedPlayer,
-        state,
-        service: (key) =>
-          playerServices.has(key.id) ? (playerServices.get(key.id) as never) : this.plugins.service(key),
-      });
-      await constructedPlayer.boot();
+      hosted = await this.playerHost.create({ engine: this, id, lifetime }, options);
       throwIfAborted(lifetime.signal);
     } catch (error) {
-      const cleanup = [lifetime.dispose()];
-      if (!player && sceneBackend)
-        cleanup.push(Promise.resolve().then(() => sceneBackend!.destroy({ releaseTextures: true })));
-      if (constructedPlayerDisposal) cleanup.push(constructedPlayerDisposal);
-      const failures = (await Promise.allSettled(cleanup))
-        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-        .map((result) => result.reason);
-      if (failures.length)
-        throw new AggregateError([error, ...failures], "Vega player construction and cleanup failed");
+      if (lifetime.active) {
+        try {
+          await lifetime.dispose();
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Vega player construction and cleanup failed");
+        }
+      }
       throw error;
     }
-    if (!player) throw new Error("Vega player construction completed without a player");
-    if (!presentation) throw new Error("Vega player construction completed without a presentation");
-
     const active: ActivePlayer = { id, lifetime, disposal: null };
     this.activePlayers.set(id, active);
-    const handle: VegaPlayerHandle = {
-      id,
-      player,
-      lifetime,
-      root: presentation.root,
-      slots: presentation.slots,
-      ...(shell ? { shell } : {}),
-      dispose: () => this.disposePlayer(active),
-    };
+    const handle: VegaPlayerHandle = { ...hosted, id, lifetime, dispose: () => this.disposePlayer(active) };
     try {
       await this.events.emit("player:create", { playerId: id });
       throwIfAborted(lifetime.signal);
@@ -647,7 +505,7 @@ const throwIfAborted = (signal: AbortSignal): void => {
 };
 
 const abortReason = (signal: AbortSignal): unknown =>
-  signal.reason ?? new DOMException("The Vega operation was aborted", "AbortError");
+  signal.reason ?? Object.assign(new Error("The Vega operation was aborted"), { name: "AbortError" });
 
 const settleWithAbort = <T>(operation: PromiseLike<T>, signal: AbortSignal): Promise<T> => {
   if (signal.aborted) return Promise.reject(abortReason(signal));
@@ -698,26 +556,6 @@ const linkAbortSignals = (
     signal.addEventListener("abort", listener, { once: true });
   }
   return { signal: controller.signal, dispose };
-};
-
-const playerServiceMap = (services: readonly VegaPlayerService[] | undefined): Map<string, unknown> => {
-  const result = new Map<string, unknown>();
-  for (const service of services ?? []) {
-    if (!service.key.id.trim()) throw new TypeError("Vega player service key must not be empty");
-    if (result.has(service.key.id)) throw new Error(`Duplicate Vega player service: ${service.key.id}`);
-    result.set(service.key.id, service.value);
-  }
-  return result;
-};
-
-const browserSaveStorage = (): VegaSaveStorage | undefined => {
-  if (typeof window === "undefined") return undefined;
-  try {
-    const storage = window.localStorage;
-    return storage ? new VegaLocalStorageSaveStorage(storage) : undefined;
-  } catch {
-    return undefined;
-  }
 };
 
 export const createVega = (options?: VegaEngineOptions): VegaEngine => new VegaEngine(options);

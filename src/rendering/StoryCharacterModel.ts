@@ -59,8 +59,16 @@ export interface StoryCharacterModel {
   playExpression?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
   /** Opcode 68: fade the clip in and loop it until stopParameterLoopMotion. */
   playParameterLoopMotion?(name: string, fadeInSeconds?: number): boolean | Promise<boolean>;
-  /** Ends a parameter loop, easing its parameters home over the clip's fade-out. */
+  /**
+   * Admit the stop synchronously; zero fade clears the channel immediately.
+   * A returned promise covers cleanup. Later requests retire earlier async work.
+   */
   stopParameterLoopMotion?(fadeSeconds?: number): void | Promise<void>;
+  /** Owned JSON-compatible state interpreted only by the same model provider. */
+  createSnapshot?(): unknown;
+  restoreSnapshot?(snapshot: unknown): void | Promise<void>;
+  /** Drop deferred requests without stopping an active animation channel. */
+  clearPausedRequests?(): void;
   /** Opcode 69: stop/resume auto eye blink; a running blink cycle completes so the eyes settle open. */
   setEyeBlinkStopped?(stopped: boolean, transitionSeconds?: number): void | Promise<void>;
   /**

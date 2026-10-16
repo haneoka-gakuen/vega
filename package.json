@@ -90,7 +90,7 @@
       "default": "./dist/host-resources.js"
     },
     "./deneb-runtime": {
-      "types": "./dist/deneb-runtime-entry.d.ts",
+      "types": "./dist/deneb-runtime-types/deneb-runtime-entry.d.ts",
       "import": "./dist/deneb-runtime/deneb-runtime.js",
       "default": "./dist/deneb-runtime/deneb-runtime.js"
     },
@@ -115,19 +115,30 @@
       "default": "./dist/vue-text.js"
     },
     "./styles.css": "./dist/styles.css",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./web": {
+      "types": "./dist/web-entry.d.ts",
+      "import": "./dist/web.js",
+      "default": "./dist/web.js"
+    },
+    "./web/ui": {
+      "types": "./dist/web-ui-entry.d.ts",
+      "import": "./dist/web-ui.js",
+      "default": "./dist/web-ui.js"
+    }
   },
   "scripts": {
     "build": "pnpm --filter @haneoka/vega-protocol run build && pnpm run build:core && pnpm --filter @haneoka/vega-react run build && pnpm --filter @haneoka/vega-web-component run build && pnpm run build:deneb",
-    "build:core": "vite build && vue-tsc -p tsconfig.build.json",
-    "build:deneb": "vite build --config vite.deneb.config.ts && node scripts/verify-deneb-bundle.mjs",
+    "build:core": "pnpm run build:wasm && vite build && vue-tsc -p tsconfig.build.json",
+    "build:deneb": "vite build --config vite.deneb.config.ts && vue-tsc -p tsconfig.deneb.build.json && node scripts/verify-deneb-bundle.mjs",
     "typecheck": "pnpm --filter @haneoka/vega-protocol run typecheck && pnpm run typecheck:core && pnpm --filter @haneoka/vega-react run typecheck && pnpm --filter @haneoka/vega-web-component run typecheck",
-    "typecheck:core": "vue-tsc -p tsconfig.json --noEmit",
+    "typecheck:core": "pnpm run build:wasm && vue-tsc -p tsconfig.json --noEmit",
     "verify:distribution": "node scripts/verify-distribution.mjs",
     "check": "pnpm run typecheck && pnpm run build && pnpm run verify:distribution",
     "prepack": "pnpm run check",
     "format": "prettier --write . --ignore-unknown",
-    "format:check": "prettier --check . --ignore-unknown"
+    "format:check": "prettier --check . --ignore-unknown",
+    "build:wasm": "node scripts/build-wasm.mjs"
   },
   "publishConfig": {
     "access": "public",
@@ -138,15 +149,21 @@
   },
   "packageManager": "pnpm@11.14.0",
   "dependencies": {
-    "@haneoka/vega-protocol": "workspace:*",
-    "@lucide/vue": "^1.27.0"
+    "@haneoka/vega-protocol": "workspace:*"
   },
   "peerDependencies": {
     "howler": ">=2.2.0 <3",
-    "vue": ">=3.5.0 <4"
+    "vue": ">=3.5.0 <4",
+    "@lucide/vue": ">=1.27.0 <2"
   },
   "peerDependenciesMeta": {
     "vue": {
+      "optional": true
+    },
+    "howler": {
+      "optional": true
+    },
+    "@lucide/vue": {
       "optional": true
     }
   },
@@ -160,6 +177,7 @@
     "vite": "^7.3.6",
     "vue": "3.5.39",
     "vue-tsc": "^3.3.6",
-    "prettier": "3.7.4"
+    "prettier": "3.7.4",
+    "@lucide/vue": "^1.27.0"
   }
 }

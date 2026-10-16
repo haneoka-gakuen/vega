@@ -4,6 +4,9 @@ export type AdvChatMaster = {
   inOutSoundId: number;
   chatWindowAssetName: string;
   chatIconAssetName: string;
+  /** Window prefab facts supplied by the story producer. */
+  isGroupChat?: boolean;
+  layoutMode?: number;
 };
 
 export type AdvChatWindowSpriteRect = {
@@ -23,6 +26,8 @@ export type AdvChatRuntimeAssets = {
   dataRootsByWindowAsset: Record<string, string>;
   windowRectsByDataRoot: Record<string, AdvChatWindowSpriteRect>;
   iconImagesByAsset: Record<string, string>;
+  /** Localized episode ADV text selected by AdvMasterIdSettings._chatReadTextId. */
+  readText?: unknown;
 };
 
 type AdvChatRuntimeCarrier = {

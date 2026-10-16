@@ -142,22 +142,67 @@ export function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
 }
 
+/** Optional owner tick port; ordinary callers retain the wall-clock RAF path. */
+export interface TweenClock {
+  nowSeconds(): number;
+  subscribe(tick: (timeSeconds: number) => void, invalidated: () => void): () => void;
+}
+
 export function tween({
   duration = 0,
   ease = (x: number) => x,
   update,
   signal,
+  clock,
 }: {
   duration?: number;
   ease?: (x: number) => number;
   update?: (eased: number, raw: number) => void;
   signal?: AbortSignal;
+  clock?: TweenClock;
 }) {
   if (signal?.aborted) return Promise.resolve();
   const seconds = Math.max(0, Number(duration) || 0);
   if (seconds <= 0) {
     update?.(1, 1);
     return Promise.resolve();
+  }
+  if (clock) {
+    const start = clock.nowSeconds();
+    if (!Number.isFinite(start)) throw new TypeError("Invalid tween clock point");
+    return new Promise<void>((resolve, reject) => {
+      let unsubscribe: (() => void) | undefined;
+      let settled = false;
+      const clean = (): boolean => {
+        if (settled) return false;
+        settled = true;
+        const remove = unsubscribe;
+        unsubscribe = undefined;
+        remove?.();
+        signal?.removeEventListener("abort", stop);
+        return true;
+      };
+      const stop = (): void => { if (clean()) resolve(); };
+      const fail = (error: unknown): void => { if (clean()) reject(error); };
+      if (signal?.aborted) { stop(); return; }
+      signal?.addEventListener("abort", stop, { once: true });
+      const tick = (now: number): void => {
+        if (settled) return;
+        if (signal?.aborted) { stop(); return; }
+        if (!Number.isFinite(now) || now < start) {
+          const error = new TypeError("Invalid tween clock point");
+          fail(error); throw error;
+        }
+        const raw = clamp01((now - start) / seconds);
+        try { update?.(ease(raw), raw); } catch (error) { fail(error); throw error; }
+        if (raw >= 1) stop();
+      };
+      try {
+        const remove = clock.subscribe(tick, stop);
+        if (settled) remove();
+        else unsubscribe = remove;
+      } catch (error) { fail(error); }
+    });
   }
   return new Promise<void>((resolve) => {
     const start = performance.now();

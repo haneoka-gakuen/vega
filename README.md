@@ -169,6 +169,60 @@ empty, traversal-based, and unsafe relative URLs before loading them. A host
 that serves licensed media should resolve the story's logical paths to release
 URLs and keep that mapping in its resource or theme plugin.
 
+## Deneb runtime consumer
+
+Altair authors and compiles the project, Vega executes it, and Deneb validates
+and packages the project with a runtime directory. Vega's Deneb adapter reuses
+the same engine and leaves renderer, theme, shell, and UI selection to the host.
+
+After building the protocol and core as above, build the adapter:
+
+```sh
+pnpm --filter @haneoka/vega build:deneb
+```
+
+This produces the self-contained ESM runtime, its integrity manifest, and legal
+notices in `dist/deneb-runtime/`, plus the public adapter declarations in
+`dist/deneb-runtime-types/`. Supply the complete runtime directory to Deneb's
+`--runtime-bundle` option. Runtime plugins are selected through Deneb's runtime
+plugin index or the factory's `engineOptions`; no shell or theme is installed
+implicitly.
+
+A JavaScript host can consume the same adapter directly:
+
+```ts
+import { createDenebRuntime } from "@haneoka/vega/deneb-runtime";
+
+const root = document.querySelector<HTMLElement>("#player");
+if (!root) throw new Error("The page needs #player");
+
+const controller = new AbortController();
+const runtime = await createDenebRuntime({
+  abiVersion: 1,
+  signal: controller.signal,
+});
+const mounted = await runtime.mount({
+  root,
+  projectUrl: new URL("./project.vega.json", document.baseURI),
+  signal: controller.signal,
+});
+
+// Observe completion without blocking the host's controls.
+void mounted.playback.catch(console.error);
+
+async function disposePlayer() {
+  controller.abort();
+  await mounted.dispose();
+  await runtime.dispose();
+}
+addEventListener("pagehide", () => void disposePlayer(), { once: true });
+```
+
+The plain DOM backend is available when the host supplies no render plugin.
+Install UI-slot plugins for dialogue and controls. Factory and mount accept
+`null` for absent runtime-plugin and external-runtime indexes, matching Deneb's
+generated bootloader. Disposal also cancels an in-progress project request.
+
 ## License
 
 Vega is available under [MPL-2.0](LICENSE). The scope and attribution details

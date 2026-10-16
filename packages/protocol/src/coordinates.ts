@@ -20,13 +20,15 @@ const finite = (value: number): number => {
 };
 
 export function scenePlaneSize(reference: SceneCoordinateReference, depth: number): { width: number; height: number } {
-  if (!(
-    finite(reference.width) > 0 &&
-    finite(reference.height) > 0 &&
-    finite(depth) > 0 &&
-    finite(reference.fov) > 0 &&
-    reference.fov < 180
-  ))
+  if (
+    !(
+      finite(reference.width) > 0 &&
+      finite(reference.height) > 0 &&
+      finite(depth) > 0 &&
+      finite(reference.fov) > 0 &&
+      reference.fov < 180
+    )
+  )
     throw new RangeError("A scene reference requires positive dimensions, depth, and a FOV between 0 and 180");
   const height = 2 * depth * Math.tan((reference.fov * Math.PI) / 360);
   return { width: (height * reference.width) / reference.height, height };
@@ -101,24 +103,3 @@ export function scenePointToNdc(reference: SceneCoordinateReference, point: Scen
     z: depth,
   };
 }
-
-const focusCoordinates = [-1.6, -1.2, -0.8, -0.4, 0, 0.4, 0.8, 1.2, 1.6];
-const focusAnchors = Object.freeze(
-  Object.fromEntries(focusCoordinates.map((x, index) => [index + 1, Object.freeze({ x, y: 0, z: 0 })])) as Record<
-    number,
-    ScenePoint
-  >,
-);
-export const DEFAULT_SCENE_GEOMETRY = Object.freeze({
-  fov: 39.6,
-  cameraPosition: Object.freeze({ x: 0, y: 0, z: 0 }),
-  cameraRotation: Object.freeze({ x: 0, y: 0, z: 0 }),
-  characterFieldPosition: Object.freeze({ x: 0, y: -0.45, z: 5.5 }),
-  backgroundFieldPosition: Object.freeze({ x: 0, y: 0, z: 16 }),
-  characterFieldScale: 4,
-  backgroundFieldScale: 1,
-  positions: Object.freeze(
-    Object.fromEntries([1, 3, 5, 7, 9].map((slot) => [slot, focusAnchors[slot]!])) as Record<number, ScenePoint>,
-  ),
-  focusAnchors,
-});

@@ -1,0 +1,27 @@
+name: Set up locked Vega WASM tools
+description: Install the Rust WASM target and the wasm-bindgen CLI matching Cargo.lock.
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+    - name: Read locked wasm-bindgen version
+      id: bindgen
+      shell: bash
+      env:
+        VEGA_CARGO_LOCK: ${{ github.action_path }}/../../../Cargo.lock
+      run: |
+        node --input-type=module <<'NODE_VERSION'
+        import { readFileSync, appendFileSync } from 'node:fs';
+        const blocks = readFileSync(process.env.VEGA_CARGO_LOCK, 'utf8').replaceAll('\r\n', '\n').split(/\[\[package\]\]/u);
+        const packages = blocks.filter((block) => /^name = "wasm-bindgen"$/mu.test(block));
+        const version = packages.length === 1 ? /^version = "([^"]+)"$/mu.exec(packages[0])?.[1] : undefined;
+        if (!version || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) {
+          throw new Error('Cargo.lock must contain exactly one wasm-bindgen version');
+        }
+        appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n');
+        NODE_VERSION
+    - name: Install matching wasm-bindgen CLI
+      shell: bash
+      run: cargo install wasm-bindgen-cli --version "${{ steps.bindgen.outputs.version }}" --locked

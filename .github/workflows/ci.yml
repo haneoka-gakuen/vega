@@ -33,6 +33,8 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: vega/pnpm-lock.yaml
+      - name: Set up locked Rust/WASM tools
+        uses: ./vega/.github/actions/setup-wasm
       - run: pnpm install --frozen-lockfile
         working-directory: vega
       - run: pnpm check
@@ -64,6 +66,8 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: vega/pnpm-lock.yaml
+      - name: Set up locked Rust/WASM tools
+        uses: ./vega/.github/actions/setup-wasm
       - run: pnpm install --frozen-lockfile
         working-directory: vega
       - run: pnpm typecheck

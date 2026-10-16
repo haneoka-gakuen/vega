@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { AdvPlayer } from "../core/AdvPlayer";
+import { createRustVegaExecutionDriver } from "../execution/wasm";
 import { mergeAdvRuntime } from "../core/AdvConstants";
 import { GenericStoryScene } from "../rendering/dom/GenericStoryScene";
 import { createVegaPlayerState } from "../engine/VegaEngine";
@@ -8,7 +9,8 @@ import { resolveVegaOfficialPlayerPlugins, type VegaOfficialPlayerPluginPreset }
 import { createVegaPlayerPresentation, isVegaUiSlotEventTarget, mountVegaUiSlots } from "../engine/playerPresentation";
 import type { VegaInputEvent, VegaPlugin, VegaServiceKey } from "../engine/plugins";
 import { VegaNarrativeStore } from "../narrative/state";
-import { VegaLocalStorageSaveStorage, VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
+import { VegaMemorySaveStorage, type VegaSaveStorage } from "../narrative/save";
+import { VegaLocalStorageSaveStorage } from "../hosts/web/saveStorage";
 import type { StoryResourceLease, StorySceneBackend } from "../rendering/StorySceneBackend";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
 import type { StoryResourceScope } from "../runtime";
@@ -399,7 +401,16 @@ async function boot(attempt: BootAttempt): Promise<AdvPlayer | null> {
     }
 
     const narrativeStore = new VegaNarrativeStore();
+    const executionDriver = await createRustVegaExecutionDriver((storyValue.commands ?? []).map((_, index) => index));
+    if (!isBootAttemptActive(attempt)) {
+      executionDriver.dispose();
+      await disposeUnownedSceneBackend();
+      await disposeBootPlayer();
+      return null;
+    }
+    unownedPluginPreset.lifetime.use(executionDriver);
     current = new AdvPlayer({
+      executionDriver,
       mount: presentation.stage,
       story: storyValue,
       state,

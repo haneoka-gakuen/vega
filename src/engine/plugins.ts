@@ -1,6 +1,6 @@
 import { VEGA_EXTENSION_OPCODE_MINIMUM, vegaCommandType } from "@haneoka/vega-protocol";
+import type { VegaUiActionPort } from "@haneoka/vega-protocol";
 import type { AdvCommandExecutor } from "../core/AdvCommandService";
-import type { AdvPlayer } from "../core/AdvPlayer";
 import type {
   StorySceneBackend,
   StorySceneBackendContext,
@@ -8,7 +8,6 @@ import type {
 } from "../rendering/StorySceneBackend";
 import type { StoryCharacterProvider } from "../rendering/StoryCharacterModel";
 import type { StoryRendererEffectContribution, StoryRendererServiceKey } from "../rendering/StoryRendererExtensions";
-import type { AdvPlayerState } from "../types/AdvRuntime";
 import type { StoryCommandResourcePreparer, StoryResourcePreparer } from "../resources/StoryResourcePreparation";
 import { VegaEventBus, type VegaEventMap } from "./events";
 import { VegaLifetime, type VegaDisposable } from "./lifecycle";
@@ -97,18 +96,21 @@ export interface VegaThemeContribution extends VegaContribution, StoryResourcePr
   readonly cssText?: string;
 }
 
-export interface VegaUiSlotContext {
+export interface VegaUiSlotContext<State = unknown> {
   readonly resources?: StoryResourceResolver;
   readonly engineId: string;
   readonly playerId: string;
-  readonly player: AdvPlayer;
-  readonly state: AdvPlayerState;
-  readonly root: HTMLElement;
+  readonly state: State;
+  readonly actions: VegaUiActionPort;
   readonly signal: AbortSignal;
   readonly services: <T>(key: VegaServiceKey<T>) => T | undefined;
 }
 
-export interface VegaUiSlotContribution extends VegaContribution {
+export interface VegaUiSlotContribution<
+  Surface = unknown,
+  Context extends VegaUiSlotContext = VegaUiSlotContext,
+> extends VegaContribution {
+  readonly hostKind?: string;
   readonly slot: "before-stage" | "stage-overlay" | "dialogue" | "controls" | "after-stage" | (string & {});
   /**
    * Replace contributions registered earlier for the same slot.
@@ -125,7 +127,7 @@ export interface VegaUiSlotContribution extends VegaContribution {
    * never enables shell or persistence facilities as a side effect.
    */
   readonly requiredServices?: readonly VegaServiceKey<unknown>[];
-  mount(host: HTMLElement, context: VegaUiSlotContext): VegaDisposable | Promise<VegaDisposable>;
+  mount(surface: Surface, context: Context): VegaDisposable | Promise<VegaDisposable>;
 }
 
 export interface VegaRenderContribution extends VegaContribution {

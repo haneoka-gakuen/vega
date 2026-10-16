@@ -177,22 +177,23 @@ class DefaultVegaShellController implements VegaManagedShellController {
       fastForward: this.player.state.fastForward,
       settings: { ...narrative.settings },
       saves: this.saves.map((save) => clone(save)),
-      backlog: narrative.backlog.map((entry) => ({
-        ...clone(entry),
-        ...(entry.textSources
-          ? { text: entry.textSources.map((value) => this.player.resolveLocalizedText(value).text).join("") }
-          : entry.textSource === undefined
+      backlog: narrative.backlog.map((entry) => {
+        const texts =
+          entry.textSources?.map((value) => this.player.resolveLocalizedText(value)) ??
+          (entry.textSource === undefined ? undefined : [this.player.resolveLocalizedText(entry.textSource)]);
+        const contentLanguage =
+          texts?.length && texts.every((text) => text.lang === texts[0]?.lang) ? texts[0]?.lang : undefined;
+        return {
+          ...clone(entry),
+          ...(texts ? { text: texts.map((text) => text.text).join("") } : {}),
+          ...(entry.speakerSources === undefined
             ? {}
-            : { text: this.player.resolveLocalizedText(entry.textSource).text }),
-        ...(entry.speakerSources === undefined
-          ? {}
-          : {
-              speaker: entry.speakerSources
-                .map((value) => this.player.resolveLocalizedText(value).text)
-                .filter(Boolean)
-                .join(this.player.getDisplayNameJoiner(entry.speakerSeparator ?? "・")),
-            }),
-      })),
+            : {
+                speaker: this.player.resolveSpeakerNames(entry.speakerSources, entry.speakerSeparator, contentLanguage)
+                  .text,
+              }),
+        };
+      }),
       gallery: this.galleryEntries.map(
         (entry): VegaShellGalleryItem => ({
           ...entry,

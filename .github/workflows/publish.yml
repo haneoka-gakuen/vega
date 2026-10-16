@@ -41,6 +41,8 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: node scripts/verify-release-tag.mjs
 
+      - name: Set up locked Rust/WASM tools
+        uses: ./vega/.github/actions/setup-wasm
       - name: Install dependencies
         working-directory: vega
         run: pnpm install --frozen-lockfile

@@ -1,3 +1,5 @@
+import type { StoryCanvasCamera } from "../rendering/StoryFrameLayout";
+import type { StoryCanvasParticleBakes } from "../rendering/StoryCanvasParticles";
 import type { AdvBaseQualityMode, AdvQualityNumberTable, AdvQualityOverrides } from "./AdvQuality";
 import type { AdvChatRuntimeAssets } from "../core/AdvChatAssets";
 import type { VegaJsonValue } from "@haneoka/vega-protocol";
@@ -74,6 +76,7 @@ export interface AdvStageConfig {
   initialCameraPosition?: AdvWorldPosition;
   initialCameraRotation?: AdvWorldPosition;
   characterFieldPosition?: AdvWorldPosition;
+  characterBasePosition?: AdvWorldPosition;
   backgroundFieldPosition?: AdvWorldPosition;
   characterFieldScale?: number;
   backgroundFieldScale?: number;
@@ -133,6 +136,8 @@ export interface AdvFontEntry extends StoryFontFaceDescriptor {
 }
 
 export interface AdvRuntimeConfig {
+  /** Keep prior bindings until their destination is explicitly rebound. */
+  retainHistoricalCharacterBindings?: boolean;
   /** Deterministic browser selection; the reference runtime persists a device-scored mode. */
   baseQualityMode: AdvBaseQualityMode;
   allowUnityLighting: boolean;
@@ -213,6 +218,10 @@ export interface AdvRuntimeConfig {
   defaultRuleTransition?: AdvRuleTransitionEntry;
   /** Focus data settings key override. */
   usingFocusDataSettingsKey?: string;
+  /** Release-owned VideoAndStillCamera metadata; absent in legacy content. */
+  screenCamera?: StoryCanvasCamera;
+  /** GameDetailConfigDefaultData, enum indices Worst0 through Best4. */
+  resolutionBaseLengthMaxByQuality?: AdvQualityNumberTable;
   postEffects?: Record<string, AdvPostEffectEntry>;
   stages?: Record<string, AdvStageEntry>;
   /**
@@ -465,20 +474,39 @@ export interface AdvFrameAnimationBinding {
     | "sizeX"
     | "sizeY"
     | "scale"
+    | "rotationEuler"
+    | "rotationQuaternion"
     | "active"
     | "imageR"
     | "imageG"
-    | "imageB";
+    | "imageB"
+    | "imageA";
   readonly curve: number;
 }
 
 export interface AdvFrameAnimation {
+  readonly name?: string;
+  readonly speed?: number;
   readonly duration: number;
   readonly loop: boolean;
   readonly streamedCurveCount: number;
   readonly constantValues: readonly number[];
   readonly stream: string;
   readonly bindings: readonly AdvFrameAnimationBinding[];
+}
+
+/** Renderer-neutral state/clip bindings supplied by the authored source adapter. */
+export interface AdvFrameAnimatorState {
+  readonly clipName?: string;
+  readonly duration: number;
+  readonly speed: number;
+  readonly loop: boolean;
+  readonly animation?: AdvFrameAnimation;
+}
+
+export interface AdvFrameAnimator {
+  readonly defaultState: string;
+  readonly states: Readonly<Record<string, AdvFrameAnimatorState>>;
 }
 
 /**
@@ -505,6 +533,7 @@ export interface AdvFrameParticleDescriptor {
 }
 
 export interface AdvFrameEntry {
+  animator?: AdvFrameAnimator;
   animation?: AdvFrameAnimation;
   /** Authored Animator state variants keyed by full clip name (opcode 44 params[1]). */
   animationStates?: Readonly<Record<string, AdvFrameAnimation>>;
@@ -529,6 +558,8 @@ export interface AdvFrameEntry {
   layers?: AdvFrameParticleLayer[];
   /** Serialized ParticleSystems of the frame prefab, keyed by GameObject path. */
   particles?: readonly AdvFrameParticleDescriptor[];
+  /** Numeric canvas-bake bindings supplied by the source adapter. */
+  canvasParticleBakes?: StoryCanvasParticleBakes;
   /**
    * Renderer-plugin-owned Unity runtime graph backing `particles` (the shared
    * opcode-54 effect contract: nodes, particleSystems, particleRenderers,

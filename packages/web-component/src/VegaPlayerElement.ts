@@ -8,7 +8,7 @@ import {
   type VegaPlayerOptions,
   type VegaPlayerShellOptions,
   vegaProjectToAdvStory,
-} from "@haneoka/vega/engine";
+} from "@haneoka/vega/web";
 import { prepareStoryAudio } from "@haneoka/vega/audio";
 import type { VegaProject } from "@haneoka/vega-protocol";
 

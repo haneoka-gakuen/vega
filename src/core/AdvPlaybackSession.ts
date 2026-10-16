@@ -233,14 +233,20 @@ export class AdvPlaybackSession {
   }
 
   chatMemoryApplyRead(memoryId: string, senderChatId: number, readCount: number) {
+    if (senderChatId <= 0 || readCount <= 0) return;
     const state = this.writableChatMemoryState(memoryId);
-    const senderState = state.senderReadStateMap.get(senderChatId) || {
-      currentReadCount: 0,
-      lastReadAppliedEntryCount: 0,
-    };
-    senderState.currentReadCount = readCount;
-    senderState.lastReadAppliedEntryCount = state.entries.length;
-    state.senderReadStateMap.set(senderChatId, senderState);
+    let matchedEntries = 0;
+    for (let index = 0; index < state.entries.length; index += 1) {
+      const entry = state.entries[index];
+      if (entry.senderChatId !== senderChatId) continue;
+      // Replace the record so an indexed snapshot's frozen entry is retained.
+      state.entries[index] = Object.freeze({ ...entry, readCount: Math.max(entry.readCount || 0, readCount) });
+      matchedEntries += 1;
+    }
+    state.senderReadStateMap.set(senderChatId, {
+      currentReadCount: readCount,
+      lastReadAppliedEntryCount: matchedEntries,
+    });
   }
 
   setCurrentStage(stage: unknown) {
@@ -280,6 +286,18 @@ export class AdvPlaybackSession {
     const target = String(targetName || "");
     const pos = Number(positionType) || 0;
     if (!target || !pos) return;
+    if (this.runtime.retainHistoricalCharacterBindings) {
+      const index = this.CurrentPlacedCharacterPositionTypes.indexOf(pos);
+      if (index >= 0) {
+        this.targetNameToPositionTypeMap.delete(target);
+        this.positionTypeToCharacterMap.delete(pos);
+        this.CurrentPlacedCharacterPositionTypes.splice(index, 1);
+      }
+      this.targetNameToPositionTypeMap.set(target, pos);
+      this.positionTypeToCharacterMap.set(pos, target);
+      this.CurrentPlacedCharacterPositionTypes.push(pos);
+      return;
+    }
     const oldPos = this.targetNameToPositionTypeMap.get(target);
     if (oldPos != null && oldPos !== pos) this.positionTypeToCharacterMap.delete(oldPos);
     const oldTarget = this.positionTypeToCharacterMap.get(pos);

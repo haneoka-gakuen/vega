@@ -23,7 +23,12 @@ export {
   evaluateAdvChatOutExpo,
 } from "./core/AdvChatTransition";
 export type { AdvChatWindowTransitionKind } from "./core/AdvChatTransition";
-export { advTextRenderSource, createAdvTextRenderValue, DEFAULT_ADV_TEXT_METRICS, VEGA_TEXT_METRICS } from "./core/AdvTextRenderValue";
+export {
+  advTextRenderSource,
+  createAdvTextRenderValue,
+  DEFAULT_ADV_TEXT_METRICS,
+  VEGA_TEXT_METRICS,
+} from "./core/AdvTextRenderValue";
 export type { AdvTextMetrics, AdvTextRenderMetadata, AdvTextRenderValue } from "./core/AdvTextRenderValue";
 export {
   estimateVegaVisemeFrame,
@@ -34,7 +39,7 @@ export {
   type VegaVoicePcmFrame,
   type VegaVoiceSpectrumFrame,
 } from "./sound/VoiceAnalysis";
-export { VEGA_STANDARD_UI_SLOTS, type VegaStandardUiSlot } from "./engine/playerPresentation";
+export { VEGA_STANDARD_UI_SLOTS, type VegaStandardUiSlot } from "./engine/uiSlots";
 export type {
   StoryCameraState,
   StoryCharacterHandle,

@@ -1,10 +1,5 @@
 export { VegaEngine, createVega, createVegaPlayerState } from "./engine/VegaEngine";
 export {
-  createBrowserNarrativeInput,
-  narrativeInputValue,
-  type VegaBrowserNarrativeInput,
-} from "./engine/browserNarrativeInput";
-export {
   loadDenebRuntimePlugins,
   type DenebExternalRuntimeAccess,
   type DenebExternalRuntimeBinding,
@@ -21,6 +16,8 @@ export type {
   VegaEngineStorage,
   VegaInputHandler,
   VegaPlayerHandle,
+  VegaPlayerHost,
+  VegaHostedPlayer,
   VegaPlayerOptions,
   VegaPlayerService,
   VegaPlayerShellOptions,
@@ -39,17 +36,9 @@ export { VegaEventBus } from "./engine/events";
 export type { VegaDiagnosticEvent, VegaEventMap } from "./engine/events";
 export { VegaLifetime } from "./engine/lifecycle";
 export type { VegaDisposable } from "./engine/lifecycle";
-export { resolveVegaOfficialPlayerPlugins, selectVegaRenderContribution } from "./engine/playerPluginPreset";
-export type {
-  ResolveVegaOfficialPlayerPluginsOptions,
-  VegaOfficialPlayerPluginPreset,
-  VegaPlayerCommandExtensionRegistration,
-} from "./engine/playerPluginPreset";
 export * from "./engine/plugins";
 export * from "./marketplace";
-export * from "./resources/StoryResourcePreparation";
-export { GenericStoryScene } from "./rendering/dom/GenericStoryScene";
-export type { GenericStorySceneOptions } from "./rendering/dom/GenericStoryScene";
+export type * from "./resources/StoryResourcePreparation";
 export type {
   RendererAwareStoryCharacterProvider,
   StoryCharacterAnimationResourceUsage,
@@ -85,3 +74,5 @@ export type {
   StoryRendererServiceKey,
 } from "./rendering/StoryRendererExtensions";
 export { vegaProjectToAdvStory } from "./engine/projectRuntime";
+
+export type { VegaExecutionDriver, VegaCheckpointExecutionDriver, VegaExecutionOwnershipDriver, VegaExecutionRecord } from "./execution/ports";

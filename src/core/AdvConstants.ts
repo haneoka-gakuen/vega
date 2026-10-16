@@ -1,4 +1,3 @@
-import { DEFAULT_SCENE_GEOMETRY } from "@haneoka/vega-protocol/coordinates";
 import type { AdvFocusDataRow, AdvRuntimeConfig } from "../types/AdvRuntime";
 import { VEGA_ADV_OPCODE, VEGA_COMMAND_GROUP_OPCODE } from "@haneoka/vega-protocol";
 import {
@@ -335,21 +334,25 @@ export const DEFAULT_ADV_RUNTIME = Object.freeze({
     renderTextureSize: 1536,
   },
   stage: {
-    // AdvCharacterField prefab: five stages at -1.6..1.6 and four
-    // inter-stage focus anchors at -1.2/-0.4/0.4/1.2 (all in field-local units).
-    minX: -1.6,
-    maxX: 1.6,
-    width: 3.2,
-    backgroundSize: { width: 22.31, height: 14.28145 },
-    positions: DEFAULT_SCENE_GEOMETRY.positions,
-    focusAnchors: DEFAULT_SCENE_GEOMETRY.focusAnchors,
-    fov: DEFAULT_SCENE_GEOMETRY.fov,
-    initialCameraPosition: DEFAULT_SCENE_GEOMETRY.cameraPosition,
-    initialCameraRotation: DEFAULT_SCENE_GEOMETRY.cameraRotation,
-    characterFieldPosition: DEFAULT_SCENE_GEOMETRY.characterFieldPosition,
-    backgroundFieldPosition: DEFAULT_SCENE_GEOMETRY.backgroundFieldPosition,
-    characterFieldScale: DEFAULT_SCENE_GEOMETRY.characterFieldScale,
-    backgroundFieldScale: DEFAULT_SCENE_GEOMETRY.backgroundFieldScale,
+    // Generic scene baseline: origin camera, unit field scales, no named slots.
+    // Format/style compositions supply their own calibration through runtime.stage.
+    screenReferenceWidth: 1920,
+    screenReferenceHeight: 1080,
+    minX: -1,
+    maxX: 1,
+    width: 2,
+    backgroundSize: { width: 8, height: 4.5 },
+    backgroundFit: "cover",
+    positions: {},
+    focusAnchors: {},
+    fov: 45,
+    initialCameraPosition: { x: 0, y: 0, z: 0 },
+    initialCameraRotation: { x: 0, y: 0, z: 0 },
+    characterFieldPosition: { x: 0, y: 0, z: 4 },
+    backgroundFieldPosition: { x: 0, y: 0, z: 8 },
+    characterBasePosition: { x: 0, y: 0, z: 0 },
+    characterFieldScale: 1,
+    backgroundFieldScale: 1,
   },
   layout: {
     designViewportAspect: 13 / 6,

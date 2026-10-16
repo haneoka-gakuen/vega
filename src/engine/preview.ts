@@ -15,8 +15,8 @@ import { VEGA_PREVIEW_PROTOCOL, isVegaPreviewRequest } from "@haneoka/vega-proto
 import type { AdvPlayerExecutionBoundary } from "../core/AdvPlayer";
 import type { StoryCameraState } from "../rendering/StorySceneBackend";
 import type { AdvCommand, AdvStory } from "../types/AdvRuntime";
-import type { VegaPlayerHandle } from "./VegaEngine";
-import { VegaEngine } from "./VegaEngine";
+import type { VegaPlayerHandle } from "../web-entry";
+import { VegaEngine } from "../web-entry";
 
 const CAPABILITIES: VegaPreviewCapabilities = Object.freeze({
   commands: [

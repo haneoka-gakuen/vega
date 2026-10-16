@@ -41,6 +41,8 @@ interface CharacterRecord extends StoryCharacterHandle {
   readonly sourceEntry: Record<string, unknown>;
   alpha: number;
   brightness: number;
+  showing: boolean;
+  presenceSequence: number;
   paused: boolean;
   worldPosition: StoryPoint3 | null;
   offset: StoryPoint3;
@@ -72,6 +74,8 @@ interface PendingCharacterRecord extends StoryCharacterHandle {
   readonly compilationOnly: boolean;
   alpha: number;
   brightness: number;
+  showing: boolean;
+  presenceSequence: number;
   paused: boolean;
   worldPosition: StoryPoint3 | null;
   offset: StoryPoint3;
@@ -88,6 +92,7 @@ interface PendingCharacterRecord extends StoryCharacterHandle {
   currentExpressionFadeInSeconds: number;
   pendingPausedMotion: { readonly name: string; readonly fadeInSeconds: number } | null;
   pendingPausedExpression: { readonly name: string; readonly fadeInSeconds: number } | null;
+  parameterLoopRequest: { readonly name: string; readonly fadeSeconds: number } | null;
   rimLight: {
     enabled: boolean;
     color: unknown;
@@ -141,11 +146,15 @@ interface GenericDomSeekState {
       string,
       {
         readonly controllerIdentity?: string;
+        readonly showing?: boolean;
+        readonly modelState?: unknown;
         readonly blurIntensity: number;
         readonly currentMotionName: string;
         readonly currentMotionFadeInSeconds: number;
         readonly currentExpressionName: string;
         readonly currentExpressionFadeInSeconds: number;
+        readonly pendingPausedMotion?: { readonly name: string; readonly fadeInSeconds: number } | null;
+        readonly pendingPausedExpression?: { readonly name: string; readonly fadeInSeconds: number } | null;
         readonly rimLight: {
           readonly enabled: boolean;
           readonly color: unknown;
@@ -473,6 +482,7 @@ export class GenericStoryScene implements StorySceneBackend {
   private deterministicReplay = false;
   private seekIndexCompilationActive = false;
   private playbackSpeed = 1;
+  private transportPaused = true;
   private captureSequence = 0;
   private commandPostEffect: unknown = null;
   private stageEnvironmentIndex = 0;
@@ -532,6 +542,7 @@ export class GenericStoryScene implements StorySceneBackend {
     this.state = state;
     this.resources = resources;
     this.characterProviders = [...(options.characterProviders ?? [])];
+    this.transportPaused = state.paused || !state.playing;
   }
 
   async setup(mount: HTMLElement): Promise<void> {
@@ -708,8 +719,15 @@ export class GenericStoryScene implements StorySceneBackend {
     if (this.deterministicReplay === active) return;
     this.deterministicReplay = active;
     if (active) this.resetShakeState();
+    for (const character of this.characters.values()) this.applyCharacterPresentation(character);
     this.renderStageParticles();
     for (const effect of this.commandEffects.values()) this.applyCommandEffectAnimation(effect);
+  }
+
+  setTransportPaused(paused: boolean): void {
+    if (this.transportPaused === paused) return;
+    this.transportPaused = paused;
+    for (const character of this.characters.values()) this.applyCharacterPresentation(character);
   }
 
   async preloadTexture(url: string, signal?: AbortSignal): Promise<unknown> {
@@ -897,7 +915,7 @@ export class GenericStoryScene implements StorySceneBackend {
 
   showingCharacterTargets(): string[] {
     return [...this.characters.values(), ...this.pendingCharacters.values()]
-      .filter((character) => character.alpha > 0)
+      .filter((character) => character.showing)
       .map(({ target }) => target);
   }
 
@@ -913,8 +931,8 @@ export class GenericStoryScene implements StorySceneBackend {
     const character = this.characters.get(target);
     const pending = this.pendingCharacters.get(target);
     return Boolean(
-      (character && character.alpha > 0 && (!expectedIdentity || character.identity === expectedIdentity)) ||
-      (pending && pending.alpha > 0 && (!expectedIdentity || pending.identity === expectedIdentity)),
+      (character && character.showing && (!expectedIdentity || character.identity === expectedIdentity)) ||
+      (pending && pending.showing && (!expectedIdentity || pending.identity === expectedIdentity)),
     );
   }
 
@@ -967,6 +985,8 @@ export class GenericStoryScene implements StorySceneBackend {
         compilationOnly: this.seekIndexCompilationActive,
         alpha: 1,
         brightness: 1,
+        showing: true,
+        presenceSequence: 1,
         paused: false,
         worldPosition: null,
         offset: { x: 0, y: 0, z: 0 },
@@ -983,6 +1003,7 @@ export class GenericStoryScene implements StorySceneBackend {
         currentExpressionFadeInSeconds: 0,
         pendingPausedMotion: null,
         pendingPausedExpression: null,
+        parameterLoopRequest: null,
         rimLight: {
           enabled: false,
           color: "transparent",
@@ -1078,6 +1099,8 @@ export class GenericStoryScene implements StorySceneBackend {
         sourceEntry: entry,
         alpha: committed.alpha,
         brightness: committed.brightness,
+        showing: committed.showing,
+        presenceSequence: committed.presenceSequence,
         paused: committed.paused,
         worldPosition: committed.worldPosition ? { ...committed.worldPosition } : null,
         offset: { ...committed.offset },
@@ -1099,7 +1122,8 @@ export class GenericStoryScene implements StorySceneBackend {
       this.pendingCharacters.delete(target);
       this.characters.set(target, character);
       loadedFromPending = true;
-      character.model.setPaused(character.paused);
+      character.model.clearPausedRequests?.();
+      character.model.setPaused(this.characterPaused(character));
       character.model.setPlaybackSpeed(this.playbackSpeed);
       if (!character.paused) {
         if (character.currentMotionName) {
@@ -1112,11 +1136,24 @@ export class GenericStoryScene implements StorySceneBackend {
           );
         }
       }
+      const parameterLoop = committed.parameterLoopRequest;
+      if (parameterLoop?.name && character.showing) {
+        void character.model.playParameterLoopMotion?.(parameterLoop.name, parameterLoop.fadeSeconds);
+      } else if (parameterLoop && !parameterLoop.name) {
+        void character.model.stopParameterLoopMotion?.(parameterLoop.fadeSeconds);
+      }
       this.applyCharacterFilter(character);
     }
     // AdvCharacterHelper.ShowCharacterController resets angle/look on every
     // In, including reuse of a hidden cached controller.
     if (!loadedFromPending) {
+      character.showing = true;
+      character.presenceSequence++;
+      character.paused = false;
+      character.pendingPausedMotion = null;
+      character.pendingPausedExpression = null;
+      character.model.clearPausedRequests?.();
+      character.model.setPaused(this.characterPaused(character));
       character.angle = 0;
       character.bodyAngle = 0;
       character.lookX = 0;
@@ -1155,14 +1192,47 @@ export class GenericStoryScene implements StorySceneBackend {
     if (!character) {
       const pending = this.pendingCharacters.get(target);
       if (!pending) return false;
+      const sequence = ++pending.presenceSequence;
       pending.alpha = 0;
       await wait(this.deterministicReplay ? 0 : duration);
+      const current = this.characters.get(target) ?? this.pendingCharacters.get(target);
+      if (current?.identity === pending.identity && current.presenceSequence === sequence) {
+        await this.finishCharacterHide(current);
+      }
       return true;
     }
+    const sequence = ++character.presenceSequence;
     character.alpha = 0;
     this.applyCharacterPresentation(character);
     await setTransition(character.host, "opacity", "0", this.deterministicReplay ? 0 : duration);
+    if (this.characters.get(target) === character && character.presenceSequence === sequence) {
+      await this.finishCharacterHide(character);
+    }
     return true;
+  }
+
+  private async finishCharacterHide(character: CharacterRecord | PendingCharacterRecord): Promise<void> {
+    character.showing = false;
+    character.paused = false;
+    character.pendingPausedMotion = null;
+    character.pendingPausedExpression = null;
+    if ("model" in character) {
+      await this.clearCharacterParameterLoop(character);
+    } else {
+      character.parameterLoopRequest = null;
+    }
+  }
+
+  private async clearCharacterParameterLoop(character: CharacterRecord): Promise<void> {
+    character.model.clearPausedRequests?.();
+    character.model.setPaused(false);
+    let cleanup: void | Promise<void>;
+    try {
+      cleanup = character.model.stopParameterLoopMotion?.(0);
+    } finally {
+      this.applyCharacterPresentation(character);
+    }
+    await cleanup;
   }
 
   async fadeCharacter(target: string, alpha: number, duration = 0): Promise<void> {
@@ -1360,18 +1430,18 @@ export class GenericStoryScene implements StorySceneBackend {
       (expectedIdentity && (character?.identity ?? pending?.identity) !== expectedIdentity)
     )
       return;
-    const resolvedName = String(motionName || "").trim();
+    const resolvedName = String(motionName || "");
     const fadeIn = finite(_fadeIn, -1);
     if (!character && pending) {
+      if (pending.paused) {
+        pending.pendingPausedMotion = { name: resolvedName, fadeInSeconds: fadeIn };
+        return;
+      }
       pending.currentMotionName = resolvedName;
       pending.currentMotionFadeInSeconds = fadeIn;
-      if (pending.paused) pending.pendingPausedMotion = { name: resolvedName, fadeInSeconds: fadeIn };
       return;
     }
     if (!character) return;
-    character.currentMotionName = resolvedName;
-    character.currentMotionFadeInSeconds = fadeIn;
-    character.host.dataset.motion = resolvedName;
     if (character.paused) {
       if (this.hasCharacterAnimation(character, "motion", resolvedName)) {
         character.pendingPausedMotion = { name: resolvedName, fadeInSeconds: fadeIn };
@@ -1379,18 +1449,38 @@ export class GenericStoryScene implements StorySceneBackend {
       this.applyCharacterPresentation(character);
       return;
     }
+    character.currentMotionName = resolvedName;
+    character.currentMotionFadeInSeconds = fadeIn;
+    character.host.dataset.motion = resolvedName;
     void character.model.playMotion?.(resolvedName, fadeIn);
     this.applyCharacterPresentation(character);
   }
 
-  /** Opcode 68: static portraits have no parameter loop; keep the name visible for the DOM portrait. */
   playParameterLoopForTarget(target: string, motionName: string, fadeIn = 0, expectedIdentity?: string): void {
-    this.playMotionForTarget(target, motionName, fadeIn, expectedIdentity);
+    const character = this.characters.get(target);
+    const pending = this.pendingCharacters.get(target);
+    if (
+      (!character && !pending) ||
+      (expectedIdentity && (character?.identity ?? pending?.identity) !== expectedIdentity) ||
+      !(character?.showing ?? pending?.showing)
+    )
+      return;
+    const fadeSeconds = finite(fadeIn);
+    if (character) void character.model.playParameterLoopMotion?.(motionName, fadeSeconds);
+    else if (pending) pending.parameterLoopRequest = { name: motionName, fadeSeconds };
   }
 
-  stopParameterLoopForTarget(target: string, _fadeOut?: number, _expectedIdentity?: string): void {
+  stopParameterLoopForTarget(target: string, fadeOut = 0, expectedIdentity?: string): void {
     const character = this.characters.get(target);
-    if (character) character.host.dataset.motion = "";
+    const pending = this.pendingCharacters.get(target);
+    if (
+      (!character && !pending) ||
+      (expectedIdentity && (character?.identity ?? pending?.identity) !== expectedIdentity)
+    )
+      return;
+    const fadeSeconds = finite(fadeOut);
+    if (character) void character.model.stopParameterLoopMotion?.(fadeSeconds);
+    else if (pending) pending.parameterLoopRequest = { name: "", fadeSeconds };
   }
 
   setEyeBlinkStoppedForTarget(
@@ -1411,24 +1501,22 @@ export class GenericStoryScene implements StorySceneBackend {
       (expectedIdentity && (character?.identity ?? pending?.identity) !== expectedIdentity)
     )
       return;
-    const resolvedName = String(expressionName || "").trim();
+    const resolvedName = String(expressionName || "");
     const fadeIn = finite(_fadeIn, -1);
     if (!character && pending) {
-      if (pending.currentExpressionName === resolvedName) return;
-      pending.currentExpressionName = resolvedName;
-      pending.currentExpressionFadeInSeconds = fadeIn;
+      if ((pending.pendingPausedExpression?.name ?? pending.currentExpressionName) === resolvedName) return;
       if (pending.paused) {
         pending.pendingPausedExpression = { name: resolvedName, fadeInSeconds: fadeIn };
+        return;
       }
+      pending.currentExpressionName = resolvedName;
+      pending.currentExpressionFadeInSeconds = fadeIn;
       return;
     }
     if (!character) return;
     // Live2DCharacterController returns early when the requested expression is
     // already current. Preserve that format-neutral controller behavior.
-    if (character.currentExpressionName === resolvedName) return;
-    character.currentExpressionName = resolvedName;
-    character.currentExpressionFadeInSeconds = fadeIn;
-    character.host.dataset.expression = resolvedName;
+    if ((character.pendingPausedExpression?.name ?? character.currentExpressionName) === resolvedName) return;
     if (character.paused) {
       if (this.hasCharacterAnimation(character, "expression", resolvedName)) {
         character.pendingPausedExpression = { name: resolvedName, fadeInSeconds: fadeIn };
@@ -1436,6 +1524,9 @@ export class GenericStoryScene implements StorySceneBackend {
       this.applyCharacterPresentation(character);
       return;
     }
+    character.currentExpressionName = resolvedName;
+    character.currentExpressionFadeInSeconds = fadeIn;
+    character.host.dataset.expression = resolvedName;
     void character.model.playExpression?.(resolvedName, fadeIn);
     this.applyCharacterPresentation(character);
   }
@@ -1461,7 +1552,7 @@ export class GenericStoryScene implements StorySceneBackend {
       return;
     }
     character.paused = Boolean(paused);
-    character.model.setPaused(character.paused);
+    character.model.setPaused(this.characterPaused(character));
     if (!character.paused) {
       // Native Resume resets expression-owned parameters before applying the
       // last paused Motion/Expression slots, even on a repeated Resume.
@@ -1470,8 +1561,18 @@ export class GenericStoryScene implements StorySceneBackend {
       const expression = character.pendingPausedExpression;
       character.pendingPausedMotion = null;
       character.pendingPausedExpression = null;
-      if (motion) void character.model.playMotion?.(motion.name, motion.fadeInSeconds);
-      if (expression) void character.model.playExpression?.(expression.name, expression.fadeInSeconds);
+      if (motion) {
+        character.currentMotionName = motion.name;
+        character.currentMotionFadeInSeconds = motion.fadeInSeconds;
+        character.host.dataset.motion = motion.name;
+        void character.model.playMotion?.(motion.name, motion.fadeInSeconds);
+      }
+      if (expression) {
+        character.currentExpressionName = expression.name;
+        character.currentExpressionFadeInSeconds = expression.fadeInSeconds;
+        character.host.dataset.expression = expression.name;
+        void character.model.playExpression?.(expression.name, expression.fadeInSeconds);
+      }
     }
     this.applyCharacterPresentation(character);
   }
@@ -2566,11 +2667,17 @@ export class GenericStoryScene implements StorySceneBackend {
             character.target,
             {
               controllerIdentity: character.controllerIdentity,
+              showing: character.showing,
+              modelState: character.model.restoreSnapshot ? character.model.createSnapshot?.() : undefined,
               blurIntensity: character.blurIntensity,
               currentMotionName: character.currentMotionName,
               currentMotionFadeInSeconds: character.currentMotionFadeInSeconds,
               currentExpressionName: character.currentExpressionName,
               currentExpressionFadeInSeconds: character.currentExpressionFadeInSeconds,
+              pendingPausedMotion: character.pendingPausedMotion ? { ...character.pendingPausedMotion } : null,
+              pendingPausedExpression: character.pendingPausedExpression
+                ? { ...character.pendingPausedExpression }
+                : null,
               rimLight: { ...character.rimLight },
             },
           ]),
@@ -2634,6 +2741,8 @@ export class GenericStoryScene implements StorySceneBackend {
       restored.worldPosition = character.worldPosition;
       restored.offset = { ...character.offset };
       restored.paused = character.paused;
+      restored.showing = genericState?.characters?.[character.target]?.showing ?? character.alpha > 0;
+      restored.presenceSequence++;
       restored.pendingPausedMotion = null;
       restored.pendingPausedExpression = null;
       restored.blurIntensity = 0;
@@ -2648,7 +2757,8 @@ export class GenericStoryScene implements StorySceneBackend {
       };
       restored.host.removeAttribute("data-motion");
       restored.host.removeAttribute("data-expression");
-      restored.model.setPaused(character.paused);
+      restored.model.clearPausedRequests?.();
+      restored.model.setPaused(this.characterPaused(restored));
       restored.angle = finite(character.angle);
       restored.bodyAngle = finite(character.bodyAngle);
       restored.lookX = finite(character.lookX);
@@ -2681,10 +2791,12 @@ export class GenericStoryScene implements StorySceneBackend {
         const saved = genericState.characters?.[character.target];
         if (!saved) continue;
         character.blurIntensity = clamp(saved.blurIntensity);
-        character.currentMotionName = firstString(saved.currentMotionName);
+        character.currentMotionName = String(saved.currentMotionName ?? "");
         character.currentMotionFadeInSeconds = finite(saved.currentMotionFadeInSeconds);
-        character.currentExpressionName = firstString(saved.currentExpressionName);
+        character.currentExpressionName = String(saved.currentExpressionName ?? "");
         character.currentExpressionFadeInSeconds = finite(saved.currentExpressionFadeInSeconds);
+        character.pendingPausedMotion = saved.pendingPausedMotion ? { ...saved.pendingPausedMotion } : null;
+        character.pendingPausedExpression = saved.pendingPausedExpression ? { ...saved.pendingPausedExpression } : null;
         if (character.currentMotionName) {
           character.host.dataset.motion = character.currentMotionName;
         }
@@ -2717,6 +2829,17 @@ export class GenericStoryScene implements StorySceneBackend {
       this.applyStageLight(0);
       this.applyStagePostEffect(0);
       this.changeStageParticleEffects(0);
+    }
+    for (const character of this.characters.values()) {
+      const saved = genericState?.characters?.[character.target];
+      if (saved?.modelState !== undefined) {
+        if (!character.model.restoreSnapshot) {
+          throw new Error(`Character provider cannot restore its saved state: ${character.target}`);
+        }
+        await character.model.restoreSnapshot(saved.modelState);
+      } else {
+        await this.clearCharacterParameterLoop(character);
+      }
     }
   }
 
@@ -3052,7 +3175,13 @@ export class GenericStoryScene implements StorySceneBackend {
       .join(" ");
   }
 
+  private characterPaused(character: CharacterRecord): boolean {
+    return this.transportPaused || this.deterministicReplay || character.paused || !character.showing;
+  }
+
   private applyCharacterPresentation(character: CharacterRecord): void {
+    const paused = this.characterPaused(character);
+    character.model.setPaused(paused);
     const presentation: StoryCharacterPresentation = {
       alpha: character.alpha,
       brightness: character.brightness,
@@ -3063,7 +3192,7 @@ export class GenericStoryScene implements StorySceneBackend {
       lookY: character.lookY,
       lookEnabled: character.lookEnabled,
       lookTargetName: character.lookTargetName,
-      paused: character.paused,
+      paused,
       playbackSpeed: this.playbackSpeed,
       motionName: character.currentMotionName,
       expressionName: character.currentExpressionName,

@@ -71,6 +71,7 @@ import {
 } from "../narrative/commands";
 import { evaluateVegaCondition, type VegaExpressionScope } from "../narrative/expression";
 import { VegaNarrativeStore } from "../narrative/state";
+import type { VegaExecutionDriver } from "../execution/ports";
 
 type AdvCommandHandler = (cmd: AdvCommand, ctx: AdvCommandContext, signal?: AbortSignal) => Promise<void> | void;
 
@@ -182,6 +183,7 @@ interface AdvReadableAdvanceWait {
   readonly voicePlaybackScopeVersion: number;
   readonly signal: AbortSignal;
   readonly intervalSeconds: number;
+  readonly minimumAutoSeconds: number;
 }
 
 const ABORTED_CHOICE = Symbol("aborted-choice");
@@ -431,10 +433,36 @@ function targetDisplayName(cmd: AdvCommand, runtime: AdvRuntimeConfig, resolve =
 function chatWindowDisplayName(cmd: AdvCommand, runtime: AdvRuntimeConfig, resolve = localizedText): StoryResolvedText {
   const split = resolve(runtime.displayNameJoiner ?? (runtime.targetNameSplitKey || "・")).text;
   const commandTextNames = localizedTextEntries(commandTargetTextNames(cmd), resolve);
-  if (commandTextNames.length) return joinLocalizedText(commandTextNames, split);
   const targetTextNames = localizedTextIds(commandTargetTextIds(cmd), resolve);
-  if (targetTextNames.length) return joinLocalizedText(targetTextNames, split);
-  return resolve(cmd.text || cmd.targetName || "");
+  const value = commandTextNames.length
+    ? joinLocalizedText(commandTextNames, split)
+    : targetTextNames.length
+      ? joinLocalizedText(targetTextNames, split)
+      : resolve(cmd.text || cmd.targetName || "");
+  const master = resolveAdvChatMaster(cmd.targetChatID, runtime);
+  if (!master || finite(param(cmd, 1), 0) !== 0 || !value.text) return value;
+  const normalized = value.text.normalize("NFC");
+  const elements =
+    typeof Intl.Segmenter === "function"
+      ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(normalized)].map(
+          ({ segment }) => segment,
+        )
+      : Array.from(normalized);
+  let width = 0;
+  let title = "";
+  for (const element of elements) {
+    const code = element.codePointAt(0) || 0;
+    const size = code === 0xa0 || (code >= 0x20 && code <= 0x7e) || (code >= 0xff61 && code <= 0xff9f) ? 1 : 2;
+    if (width + size > 12) {
+      title = `${title.trimEnd()}...`;
+      break;
+    }
+    title += element;
+    width += size;
+  }
+  const members = tryParseInt32(param(cmd, 3)) || 0;
+  if (master.isGroupChat && master.layoutMode !== 1 && members >= 2 && members <= 99) title += `(${members})`;
+  return { ...value, text: title };
 }
 
 function clearTalkState(state: Record<string, unknown>) {
@@ -517,7 +545,7 @@ function frameCommandKey(cmd: AdvCommand, frame: AdvFrameEntry | null = null) {
 
 function ensureFrameStateMap(state: Record<string, unknown>) {
   if (!state.frameEntries || typeof state.frameEntries !== "object") state.frameEntries = {};
-  return state.frameEntries as Record<string, { frame: AdvFrameEntry | null; opacity: number; slide: number }>;
+  return state.frameEntries as Record<string, { frame: AdvFrameEntry | null; opacity: number; slide: number; showing?: boolean }>;
 }
 
 function activeFrameKeys(state: Record<string, unknown>) {
@@ -600,11 +628,13 @@ function chatParticipantToken(name: unknown) {
     .replace(/_\d+$/, "");
 }
 
-function chatSenderIsSelf(participants: unknown, senderTargetName: unknown) {
+function chatSenderIsSelf(participants: unknown, senderTargetName: unknown, senderId = 0, windowId = 0) {
+  if (senderId > 0 && windowId > 0) return senderId === windowId;
   const parts = String(participants || "");
   const sender = chatParticipantToken(senderTargetName);
-  if (!parts || !sender) return false;
-  return parts === sender || parts.startsWith(`${sender}_`);
+  const legacyOwn = String(senderTargetName || "").startsWith("my");
+  if (!parts || !sender) return legacyOwn;
+  return parts === sender || parts.startsWith(`${sender}_`) || legacyOwn;
 }
 
 function restoreChatMessages(ctx: AdvCommandContext, memoryId: string) {
@@ -616,7 +646,8 @@ function restoreChatMessages(ctx: AdvCommandContext, memoryId: string) {
     text: entry.text,
     textLang: entry.textLang,
     stamp: entry.entryType === 1 ? entry.stampAssetName : undefined,
-    self: entry.self,
+    self:
+      entry.senderChatId > 0 && ctx.state.chat.chatId > 0 ? entry.senderChatId === ctx.state.chat.chatId : entry.self,
     readCount: entry.readCount,
     icon: entry.icon,
     iconAssetName: entry.iconAssetName || entry.icon,
@@ -715,6 +746,11 @@ function firstOpeningPlayableBgm(commands: AdvCommand[]) {
 }
 
 export class AdvPlayer {
+  readonly executionDriver?: VegaExecutionDriver;
+  private executionClockStart = nowSeconds();
+  private executionPausedSeconds = 0;
+  private executionPausedAt: number | null = null;
+  private executionDispatchActive = false;
   mount: HTMLElement;
   story: AdvStory;
   state: AdvPlayerState;
@@ -803,9 +839,11 @@ export class AdvPlayer {
     resolveLocalizedText = resolveStoryLocalizedText,
     displayNameJoiner,
     textMetrics = DEFAULT_ADV_TEXT_METRICS,
+    executionDriver,
   }: {
     mount: HTMLElement;
     resolveLocalizedText?: typeof resolveStoryLocalizedText;
+    /** Localizable name display separator, independent of script target parsing. */
     displayNameJoiner?: unknown;
     story: AdvStory;
     state: AdvPlayerState;
@@ -818,7 +856,9 @@ export class AdvPlayer {
     resourcePreparers?: readonly StoryResourcePreparer[];
     /** Markup-aware measurement from the text plugin; core knows no grammar. */
     textMetrics?: AdvTextMetrics;
+    executionDriver?: VegaExecutionDriver;
   }) {
+    this.executionDriver = executionDriver;
     this.textMetrics = textMetrics;
     const bindings = new Map(
       commandExtensions.filter((entry) => entry.commandType).map((entry) => [entry.commandType!, entry.opcode]),
@@ -886,6 +926,7 @@ export class AdvPlayer {
     // The interpreter never picks a renderer; hosts (VegaEngine, the Vue
     // component) supply one, so core does not link the DOM renderer.
     this.SceneRoot = sceneBackend;
+    this.SceneRoot.setTransportPaused?.(this.Model.isPause || !state.playing);
     this.SoundManager = new AdvSoundManager(
       this.runtime,
       state as AdvPlayerState & {
@@ -1722,6 +1763,7 @@ export class AdvPlayer {
     this.restoreSeekPlayerState(checkpoint.state, options.preservePersistentNarrative !== false);
     this.Model.changeIdleState();
     this.Model.CurrentEpisodeListIndex = checkpoint.index;
+    if (this.executionDriver && !this.seekIndexBuilding) this.executionDriver.reposition(checkpoint.index);
     this.state.commandIndex = checkpoint.index;
     this.state.currentCommand = this.story.commands?.[checkpoint.index] || null;
     if (!this.seekIndexBuilding) this.Loader.advanceTo(checkpoint.index);
@@ -1733,6 +1775,7 @@ export class AdvPlayer {
     const commands = this.story?.commands || [];
     const target = Math.max(0, Math.min(commands.length, Math.floor(Number(targetIndex) || 0)));
     this.Model.CurrentEpisodeListIndex = target;
+    if (this.executionDriver && !this.seekIndexBuilding) this.executionDriver.reposition(target);
     this.state.commandIndex = target;
     this.state.currentCommand = commands[target] || null;
     if (!this.seekIndexBuilding) this.Loader.advanceTo(target);
@@ -1741,6 +1784,16 @@ export class AdvPlayer {
     this.Model.shortCutIndex = -1;
     this.Model.isPause = paused;
     this.state.paused = paused;
+    this.SceneRoot.setTransportPaused?.(paused || !this.state.playing);
+    if (this.executionDriver && !this.seekIndexBuilding) {
+      if (paused) this.executionDriver.pause();
+      else this.executionDriver.resume();
+    }
+    if (paused && this.executionPausedAt === null) this.executionPausedAt = nowSeconds();
+    if (!paused && this.executionPausedAt !== null) {
+      this.executionPausedSeconds += nowSeconds() - this.executionPausedAt;
+      this.executionPausedAt = null;
+    }
     this.state.seeking = false;
     this.completedSeekRevision += 1;
     try {
@@ -2071,6 +2124,7 @@ export class AdvPlayer {
             this.Model.shortCutIndex = -1;
             this.Model.isPause = true;
             this.state.paused = true;
+            this.SceneRoot.setTransportPaused?.(true);
             this.state.ready = false;
             this.state.seeking = false;
             this.state.error = failure instanceof Error ? failure.message : String(failure);
@@ -2459,6 +2513,7 @@ export class AdvPlayer {
     }
     if (this.disposed) return Promise.resolve();
     this.disposed = true;
+    this.executionDriver?.dispose();
     this.disposalReleasesTextures = releaseTextures;
     this.bootGeneration += 1;
     // Route changes and restart reuse one Vue reactive object. Detach every
@@ -2493,6 +2548,7 @@ export class AdvPlayer {
     this.Model.shouldShortCut = false;
     this.Model.shortCutIndex = -1;
     this.state.seeking = false;
+    this.SceneRoot.setTransportPaused?.(true);
     this.SceneRoot.setDeterministicReplayActive(false);
     this.PlayableDirector.deactivate();
     this.commandGroupScheduler.cancelAll();
@@ -2542,8 +2598,21 @@ export class AdvPlayer {
     if (this.idleSeekDrain) await this.idleSeekDrain;
     if (this.disposed || this.abortController.signal.aborted || this.state.playing) return;
     this.state.playing = true;
+    this.SceneRoot.setTransportPaused?.(this.Model.isPause);
     this.state.finished = false;
     this.Model.shouldShortCut = false;
+    const driver = this.executionDriver;
+    if (driver) {
+      if (driver.cursor !== this.Model.CurrentEpisodeListIndex) driver.reposition(this.Model.CurrentEpisodeListIndex);
+      if (!driver.history.length) {
+        this.executionClockStart = nowSeconds();
+        this.executionPausedSeconds = 0;
+        this.executionPausedAt = this.Model.isPause ? nowSeconds() : null;
+      }
+      driver.start();
+      if (this.Model.isPause) driver.pause();
+      else driver.resume();
+    }
     try {
       const commands = this.story?.commands || [];
       while (!this.abortController.signal.aborted) {
@@ -2557,7 +2626,9 @@ export class AdvPlayer {
           if (this.maybeFinishActiveSeek(commands) && !resume) return;
           continue;
         }
-        if (this.Model.CurrentEpisodeListIndex >= commands.length && !this.restoredDialoguePending) {
+        const cursor = driver?.cursor ?? this.Model.CurrentEpisodeListIndex;
+        this.Model.CurrentEpisodeListIndex = cursor;
+        if (cursor >= commands.length && !this.restoredDialoguePending) {
           await this.commandGroupScheduler.waitForIdle(this.abortController.signal);
           if (this.disposed || this.abortController.signal.aborted) return;
           if (this.activeSeek) continue;
@@ -2566,6 +2637,11 @@ export class AdvPlayer {
           if (this.activeSeek) continue;
           this.state.finished = true;
           this.retainFinishedRenderState();
+          await this.settleDetachedCommandTasks();
+          if (!this.disposed && !this.activeSeek) {
+            driver?.finish();
+            this.executionPausedAt ??= nowSeconds();
+          }
           return;
         }
         if (this.restoredDialoguePending) {
@@ -2600,7 +2676,24 @@ export class AdvPlayer {
           this.playbackCommandController = createAbortLink(this.abortController.signal);
         }
         const commandController = this.playbackCommandController;
+        const coreExecution = driver?.begin(this.executionTimeUs());
+        const coreGeneration = driver?.generation;
+        const detachedBefore = driver ? new Set(this.detachedCommandTasks) : undefined;
+        this.executionDispatchActive = true;
         const execution = this.executeCommandAtIndex(commands, index, commandController.signal);
+        const spawned = detachedBefore
+          ? [...this.detachedCommandTasks].filter((task) => !detachedBefore.has(task))
+          : [];
+        const coreWait = Boolean(execution) || spawned.length === 0;
+        if (driver && coreExecution) {
+          driver.admit(coreExecution.executionId, coreWait);
+          if (!coreWait) {
+            void Promise.all(spawned).then(() => {
+              if (this.disposed || driver.generation !== coreGeneration) return;
+              driver.complete(coreExecution.executionId, this.executionTimeUs());
+            });
+          }
+        }
         // Observe cancellation immediately: a started observer may itself
         // await asynchronous UI work while the command's wait rejects.
         const observedExecution = execution
@@ -2625,6 +2718,17 @@ export class AdvPlayer {
             if (!this.activeSeek || !commandController.signal.aborted) throw result.error;
           }
         }
+        if (driver && coreExecution && coreWait && !this.disposed && driver.generation === coreGeneration) {
+          const next = this.Model.CurrentEpisodeListIndex;
+          driver.complete(
+            coreExecution.executionId,
+            this.executionTimeUs(),
+            next !== index + 1 && next < commands.length ? next : undefined,
+            this.state.finished || (next >= commands.length && index + 1 < commands.length),
+          );
+          this.Model.CurrentEpisodeListIndex = driver.cursor;
+        }
+        this.executionDispatchActive = false;
         if (command) {
           await this.notifyExecutionBoundary({
             phase: "after",
@@ -2656,8 +2760,15 @@ export class AdvPlayer {
           continue;
         }
       }
+    } catch (error) {
+      if (!this.disposed) driver?.stop();
+      throw error;
     } finally {
-      if (!this.disposed) this.state.playing = false;
+      this.executionDispatchActive = false;
+      if (!this.disposed) {
+        this.state.playing = false;
+        this.SceneRoot.setTransportPaused?.(true);
+      }
     }
   }
 
@@ -2674,21 +2785,39 @@ export class AdvPlayer {
   }
 
   pause() {
+    if (this.disposed) return;
+    if (this.executionPausedAt === null) this.executionPausedAt = nowSeconds();
+    this.executionDriver?.pause();
     if (this.activeSeek) this.activeSeek.paused = true;
     this.Model.isPause = true;
     this.state.paused = true;
+    this.SceneRoot.setTransportPaused?.(true);
     this.SceneRoot.setVideoPaused?.(true);
   }
 
   resume() {
+    if (this.disposed) return;
+    if (this.executionPausedAt !== null) {
+      this.executionPausedSeconds += nowSeconds() - this.executionPausedAt;
+      this.executionPausedAt = null;
+    }
+    this.executionDriver?.resume();
     if (this.activeSeek) {
       this.activeSeek.paused = false;
       this.activeSeek.resume = true;
     }
     this.Model.isPause = false;
     this.state.paused = false;
+    this.SceneRoot.setTransportPaused?.(false);
     this.SceneRoot.setVideoPaused?.(false);
     this.releasePlaybackResumeWaiters();
+  }
+
+  private executionTimeUs(): number {
+    return Math.floor(
+      Math.max(0, (this.executionPausedAt ?? nowSeconds()) - this.executionClockStart - this.executionPausedSeconds) *
+        1_000_000,
+    );
   }
 
   private async notifyExecutionBoundary(boundary: AdvPlayerExecutionBoundary): Promise<void> {
@@ -2833,19 +2962,35 @@ export class AdvPlayer {
     this.restoredDialoguePending = this.state.talk.visible && !this.state.chat.visible && !this.state.choices.visible;
   }
 
+  private contentTextResolver(contentLanguage?: string): (value: unknown) => StoryResolvedText {
+    if (!contentLanguage) return this.resolveLocalizedText;
+    return (value) =>
+      resolveAdvLocale(value, contentLanguage, this.resolveLocalizedText, this.story.localization?.arrayOrder);
+  }
+
   resolveDialogue(command: AdvCommand): { speaker: StoryResolvedText; text: StoryResolvedText } {
+    const text = command.textSegments
+      ? joinLocalizedText(command.textSegments.map(this.resolveLocalizedText), "")
+      : this.resolveLocalizedText(command.text ?? "");
     return {
-      speaker: targetDisplayName(command, this.runtime, this.resolveLocalizedText),
-      text: command.textSegments
-        ? joinLocalizedText(command.textSegments.map(this.resolveLocalizedText), "")
-        : this.resolveLocalizedText(command.text ?? ""),
+      speaker: targetDisplayName(command, this.runtime, this.contentTextResolver(text.lang)),
+      text,
     };
   }
 
-  getDisplayNameJoiner(legacyJoiner?: string): string {
-    return this.resolveLocalizedText(
+  getDisplayNameJoiner(legacyJoiner?: string, contentLanguage?: string): string {
+    // Native display punctuation follows the resolved content language. Legacy
+    // projects retain their authored separator when no display value exists.
+    return this.contentTextResolver(contentLanguage)(
       this.runtime.displayNameJoiner ?? legacyJoiner ?? (this.runtime.targetNameSplitKey || "・"),
     ).text;
+  }
+
+  resolveSpeakerNames(sources: readonly unknown[], legacyJoiner?: string, contentLanguage?: string): StoryResolvedText {
+    return joinLocalizedText(
+      localizedTextEntries(sources, this.contentTextResolver(contentLanguage)),
+      this.getDisplayNameJoiner(legacyJoiner, contentLanguage),
+    );
   }
 
   dialogueSources(command: AdvCommand): { text: unknown; texts: unknown[]; speakers: unknown[]; separator: string } {
@@ -2868,7 +3013,7 @@ export class AdvPlayer {
               : targets.length
                 ? targets
                 : [command.targetName ?? ""],
-      separator: this.getDisplayNameJoiner(),
+      separator: this.getDisplayNameJoiner(undefined, this.resolveDialogue(command).text.lang),
     };
   }
 
@@ -2947,6 +3092,9 @@ export class AdvPlayer {
     this.commandGroupScheduler.cancelAll();
     this.state.finished = true;
     this.Model.CurrentEpisodeListIndex = this.story?.commands?.length || 0;
+    if (this.executionDriver && !this.executionDispatchActive && !this.seekIndexBuilding) {
+      this.executionDriver.reposition(this.Model.CurrentEpisodeListIndex);
+    }
     this.Model.changeGoNextState();
   }
 
@@ -2956,6 +3104,8 @@ export class AdvPlayer {
     if (index == null) return false;
     this.commandGroupScheduler.cancelAll();
     this.Model.CurrentEpisodeListIndex = index;
+    if (this.executionDriver && !this.executionDispatchActive && !this.seekIndexBuilding)
+      this.executionDriver.reposition(index);
     return true;
   }
 
@@ -2987,6 +3137,7 @@ export class AdvPlayer {
       pending.voicePlaybackScopeVersion,
       pending.signal,
       pending.intervalSeconds,
+      pending.minimumAutoSeconds,
     );
   }
 
@@ -3034,20 +3185,14 @@ export class AdvPlayer {
   }
 
   async waitForChatRead(textLength = 0, minimumAutoSeconds = 0, signal: AbortSignal = this.abortController.signal) {
-    if (this.disposed || signal.aborted || this.Model.shouldShortCut) return;
-    if (this.Model.isAutoEnabled) {
-      const unit = finite(this.runtime.waitTalkTextUnitTime, 0.04) / this.Model.getCurrentSpeedRate();
-      const min = finite(this.runtime.minTalkDisplayTime, 1.6) / this.Model.getCurrentSpeedRate();
-      this.autoAdvanceAfter(
-        advAutoPlayReadDelaySeconds(
-          min,
-          textLength * unit,
-          finite(minimumAutoSeconds, 0),
-          this.autoPlayIntervalSeconds,
-        ),
-      );
-    }
-    await this.Model.waitForNext(signal);
+    await this.waitForReadableAdvance(
+      textLength,
+      [],
+      this.Session.voicePlaybackScopeVersion,
+      signal,
+      this.autoPlayIntervalSeconds,
+      minimumAutoSeconds,
+    );
   }
 
   private cancelChatTyping(clearText = true): void {
@@ -3157,6 +3302,7 @@ export class AdvPlayer {
     voicePlaybackScopeVersion: number,
     signal: AbortSignal,
     intervalSeconds: number,
+    minimumAutoSeconds = 0,
   ): void {
     this.cancelAutoAdvance();
     if (
@@ -3174,6 +3320,7 @@ export class AdvPlayer {
     this.autoAdvanceController = controller;
     const speed = Math.max(0.01, this.Model.getCurrentSpeedRate());
     const readSeconds = Math.max(
+      finite(minimumAutoSeconds, 0),
       finite(this.runtime.minTalkDisplayTime, 1.6) / speed,
       Math.max(0, textLength) * (finite(this.runtime.waitTalkTextUnitTime, 0.04) / speed),
     );
@@ -3218,6 +3365,7 @@ export class AdvPlayer {
     voicePlaybackScopeVersion: number,
     signal: AbortSignal,
     intervalSeconds: number,
+    minimumAutoSeconds = 0,
   ): Promise<void> {
     if (this.disposed || signal.aborted || this.Model.shouldShortCut) return;
     const pending: AdvReadableAdvanceWait = {
@@ -3226,11 +3374,19 @@ export class AdvPlayer {
       voicePlaybackScopeVersion,
       signal,
       intervalSeconds,
+      minimumAutoSeconds,
     };
     this.pendingReadableAdvance = pending;
     try {
       if (this.Model.isAutoEnabled)
-        this.autoAdvanceWhenReadable(textLength, voicePlayIds, voicePlaybackScopeVersion, signal, intervalSeconds);
+        this.autoAdvanceWhenReadable(
+          textLength,
+          voicePlayIds,
+          voicePlaybackScopeVersion,
+          signal,
+          intervalSeconds,
+          minimumAutoSeconds,
+        );
       await this.Model.waitForNext(signal);
     } finally {
       if (this.pendingReadableAdvance === pending) this.pendingReadableAdvance = null;
@@ -3308,6 +3464,24 @@ export class AdvPlayer {
       this.CommandService.registerCommand(command, { execute });
     };
 
+    const chatSound = (
+      chatId: number,
+      kind: "message" | "window",
+      authored?: AdvSoundEntry,
+    ): AdvSoundEntry | undefined => {
+      const master = resolveAdvChatMaster(chatId, this.runtime);
+      if (!master) return kind === "message" ? authored : undefined;
+      const identity = kind === "message" ? master.chatSoundId : master.inOutSoundId;
+      if (!(identity > 0)) return;
+      const matches = (sound: AdvSoundEntry) =>
+        Boolean(sound) &&
+        Number(sound.soundId ?? sound.id ?? (sound.raw as Record<string, unknown> | undefined)?._id) === identity;
+      if (authored && matches(authored)) return authored;
+      const assets = this.story.assets as { sounds?: AdvSoundEntry[] | Record<string, AdvSoundEntry> } | undefined;
+      const sounds = Array.isArray(assets?.sounds) ? assets.sounds : Object.values(assets?.sounds || {});
+      return sounds.find(matches);
+    };
+
     register(ADV_COMMAND.CommandGroup, async (cmd, ctx, signal) => {
       const commandSignal = signal || this.abortController.signal;
       if (ctx.Model.shouldShortCut) {
@@ -3323,7 +3497,7 @@ export class AdvPlayer {
       targetName: string,
       cameraDistance: number,
     ) => {
-      const resolvedPositionType = Number(positionType) || ctx.SceneRoot.cameraState.focusPositionType || 5;
+      const resolvedPositionType = AdvCamera.focusAnchorPositionType(positionType);
       const focusData = ctx.SceneRoot.currentFocusData(cameraDistance);
       const basePosition = ctx.SceneRoot.focusBaseCameraPosition(resolvedPositionType, targetName, focusData);
       ctx.Session.setCurrentFocusCameraPosition({
@@ -3391,6 +3565,78 @@ export class AdvPlayer {
 
     register(ADV_COMMAND.Frame, async (cmd, ctx, signal) => {
       const stateName = param(cmd, 1);
+      const sourceFrame = cmd.frame;
+      if (sourceFrame?.animator) {
+        const frameName = frameCommandKey(cmd, sourceFrame);
+        const frames = ensureFrameStateMap(ctx.state);
+        const prior = frames[frameName];
+        const named = stateName.length > 0;
+        const animator = sourceFrame.animator;
+        const commandSignal = signal || this.abortController.signal;
+        await this.runCommandTask(cmd, async () => {
+          await ctx.SceneRoot.setFrameOverlay(sourceFrame, prior?.opacity ?? 0, frameName);
+          const delay = ctx.Model.calcDuration(finite(cmd.delaySeconds, 0), 0);
+          if (!(await ctx.Session.DelayTokens.delay(delay, commandSignal)) || commandSignal.aborted) return;
+          const current = frames[frameName];
+          const showing = current?.showing ?? Boolean(current);
+          const operation = named ? stateName : showing ? "Hide" : "Show";
+          const state = animator.states[operation];
+          const fadeParam = optionalFinite(param(cmd, 0), 0);
+          const fadeDuration = ctx.Model.calcDuration(fadeParam > 0 ? fadeParam : finite(cmd.duration, 0), 0);
+          if (!state) {
+            if (named) return; // Native Animator.HasState false leaves the retained frame unchanged.
+            const from = showing ? 1 : 0;
+            const to = showing ? 0 : 1;
+            frames[frameName] = { frame: sourceFrame, opacity: from, slide: 0, showing: true };
+            ctx.SceneRoot.playFrameAnimation?.(sourceFrame, frameName);
+            await tween({ duration: fadeDuration, ease: resolveEase(6), signal: commandSignal,
+              update: (progress) => {
+                const opacity = lerp(from, to, progress);
+                frames[frameName]!.opacity = opacity;
+                ctx.SceneRoot.setFrameOpacity(opacity, 0, frameName);
+              } });
+          } else {
+            // AdvFrame.ShowFrame delays before its Show state; Hide and named
+            // Play run the authored state immediately without a second DOFade.
+            if (!named && !showing && fadeDuration > 0 &&
+                !(await ctx.Session.DelayTokens.delay(fadeDuration, commandSignal))) return;
+            const speed = Math.abs(finite(state.speed, 1));
+            const duration = ctx.Model.calcDuration(speed > 0 ? state.duration / speed : 0, 0);
+            const animation = state.animation ? { ...state.animation, speed } : undefined;
+            const selected = animation ? { ...sourceFrame, animation } : sourceFrame;
+            if (ctx.SceneRoot.playFrameAnimation) ctx.SceneRoot.playFrameAnimation(selected, frameName);
+            else await ctx.SceneRoot.setFrameOverlay(selected, 1, frameName);
+            frames[frameName] = { frame: sourceFrame, opacity: 1, slide: 0, showing: true };
+            ctx.state.frame = sourceFrame;
+            ctx.state.frameName = frameName;
+            if (sourceFrame.type === "letterbox") {
+              await tween({ duration, signal: commandSignal, update: (_progress, raw) => {
+                const sample = sampleAdvLetterboxAnimator(operation, raw, frameCanvasAlpha(sourceFrame));
+                frames[frameName]!.opacity = sample.opacity;
+                frames[frameName]!.slide = sample.slide;
+                ctx.state.frameOpacity = sample.opacity;
+                ctx.state.frameSlide = sample.slide;
+                ctx.SceneRoot.setFrameOpacity(sample.opacity, sample.slide, frameName);
+              } });
+            } else {
+              ctx.SceneRoot.setFrameOpacity(1, 0, frameName);
+              await ctx.Session.DelayTokens.delay(duration, commandSignal);
+            }
+          }
+          if (commandSignal.aborted || this.disposed) return;
+          if (!named && showing) {
+            ctx.SceneRoot.clearFrameOverlay(frameName);
+            delete frames[frameName];
+            const keys = activeFrameKeys(ctx.state);
+            const lastKey = keys[keys.length - 1] || "";
+            ctx.state.frame = lastKey ? frames[lastKey]?.frame || null : null;
+            ctx.state.frameName = lastKey;
+            ctx.state.frameOpacity = lastKey ? frames[lastKey]?.opacity ?? 0 : 0;
+            ctx.state.frameSlide = lastKey ? frames[lastKey]?.slide ?? 0 : 1;
+          }
+        });
+        return;
+      }
       const explicitHide = /hide/i.test(stateName);
       const frameName = frameCommandKey(cmd, cmd.frame || null);
       const frameStates = ensureFrameStateMap(ctx.state);
@@ -4113,8 +4359,7 @@ export class AdvPlayer {
         "focus",
         (transitionSignal) => {
           const targetName = firstTarget(cmd);
-          const positionType =
-            (cmd.positionType as number) || ctx.Session.tryGetTargetNameToPositionType(targetName) || 5;
+          const positionType = AdvCamera.focusAnchorPositionType(cmd.positionType as number | undefined);
           // Focus commits all camera-session state after its internal
           // DelaySeconds continuation resumes.
           ctx.Session.setCurrentFocusCameraDistance(cmd.cameraDistance ?? 0);
@@ -4123,6 +4368,7 @@ export class AdvPlayer {
             positionType,
             targetName,
             cameraDistance: cmd.cameraDistance,
+            sharp: String(param(cmd, 0)).trim().toLowerCase() === "sharp",
             duration: commandDuration(ctx, cmd, AdvCamera.defaultTweenDuration),
             ease: param(cmd, 1) || ctx.runtime.focusEase || 6,
             signal: transitionSignal,
@@ -4525,15 +4771,21 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Alpha, async (cmd, ctx) => {
-      const alpha = finite(param(cmd, 0), 1);
+      const alpha = clamp01(param(cmd, 0));
       const duration = commandDuration(ctx, cmd, 0);
       const layers = cmd.canvasLayers || [];
-      const tasks: Promise<void>[] = [];
-      if (layers.includes(7)) tasks.push(ctx.SceneRoot.fadeStill(alpha, duration));
-      if (layers.includes(6)) tasks.push(ctx.SceneRoot.fadeVideo(alpha, duration));
-      if (layers.includes(2))
-        for (const target of targetKeys(cmd)) tasks.push(ctx.SceneRoot.fadeCharacter(target, alpha, duration));
-      await this.runCommandTask(cmd, () => Promise.all(tasks));
+      const fadeVideo = () =>
+        ctx.Session.CurrentVideoInfo ? ctx.SceneRoot.fadeVideo(alpha, duration) : Promise.resolve();
+      await this.runCommandTask(cmd, async () => {
+        if (!layers.length) {
+          await Promise.all([ctx.SceneRoot.fadeStill(alpha, duration), fadeVideo()]);
+          return;
+        }
+        for (const layer of layers) {
+          if (layer === 6) await fadeVideo();
+          else if (layer === 7) await ctx.SceneRoot.fadeStill(alpha, duration);
+        }
+      });
     });
 
     register(ADV_COMMAND.Wait, async (_cmd, ctx, signal) => {
@@ -4715,8 +4967,16 @@ export class AdvPlayer {
       const master = resolveAdvChatMaster(cmd.targetChatID, ctx.runtime);
       const wasVisible = Boolean(ctx.state.chat.visible);
       const sameThread = Boolean(
-        wasVisible && ctx.state.chat.windowKey === windowKey && ctx.state.chat.memoryId === memoryId,
+        wasVisible &&
+        ctx.state.chat.windowKey === windowKey &&
+        ctx.state.chat.memoryId === memoryId &&
+        ctx.state.chat.chatId === (cmd.targetChatID || 0),
       );
+      const closing = sameThread && Number(ctx.state.chat.screenMode || 0) === screenMode;
+      if (!ctx.Model.shouldShortCut && (!wasVisible || ctx.state.chat.windowAssetName !== windowAssetName || closing)) {
+        const sound = chatSound(cmd.targetChatID || 0, "window");
+        if (sound) ctx.SoundManager.playSe(sound);
+      }
       const finishTransition = async (task: Promise<void>): Promise<void> => {
         // AdvChatWindowCommand.Execute.MoveNext: authored IsNoWait forgets
         // PlayChatWindow only during normal playback. Shortcut replay still
@@ -4727,7 +4987,7 @@ export class AdvPlayer {
         }
         await task;
       };
-      if (sameThread && Number(ctx.state.chat.screenMode || 0) === screenMode) {
+      if (closing) {
         // UIAdvChatWidget.PlayChatWindow toggles an already-active identical
         // window through HideChatWindowAsync when TrySetChatWindow returns
         // false. The paired ChatWindow rows at the end of every phone scene
@@ -4746,7 +5006,11 @@ export class AdvPlayer {
       }
       ctx.state.chat.screenMode = screenMode;
       const title = chatWindowDisplayName(cmd, ctx.runtime, localizedText);
-      ctx.state.chat.sourceCommand = presentationSource(cmd);
+      ctx.state.chat.sourceCommand = {
+        ...presentationSource(cmd),
+        params: clonePlain(cmd.params),
+        targetChatID: cmd.targetChatID,
+      };
       ctx.state.chat.title = title.text;
       ctx.state.chat.titleLang = title.lang;
       ctx.state.chat.chatId = cmd.targetChatID || 0;
@@ -4756,7 +5020,7 @@ export class AdvPlayer {
       ctx.state.chat.windowAssetName = windowAssetName;
       ctx.state.chat.dataRoot = chatDataRootForWindowAsset(windowAssetName, ctx.runtime);
       ctx.state.chat.iconAssetName = master?.chatIconAssetName || "";
-      ctx.state.chat.group = isGroupChatParticipants(participants);
+      ctx.state.chat.group = master?.isGroupChat ?? isGroupChatParticipants(participants);
       if (Number.isFinite(battery)) {
         ctx.state.chat.battery = battery;
         ctx.state.chat.batteryText = `${Math.round(battery as number)}%`;
@@ -4777,12 +5041,7 @@ export class AdvPlayer {
         commandSignal,
       );
       await finishTransition(transition);
-      if (screenMode > 0 && !cmd.noWait && !ctx.Model.shouldShortCut && !commandSignal.aborted) {
-        // Non-chat phone surfaces (notification/incoming-call modes) are the
-        // interaction themselves. The following command represents the tap
-        // that dismisses or opens them, so normal playback must not run it in
-        // the same frame. Ordinary screenMode=0 message windows are gated by
-        // ChatTalk/ChatStamp instead.
+      if (!cmd.noWait && !ctx.Model.shouldShortCut && !commandSignal.aborted) {
         await this.waitForChatRead(0, 0, commandSignal);
       }
     });
@@ -4795,11 +5054,10 @@ export class AdvPlayer {
           Boolean(ctx.state.chat.visible),
         );
         const senderChatId = cmd.targetChatID || 0;
-        const sender = targetDisplayName(cmd, ctx.runtime, localizedText);
-        const text = commandText(cmd, "", localizedText);
+        const { speaker: sender, text } = this.resolveDialogue(cmd);
         const soundInfos: AdvSoundEntry[] = cmd.voices || [];
         const readCount = Math.max(0, Math.trunc(finite(param(cmd, 0), 0)));
-        const self = chatSenderIsSelf(ctx.state.chat.participants, cmd.targetName) || firstTarget(cmd).startsWith("my");
+        const self = chatSenderIsSelf(ctx.state.chat.participants, cmd.targetName, senderChatId, ctx.state.chat.chatId);
         const iconAsset = chatIconAssetName(cmd, ctx.runtime, (cmd.targetAssetName as string) || "");
         ctx.Session.chatMemoryAddTalk(
           memoryId,
@@ -4836,7 +5094,10 @@ export class AdvPlayer {
           iconAssetName: iconAsset,
           iconChatId: senderChatId,
         });
-        if (ctx.SoundManager && cmd.chatSound && !ctx.Model.shouldShortCut) ctx.SoundManager.playSe(cmd.chatSound);
+        if (!ctx.Model.shouldShortCut) {
+          const sound = chatSound(ctx.state.chat.chatId, "message", cmd.chatSound);
+          if (sound) ctx.SoundManager.playSe(sound);
+        }
         if (!cmd.noWait)
           await this.waitForReadableAdvance(
             this.visibleTextLength(text.text),
@@ -4879,7 +5140,8 @@ export class AdvPlayer {
           Boolean(ctx.state.chat.visible),
         );
         const readCount = Math.max(0, Math.trunc(finite(param(cmd, 0), 0)));
-        if (readCount > 0) ctx.Session.chatMemoryApplyRead(memoryId, cmd.targetChatID || 0, readCount);
+        if (readCount > 0)
+          ctx.Session.chatMemoryApplyRead(memoryId, cmd.targetChatID || ctx.state.chat.chatId, readCount);
         if (!visibleChatMemory(ctx, memoryId)) return;
         if (readCount > 0) {
           ctx.state.chat.readVisible = true;
@@ -4904,7 +5166,7 @@ export class AdvPlayer {
         const sender = targetDisplayName(cmd, ctx.runtime, localizedText);
         const stampAsset = (cmd.targetAssetName as string) || "stamp";
         const readCount = Math.max(0, Math.trunc(finite(param(cmd, 0), 0)));
-        const self = chatSenderIsSelf(ctx.state.chat.participants, cmd.targetName) || firstTarget(cmd).startsWith("my");
+        const self = chatSenderIsSelf(ctx.state.chat.participants, cmd.targetName, senderChatId, ctx.state.chat.chatId);
         const iconAsset = chatIconAssetName(cmd, ctx.runtime);
         ctx.Session.chatMemoryAddStamp(memoryId, senderChatId, stampAsset, sender.text, readCount, sender.lang);
         const entries = ctx.Session.getOrCreateChatMemoryState(memoryId).entries;
@@ -4926,6 +5188,10 @@ export class AdvPlayer {
           iconAssetName: iconAsset,
           iconChatId: senderChatId,
         });
+        if (!ctx.Model.shouldShortCut) {
+          const sound = chatSound(ctx.state.chat.chatId, "message", cmd.chatSound);
+          if (sound) ctx.SoundManager.playSe(sound);
+        }
         if (!cmd.noWait) await this.waitForChatRead(0, 0, signal || this.abortController.signal);
       });
     });
@@ -5026,7 +5292,7 @@ export class AdvPlayer {
       const name = (cmd.targetAssetName as string) || cmd.postEffect?.name || "";
       const profile = cmd.postEffect ? { ...cmd.postEffect, name } : name;
       const parameterFade = ctx.Model.calcDuration(finite(param(cmd, 0), 0), 0);
-      const fade = parameterFade > 0 ? parameterFade : finite(cmd.duration, 0);
+      const fade = parameterFade > 0 ? parameterFade : ctx.Model.calcDuration(finite(cmd.duration, 0), 0);
       ctx.state.postEffect = profile;
       // AdvPostEffectCommand.Execute returns CompletedTask immediately after
       // ToggleVolume; ToggleVolume itself calls Forget(). The authored fade
@@ -5054,7 +5320,13 @@ export class AdvPlayer {
               const completed = await ctx.Session.DelayTokens.delay(delay, owner.signal);
               if (!completed || owner.signal.aborted || this.disposed) return false;
             }
-            await ctx.SceneRoot.setBackgroundDoF(intensity, duration, ease, owner.signal);
+            await ctx.SceneRoot.setBackgroundDoF(
+              intensity,
+              duration,
+              ease,
+              owner.signal,
+              ctx.Session.CurrentFocusCameraDistance,
+            );
             return !owner.signal.aborted;
           } finally {
             this.releaseBackgroundDoFCommandController(owner);
@@ -5086,16 +5358,22 @@ export class AdvPlayer {
                 const completed = await ctx.Session.DelayTokens.delay(delay, owner.controller.signal);
                 if (!completed || owner.controller.signal.aborted || this.disposed) return false;
               }
-              // The native continuation retains only PositionType across the
-              // Delay await. Re-resolve the slot now so an intervening Out/In
-              // applies blur to the new renderer entry, not the old target.
+              // The native continuation retains PositionType across Delay.
+              // Empty slots keep the intensity for their next occupant.
               const committedTarget =
                 ctx.Session.getCharacterAt(route.positionType) ||
                 ctx.SceneRoot.characterAtPosition(route.positionType)?.target ||
                 "";
-              if (!committedTarget) return false;
               owner.target = committedTarget;
-              await ctx.SceneRoot.setCharacterDoF(committedTarget, intensity, duration, ease, owner.controller.signal);
+              await ctx.SceneRoot.setCharacterDoF(
+                committedTarget,
+                intensity,
+                duration,
+                ease,
+                owner.controller.signal,
+                ctx.Session.CurrentFocusCameraDistance,
+                route.positionType,
+              );
               return !owner.controller.signal.aborted;
             } finally {
               this.releaseCharacterDoFCommandOwner(route.positionType, owner);
@@ -5170,6 +5448,7 @@ export class AdvPlayer {
       };
       const applyFocusPosition = () => {
         ctx.SceneRoot.applyStageEnv(focusIndex);
+        ctx.SceneRoot.sortCharacters();
         ctx.state.stageEnv.focusPosition = focusIndex;
       };
 
@@ -5179,7 +5458,6 @@ export class AdvPlayer {
           applyEffect();
           applyPostEffect();
           applyFocusPosition();
-          ctx.SceneRoot.sortCharacters();
           ctx.state.stageEnv.all = requestedIndex;
           break;
         case ADV_STAGE_ENV_TYPE.Light:

@@ -1,9 +1,17 @@
 import type { VegaBacklogEntry, VegaNarrativeSettings, VegaSaveData, VegaUnlockKind } from "@haneoka/vega-protocol";
 import { defineVegaService, type VegaDisposable } from "../engine/plugins";
-import type { VegaUiSlotContext } from "../engine/plugins";
+import type { VegaWebUiSlotContext as VegaUiSlotContext } from "../hosts/web/uiSlots";
 
 export type VegaShellScreen =
-  "title" | "game" | "menu" | "save" | "load" | "settings" | "backlog" | "gallery" | "flowchart";
+  | "title"
+  | "game"
+  | "menu"
+  | "save"
+  | "load"
+  | "settings"
+  | "backlog"
+  | "gallery"
+  | "flowchart";
 
 export interface VegaShellFlowNode {
   readonly id: string;

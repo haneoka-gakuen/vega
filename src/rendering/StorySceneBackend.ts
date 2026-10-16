@@ -151,11 +151,14 @@ export interface StorySceneBackend {
     story: AdvStory,
     signal?: AbortSignal,
   ): readonly StoryResourceDeclaration[] | Promise<readonly StoryResourceDeclaration[]>;
-  setup(mount: HTMLElement): Promise<void>;
+  /** Renderer/host-defined surface; the engine does not inspect its shape. */
+  setup(surface: unknown): Promise<void>;
   destroy(options?: { releaseTextures?: boolean }): void | Promise<void>;
   detachState(state: AdvPlayerState): void;
   resize(): void;
   setDeterministicReplayActive(active: boolean): void;
+  /** Host transport pause, independent of authored per-character pause. */
+  setTransportPaused?(paused: boolean): void;
   /** Keep checkpoint compilation from consuming episode-resident models. */
   setSeekIndexCompilationActive?(active: boolean): void;
 
@@ -278,6 +281,8 @@ export interface StorySceneBackend {
   fadeStill(alpha: number, duration?: number): Promise<void>;
   clearStill(duration?: number): Promise<void>;
   setFrameOverlay(frame: AdvFrameEntry, alpha?: number, key?: string): Promise<void>;
+  /** Select a prepared overlay's authored clip without decoding its textures again. */
+  playFrameAnimation?(frame: AdvFrameEntry, key: string): void;
   setFrameOpacity(alpha: number, slide?: number, key?: string): void;
   clearFrameOverlay(key?: string): void;
   setCover(color: unknown, opacity: unknown): void;
@@ -344,13 +349,21 @@ export interface StorySceneBackend {
   setBrightness(target: string, value: number, duration?: number): Promise<void>;
   setPositionBrightness(positionType: number, value: number, duration?: number): Promise<void>;
   setBackgroundBrightness(value: number, duration?: number): Promise<void>;
-  setBackgroundDoF(intensity: number, duration?: number, ease?: unknown, signal?: AbortSignal): Promise<void>;
+  setBackgroundDoF(
+    intensity: number,
+    duration?: number,
+    ease?: unknown,
+    signal?: AbortSignal,
+    cameraDistance?: number,
+  ): Promise<void>;
   setCharacterDoF(
     target: string,
     intensity: number,
     duration?: number,
     ease?: unknown,
     signal?: AbortSignal,
+    cameraDistance?: number,
+    positionType?: number,
   ): Promise<void>;
   cancelPendingCharacterDoF(target: string): void;
   setRimLight(target: string, color: unknown, shadowIntensity: number): Promise<void>;

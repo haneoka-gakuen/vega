@@ -13,7 +13,8 @@
       "@haneoka/vega/audio": ["../../src/audio-entry.ts"],
       "@haneoka/vega/engine": ["../../src/engine-entry.ts"],
       "@haneoka/vega-protocol": ["../protocol/src/index.ts"],
-      "@haneoka/vega-protocol/*": ["../protocol/src/*.ts"]
+      "@haneoka/vega-protocol/*": ["../protocol/src/*.ts"],
+      "@haneoka/vega/web": ["../../src/web-entry.ts"]
     },
     "skipLibCheck": true,
     "strict": true,

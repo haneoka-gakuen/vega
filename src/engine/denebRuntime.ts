@@ -1,6 +1,6 @@
 import { decodeVegaBundle, parseVegaProject, type VegaProject } from "@haneoka/vega-protocol";
 import type { AdvStory } from "../types/AdvRuntime";
-import { VegaEngine, createVega, type VegaEngineOptions, type VegaPlayerHandle } from "./VegaEngine";
+import { VegaEngine, createVega, type VegaEngineOptions, type VegaPlayerHandle } from "../web-entry";
 import { bindVegaProject, type VegaProjectBinding } from "./projectRuntime";
 import { loadDenebRuntimePlugins } from "./denebPlugins";
 
@@ -25,9 +25,9 @@ export interface DenebRuntimeFactoryOptions {
   /** Keep playback paused until an explicitly installed shell resumes it. */
   readonly standaloneShell?: boolean;
   /** Deneb-generated, integrity-bound browser plugin index. */
-  readonly runtimePluginIndexUrl?: string | URL;
+  readonly runtimePluginIndexUrl?: string | URL | null;
   /** Host requirements and authorized application-private runtime files. */
-  readonly externalRuntimeIndexUrl?: string | URL;
+  readonly externalRuntimeIndexUrl?: string | URL | null;
 }
 
 export interface DenebRuntimeMountOptions {
@@ -38,8 +38,8 @@ export interface DenebRuntimeMountOptions {
   readonly manifestUrl?: string | URL;
   readonly sceneId?: string;
   readonly theme?: string | false;
-  readonly runtimePluginIndexUrl?: string | URL;
-  readonly externalRuntimeIndexUrl?: string | URL;
+  readonly runtimePluginIndexUrl?: string | URL | null;
+  readonly externalRuntimeIndexUrl?: string | URL | null;
   readonly signal?: AbortSignal;
 }
 
@@ -143,7 +143,7 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
     async mount(mountOptions) {
       if (disposed) throw new ReferenceError("The Deneb Vega runtime is disposed");
       if (!(mountOptions.root instanceof HTMLElement)) throw new TypeError("Deneb mount root must be an HTMLElement");
-      const combined = combineAbortSignals(options.signal, mountOptions.signal);
+      const combined = combineAbortSignals(options.signal, mountOptions.signal, lifetime.signal);
       try {
         if (combined.signal.aborted) throw combined.signal.reason;
         const activeEngine = await ensureEngine(mountOptions);
@@ -223,8 +223,8 @@ export const createDenebRuntime = async (options: DenebRuntimeFactoryOptions): P
   return runtime;
 };
 
-const normalizedUrl = (value: string | URL | undefined): string | undefined =>
-  value === undefined ? undefined : new URL(String(value), globalThis.document?.baseURI ?? "http://localhost/").href;
+const normalizedUrl = (value: string | URL | null | undefined): string | undefined =>
+  value == null ? undefined : new URL(String(value), globalThis.document?.baseURI ?? "http://localhost/").href;
 
 const resolveStory = async (options: DenebRuntimeMountOptions, signal: AbortSignal): Promise<VegaProjectBinding> => {
   if (options.manifestUrl) await validateDenebManifest(options.manifestUrl, signal);

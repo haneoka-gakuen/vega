@@ -24,13 +24,18 @@ export class AdvCamera {
       : finite(fieldZoomOffsetY);
   }
 
+  static focusAnchorPositionType(positionType?: number): number {
+    return positionType === undefined ? 5 : finite(positionType);
+  }
+
   static focusCommandPositionType(
-    positionType: number,
+    positionType: number | undefined,
     targetName: string,
     targetPosition: (targetName: string) => number,
+    namedControllerAlive = true,
   ): number {
-    const requested = Number(positionType) || 5;
-    return targetName ? Number(targetPosition(targetName)) || requested : requested;
+    const requested = this.focusAnchorPositionType(positionType);
+    return targetName && namedControllerAlive ? finite(targetPosition(targetName)) : requested;
   }
 
   static effectiveFov(baseFov: number, zoomRatio: number): number {
