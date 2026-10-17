@@ -7,7 +7,10 @@ environment:
 dependencies:
   ffi: ^2.2.0
   vega_protocol:
-    path: ../../protocol/dart
+    git:
+      url: https://github.com/haneoka-gakuen/vega.git
+      ref: 4aa5e3a76c540e142be75293d4d34463c138f3d0
+      path: packages/protocol/dart
 flutter:
   plugin:
     platforms:

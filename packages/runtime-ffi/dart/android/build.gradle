@@ -20,7 +20,18 @@ def rustTriples = [
     "armeabi-v7a": ["armv7-linux-androideabi", "armv7a-linux-androideabi"],
     "x86_64": ["x86_64-linux-android", "x86_64-linux-android"],
 ]
-def rustTasks = rustTriples.collect { abi, triple ->
+def flutterTargetAbis = [
+    "android-arm": "armeabi-v7a",
+    "android-arm64": "arm64-v8a",
+    "android-x64": "x86_64",
+]
+def requestedTargets = project.findProperty("target-platform")?.toString()?.trim()
+def requestedAbis = requestedTargets ? requestedTargets.split(',').collect { target ->
+    def abi = flutterTargetAbis[target.trim()]
+    if (abi == null) throw new GradleException("Unsupported Flutter Android target: "+target)
+    abi
+} : rustTriples.keySet()
+def rustTasks = rustTriples.findAll { abi, triple -> requestedAbis.contains(abi) }.collect { abi, triple ->
     tasks.register("buildVegaRuntime_${abi.replace('-', '_')}", Exec) {
         inputs.files(new File(workspace, "Cargo.toml"), new File(workspace, "Cargo.lock"))
         inputs.dir(new File(workspace, "crates/vega-core"))
