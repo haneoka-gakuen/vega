@@ -13,7 +13,7 @@ def configure_vega_runtime(s)
   retain = symbols.map { |name| "-Wl,-u,_vega_execution_#{name}" }.join(' ')
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'ENABLE_USER_SCRIPT_SANDBOXING' => 'NO' }
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => "$(inherited) #{retain} \"$(BUILT_PRODUCTS_DIR)/vega_runtime_ffi/libvega_runtime.a\""
+    'OTHER_LDFLAGS' => "$(inherited) #{retain} \"$(PODS_CONFIGURATION_BUILD_DIR)/vega_runtime_ffi/libvega_runtime.a\""
   }
   s.script_phase = {
     :name => 'Build Vega Rust execution core',
@@ -23,6 +23,6 @@ def configure_vega_runtime(s)
     :input_files => [File.realpath('build.sh', __dir__)] +
       Dir[File.expand_path('../../../../crates/{vega-core,vega-native}/**/*.{rs,toml}', __dir__)] +
       %w[Cargo.toml Cargo.lock].map { |name| File.expand_path("../../../../#{name}", __dir__) },
-    :output_files => ['$(BUILT_PRODUCTS_DIR)/vega_runtime_ffi/libvega_runtime.a']
+    :output_files => ['$(PODS_CONFIGURATION_BUILD_DIR)/vega_runtime_ffi/libvega_runtime.a']
   }
 end

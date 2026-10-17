@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 workspace=$(CDPATH= cd -- "$script_dir/../../../.." && pwd -P)
 cargo=${VEGA_CARGO_EXECUTABLE:-cargo}
 target_dir="$DERIVED_FILE_DIR/vega-rust"
-artifact_dir="$BUILT_PRODUCTS_DIR/vega_runtime_ffi"
+artifact_dir="$PODS_CONFIGURATION_BUILD_DIR/vega_runtime_ffi"
 mkdir -p "$artifact_dir"
 
 case "$PLATFORM_NAME" in
