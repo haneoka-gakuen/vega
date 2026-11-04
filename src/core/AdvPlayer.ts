@@ -1,3 +1,4 @@
+import { resolveStoryCharacterModels } from "../resources/StoryCharacterReferences";
 import { requireCanonicalStoryResourceUrl, resolveStoryLocalizedText, type StoryResolvedText } from "../runtime";
 import { ADV_CANVAS_LAYER, ADV_COMMAND, ADV_STAGE_ENV_TYPE, mergeAdvRuntime } from "./AdvConstants";
 import { canonicalAdvLocale, resolveAdvLocale } from "./AdvLocalization";
@@ -545,7 +546,10 @@ function frameCommandKey(cmd: AdvCommand, frame: AdvFrameEntry | null = null) {
 
 function ensureFrameStateMap(state: Record<string, unknown>) {
   if (!state.frameEntries || typeof state.frameEntries !== "object") state.frameEntries = {};
-  return state.frameEntries as Record<string, { frame: AdvFrameEntry | null; opacity: number; slide: number; showing?: boolean }>;
+  return state.frameEntries as Record<
+    string,
+    { frame: AdvFrameEntry | null; opacity: number; slide: number; showing?: boolean }
+  >;
 }
 
 function activeFrameKeys(state: Record<string, unknown>) {
@@ -860,6 +864,7 @@ export class AdvPlayer {
   }) {
     this.executionDriver = executionDriver;
     this.textMetrics = textMetrics;
+    story = resolveStoryCharacterModels(story);
     const bindings = new Map(
       commandExtensions.filter((entry) => entry.commandType).map((entry) => [entry.commandType!, entry.opcode]),
     );
@@ -927,6 +932,7 @@ export class AdvPlayer {
     // component) supply one, so core does not link the DOM renderer.
     this.SceneRoot = sceneBackend;
     this.SceneRoot.setTransportPaused?.(this.Model.isPause || !state.playing);
+    this.SoundManager?.setTransportPaused(this.Model.isPause || !state.playing);
     this.SoundManager = new AdvSoundManager(
       this.runtime,
       state as AdvPlayerState & {
@@ -1759,7 +1765,7 @@ export class AdvPlayer {
     this.Session.choiceRecords.clear();
     for (const [key, value] of decisionOverrides) this.Session.choiceRecords.set(key, value);
     this.Loader.restoreSnapshot(checkpoint.loader);
-    if (options.restoreAudio !== false) this.SoundManager.restoreSnapshot(checkpoint.sound);
+    if (options.restoreAudio !== false) await this.SoundManager.restoreSnapshot(checkpoint.sound, options.signal);
     this.restoreSeekPlayerState(checkpoint.state, options.preservePersistentNarrative !== false);
     this.Model.changeIdleState();
     this.Model.CurrentEpisodeListIndex = checkpoint.index;
@@ -1785,6 +1791,7 @@ export class AdvPlayer {
     this.Model.isPause = paused;
     this.state.paused = paused;
     this.SceneRoot.setTransportPaused?.(paused || !this.state.playing);
+    this.SoundManager?.setTransportPaused(paused || !this.state.playing);
     if (this.executionDriver && !this.seekIndexBuilding) {
       if (paused) this.executionDriver.pause();
       else this.executionDriver.resume();
@@ -1843,6 +1850,7 @@ export class AdvPlayer {
 
   /** Restore an already indexed command boundary without executing its prefix. */
   async replayFromStartTo(targetIndex: number) {
+    await this.ensureSeekIndex(new Map(this.Session.choiceRecords));
     await this.seekTo(targetIndex, { resume: false, force: true });
   }
 
@@ -1993,8 +2001,7 @@ export class AdvPlayer {
             state: this.captureSeekPlayerState(),
           }
         : this.seekIndexFor(this.Session.choiceRecords).checkpoints.get(this.lastSettledSeekBoundary)) as
-        | StorySeekCheckpoint
-        | undefined);
+        StorySeekCheckpoint | undefined);
     if (!rollback) throw new Error("The current scene has no recoverable seek boundary");
     const controller = createAbortLink(this.abortController.signal);
     let resolve = previousSeek?.resolve ?? (() => {});
@@ -2125,6 +2132,7 @@ export class AdvPlayer {
             this.Model.isPause = true;
             this.state.paused = true;
             this.SceneRoot.setTransportPaused?.(true);
+            this.SoundManager?.setTransportPaused(true);
             this.state.ready = false;
             this.state.seeking = false;
             this.state.error = failure instanceof Error ? failure.message : String(failure);
@@ -2549,6 +2557,7 @@ export class AdvPlayer {
     this.Model.shortCutIndex = -1;
     this.state.seeking = false;
     this.SceneRoot.setTransportPaused?.(true);
+    this.SoundManager?.setTransportPaused(true);
     this.SceneRoot.setDeterministicReplayActive(false);
     this.PlayableDirector.deactivate();
     this.commandGroupScheduler.cancelAll();
@@ -2599,6 +2608,7 @@ export class AdvPlayer {
     if (this.disposed || this.abortController.signal.aborted || this.state.playing) return;
     this.state.playing = true;
     this.SceneRoot.setTransportPaused?.(this.Model.isPause);
+    this.SoundManager?.setTransportPaused(this.Model.isPause);
     this.state.finished = false;
     this.Model.shouldShortCut = false;
     const driver = this.executionDriver;
@@ -2768,6 +2778,7 @@ export class AdvPlayer {
       if (!this.disposed) {
         this.state.playing = false;
         this.SceneRoot.setTransportPaused?.(true);
+        this.SoundManager?.setTransportPaused(true);
       }
     }
   }
@@ -2792,6 +2803,7 @@ export class AdvPlayer {
     this.Model.isPause = true;
     this.state.paused = true;
     this.SceneRoot.setTransportPaused?.(true);
+    this.SoundManager?.setTransportPaused(true);
     this.SceneRoot.setVideoPaused?.(true);
   }
 
@@ -2809,6 +2821,7 @@ export class AdvPlayer {
     this.Model.isPause = false;
     this.state.paused = false;
     this.SceneRoot.setTransportPaused?.(false);
+    this.SoundManager?.setTransportPaused(false);
     this.SceneRoot.setVideoPaused?.(false);
     this.releasePlaybackResumeWaiters();
   }
@@ -3496,16 +3509,23 @@ export class AdvPlayer {
       positionType: number,
       targetName: string,
       cameraDistance: number,
+      cameraAnchor: "slot" | "character" = "slot",
+      focusTargets: readonly string[] = [],
     ) => {
       const resolvedPositionType = AdvCamera.focusAnchorPositionType(positionType);
       const focusData = ctx.SceneRoot.currentFocusData(cameraDistance);
-      const basePosition = ctx.SceneRoot.focusBaseCameraPosition(resolvedPositionType, targetName, focusData);
+      const frame = ctx.SceneRoot.focusFrame?.(focusTargets, cameraDistance);
+      const basePosition =
+        frame?.position ??
+        ctx.SceneRoot.focusBaseCameraPosition(resolvedPositionType, targetName, focusData, cameraAnchor);
       ctx.Session.setCurrentFocusCameraPosition({
         x: basePosition.x,
         y: basePosition.y,
         z: 0,
       });
-      ctx.Session.setCurrentFocusCameraZoomRatio(focusData?.fieldZoomRatio ?? ctx.Session.CurrentFocusCameraZoomRatio);
+      ctx.Session.setCurrentFocusCameraZoomRatio(
+        frame?.zoomRatio ?? focusData?.fieldZoomRatio ?? ctx.Session.CurrentFocusCameraZoomRatio,
+      );
       ctx.Session.setCurrentPanV2BaseCameraPosition(basePosition);
       ctx.Session.setCurrentPanV2CameraOffset({ x: 0, y: 0 });
       return basePosition;
@@ -3589,17 +3609,26 @@ export class AdvPlayer {
             const to = showing ? 0 : 1;
             frames[frameName] = { frame: sourceFrame, opacity: from, slide: 0, showing: true };
             ctx.SceneRoot.playFrameAnimation?.(sourceFrame, frameName);
-            await tween({ duration: fadeDuration, ease: resolveEase(6), signal: commandSignal,
+            await tween({
+              duration: fadeDuration,
+              ease: resolveEase(6),
+              signal: commandSignal,
               update: (progress) => {
                 const opacity = lerp(from, to, progress);
                 frames[frameName]!.opacity = opacity;
                 ctx.SceneRoot.setFrameOpacity(opacity, 0, frameName);
-              } });
+              },
+            });
           } else {
             // AdvFrame.ShowFrame delays before its Show state; Hide and named
             // Play run the authored state immediately without a second DOFade.
-            if (!named && !showing && fadeDuration > 0 &&
-                !(await ctx.Session.DelayTokens.delay(fadeDuration, commandSignal))) return;
+            if (
+              !named &&
+              !showing &&
+              fadeDuration > 0 &&
+              !(await ctx.Session.DelayTokens.delay(fadeDuration, commandSignal))
+            )
+              return;
             const speed = Math.abs(finite(state.speed, 1));
             const duration = ctx.Model.calcDuration(speed > 0 ? state.duration / speed : 0, 0);
             const animation = state.animation ? { ...state.animation, speed } : undefined;
@@ -3610,14 +3639,18 @@ export class AdvPlayer {
             ctx.state.frame = sourceFrame;
             ctx.state.frameName = frameName;
             if (sourceFrame.type === "letterbox") {
-              await tween({ duration, signal: commandSignal, update: (_progress, raw) => {
-                const sample = sampleAdvLetterboxAnimator(operation, raw, frameCanvasAlpha(sourceFrame));
-                frames[frameName]!.opacity = sample.opacity;
-                frames[frameName]!.slide = sample.slide;
-                ctx.state.frameOpacity = sample.opacity;
-                ctx.state.frameSlide = sample.slide;
-                ctx.SceneRoot.setFrameOpacity(sample.opacity, sample.slide, frameName);
-              } });
+              await tween({
+                duration,
+                signal: commandSignal,
+                update: (_progress, raw) => {
+                  const sample = sampleAdvLetterboxAnimator(operation, raw, frameCanvasAlpha(sourceFrame));
+                  frames[frameName]!.opacity = sample.opacity;
+                  frames[frameName]!.slide = sample.slide;
+                  ctx.state.frameOpacity = sample.opacity;
+                  ctx.state.frameSlide = sample.slide;
+                  ctx.SceneRoot.setFrameOpacity(sample.opacity, sample.slide, frameName);
+                },
+              });
             } else {
               ctx.SceneRoot.setFrameOpacity(1, 0, frameName);
               await ctx.Session.DelayTokens.delay(duration, commandSignal);
@@ -3631,8 +3664,8 @@ export class AdvPlayer {
             const lastKey = keys[keys.length - 1] || "";
             ctx.state.frame = lastKey ? frames[lastKey]?.frame || null : null;
             ctx.state.frameName = lastKey;
-            ctx.state.frameOpacity = lastKey ? frames[lastKey]?.opacity ?? 0 : 0;
-            ctx.state.frameSlide = lastKey ? frames[lastKey]?.slide ?? 0 : 1;
+            ctx.state.frameOpacity = lastKey ? (frames[lastKey]?.opacity ?? 0) : 0;
+            ctx.state.frameSlide = lastKey ? (frames[lastKey]?.slide ?? 0) : 1;
           }
         });
         return;
@@ -3874,9 +3907,7 @@ export class AdvPlayer {
     register(ADV_COMMAND.EyeBlink, (cmd, ctx) => {
       // AdvEyeBlinkCommand: "stop"/"resume" are explicit; an empty parameter
       // toggles the session's per-name state, which a later In re-applies.
-      const mode = String(cmd.params?.[0] ?? "")
-        .trim()
-        .toLowerCase();
+      const mode = String(cmd.params?.[0] ?? "").toLowerCase();
       if (mode && mode !== "stop" && mode !== "resume") {
         console.warn(`[Vega] EyeBlink ignores unknown parameter ${JSON.stringify(mode)}`);
         return;
@@ -4162,7 +4193,7 @@ export class AdvPlayer {
       }
     });
 
-    register(ADV_COMMAND.Bgm, async (cmd, ctx) => {
+    register(ADV_COMMAND.Bgm, async (cmd, ctx, signal) => {
       const fade = ctx.Model.shouldShortCut ? 0 : soundFadeSeconds(cmd);
       if (this.seekIndexBuilding && this.seekSoundProjection) {
         if (cmd.bgm) {
@@ -4172,6 +4203,7 @@ export class AdvPlayer {
           this.seekSoundProjection.bgmPositionSeconds = Math.max(0, finite(param(cmd, 1), 0));
           this.seekSoundProjection.bgmPlaying = true;
           this.seekSoundProjection.lastBgmLabel = label;
+          this.seekSoundProjection.lastBgmSource = sound.playableUrl;
           this.seekSoundProjection.lastBgmOrSeFrame = this.seekSoundProjection.frameStamp;
           ctx.state.audio.bgm = label;
           ctx.Session.CurrentBgmPlayId = 1;
@@ -4180,12 +4212,15 @@ export class AdvPlayer {
           this.seekSoundProjection.bgmPositionSeconds = 0;
           this.seekSoundProjection.bgmPlaying = false;
           this.seekSoundProjection.lastBgmLabel = "";
+          this.seekSoundProjection.lastBgmSource = "";
           ctx.state.audio.bgm = "";
           ctx.Session.CurrentBgmPlayId = 0;
         }
         return;
       }
       if (cmd.bgm) {
+        await ctx.SoundManager.prepareSoundSource(cmd.bgm, signal);
+        if (signal?.aborted) return;
         const entry = ctx.SoundManager.playBgm(cmd.bgm, fade, finite(param(cmd, 1), 0));
         const playId = entry?.playId || 0;
         ctx.Session.CurrentBgmPlayId = playId;
@@ -4358,16 +4393,27 @@ export class AdvPlayer {
         cmd,
         "focus",
         (transitionSignal) => {
-          const targetName = firstTarget(cmd);
-          const positionType = AdvCamera.focusAnchorPositionType(cmd.positionType as number | undefined);
+          const subjects = cmd.focusTargets?.includes("*")
+            ? [...ctx.Session.targetNameToPositionTypeMap.keys()]
+            : (cmd.focusTargets ?? []);
+          const focusTargets = subjects.filter((target) => ctx.SceneRoot.isCharacterShowing(target));
+          const requestedTarget = firstTarget(cmd) || (focusTargets.length === 1 ? focusTargets[0]! : "");
+          const wide =
+            cmd.fallbackToWide === true && requestedTarget && !ctx.SceneRoot.isCharacterShowing(requestedTarget);
+          const targetName = wide ? "" : requestedTarget;
+          const positionType = AdvCamera.focusAnchorPositionType(wide ? 5 : (cmd.positionType as number | undefined));
+          const cameraDistance = wide ? 0 : cmd.cameraDistance;
           // Focus commits all camera-session state after its internal
           // DelaySeconds continuation resumes.
-          ctx.Session.setCurrentFocusCameraDistance(cmd.cameraDistance ?? 0);
-          syncPanV2BaseFromFocus(ctx, positionType, targetName, cmd.cameraDistance ?? 0);
+          ctx.Session.setCurrentFocusCameraDistance(cameraDistance ?? 0);
+          const cameraAnchor = cmd.cameraAnchor === "character" ? "character" : "slot";
+          syncPanV2BaseFromFocus(ctx, positionType, targetName, cameraDistance ?? 0, cameraAnchor, focusTargets);
           return ctx.SceneRoot.focus({
+            cameraAnchor,
+            focusTargets,
             positionType,
             targetName,
-            cameraDistance: cmd.cameraDistance,
+            cameraDistance,
             sharp: String(param(cmd, 0)).trim().toLowerCase() === "sharp",
             duration: commandDuration(ctx, cmd, AdvCamera.defaultTweenDuration),
             ease: param(cmd, 1) || ctx.runtime.focusEase || 6,
@@ -4770,10 +4816,40 @@ export class AdvPlayer {
       );
     });
 
-    register(ADV_COMMAND.Alpha, async (cmd, ctx) => {
+    register(ADV_COMMAND.Alpha, async (cmd, ctx, signal) => {
       const alpha = clamp01(param(cmd, 0));
       const duration = commandDuration(ctx, cmd, 0);
       const layers = cmd.canvasLayers || [];
+      const target =
+        firstTarget(cmd) ||
+        (layers.includes(ADV_CANVAS_LAYER.Character)
+          ? ctx.Session.getCharacterAt(Number(cmd.positionType) || 5) || ""
+          : "");
+      if (target) {
+        await this.runCommandTask(cmd, () => {
+          const animate = ctx.SceneRoot.playPropertyAnimation;
+          if (!animate) return ctx.SceneRoot.fadeCharacter(target, alpha, duration);
+          const from = ctx.SceneRoot.readScreenTransform?.(target)?.current.alpha ?? 1;
+          return animate.call(
+            ctx.SceneRoot,
+            target,
+            {
+              durationSeconds: duration,
+              tracks: [
+                {
+                  channel: "alpha",
+                  points: [
+                    { timeSeconds: 0, value: from },
+                    { timeSeconds: duration, value: alpha, ease: 7 },
+                  ],
+                },
+              ],
+            },
+            { parallel: true, replaceChannels: true, keep: true, immediate: ctx.Model.shouldShortCut, signal },
+          );
+        });
+        return;
+      }
       const fadeVideo = () =>
         ctx.Session.CurrentVideoInfo ? ctx.SceneRoot.fadeVideo(alpha, duration) : Promise.resolve();
       await this.runCommandTask(cmd, async () => {

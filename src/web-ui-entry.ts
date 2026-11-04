@@ -6,3 +6,5 @@ export type {
   VegaWebUiSlotContext as VegaUiSlotContext,
   VegaWebUiSlotContribution as VegaUiSlotContribution,
 } from "./hosts/web/uiSlots";
+
+export { createTalkPortrait } from "./hosts/web/TalkPortrait";

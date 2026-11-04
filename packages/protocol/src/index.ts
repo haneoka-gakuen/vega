@@ -8,3 +8,4 @@ export * from "./plugin.js";
 export * from "./preview.js";
 export * from "./project.js";
 export * from "./ui.js";
+export * from "./property-animation.js";

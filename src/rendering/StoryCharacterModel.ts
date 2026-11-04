@@ -89,7 +89,7 @@ export interface StoryCharacterModel {
  * Small renderer-owned lifetime surface understood by Vega without knowing a
  * graphics API or model runtime.
  *
- * A provider may return a richer WebGL, Three, Pixi, native, or custom object.
+ * A provider may return a richer WebGL, Three, native, or custom object.
  * The host owns that object after `createForRenderer` resolves. Disposal uses
  * the provider hook first, then exactly one conventional method in the order
  * `dispose`, `destroy`, `release`.
@@ -105,7 +105,7 @@ export interface StoryCharacterRendererModel {
  *
  * Renderer ids are host-defined stable strings. Context is deliberately
  * generic so a WebGL host can expose a GL context, a Three host can expose its
- * renderer and scene services, and a Pixi host can expose its application
+ * renderer and scene services
  * without coupling Vega to any of those libraries.
  */
 export interface StoryCharacterRendererModelContext<

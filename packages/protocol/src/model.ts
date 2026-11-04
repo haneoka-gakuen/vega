@@ -34,7 +34,7 @@ export type VegaProjectMetadata = Readonly<Record<string, VegaJsonValue>> &
 
 export interface VegaProject {
   readonly format: "vega-project";
-  readonly formatVersion: 1;
+  readonly formatVersion: 1 | 2;
   readonly id: string;
   readonly title: VegaLocalizedText;
   readonly entryScene: string;

@@ -54,7 +54,9 @@
     "./ui": {
       "types": "./dist/ui.d.ts",
       "import": "./dist/ui.js"
-    }
+    },
+    "./schema/vega-project-v1.json": "./schema/vega-project-v1.schema.json",
+    "./schema/vega-project-v2.json": "./schema/vega-project-v2.schema.json"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

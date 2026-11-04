@@ -41,6 +41,12 @@ export class AdvCamera {
   static effectiveFov(baseFov: number, zoomRatio: number): number {
     return Math.max(0.001, finite(baseFov, 39.6) / Math.max(0.001, finite(zoomRatio, 1)));
   }
+
+  static panV2CameraOffset(rotationY: number, distance: number, focusSlideRate: number) {
+    const radians = finite(rotationY) * (Math.PI / 180);
+    const radius = (1 - finite(focusSlideRate, 0.5)) * finite(distance);
+    return { x: -radius * Math.sin(radians), y: radius * (1 - Math.cos(radians)) };
+  }
 }
 
 function finite(value: unknown, fallback = 0): number {

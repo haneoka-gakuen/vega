@@ -11,12 +11,18 @@ import type {
   VegaPreviewTransform,
   VegaPreviewTransformResult,
 } from "@haneoka/vega-protocol";
-import { VEGA_PREVIEW_PROTOCOL, isVegaPreviewRequest } from "@haneoka/vega-protocol";
+import {
+  VEGA_PREVIEW_PROTOCOL,
+  isVegaPreviewRequest,
+  isVegaCommandType,
+  vegaPreviewSupersedesScene,
+} from "@haneoka/vega-protocol";
 import type { AdvPlayerExecutionBoundary } from "../core/AdvPlayer";
 import type { StoryCameraState } from "../rendering/StorySceneBackend";
 import type { AdvCommand, AdvStory } from "../types/AdvRuntime";
 import type { VegaPlayerHandle } from "../web-entry";
 import { VegaEngine } from "../web-entry";
+import { StageRecording } from "./StageRecording";
 
 const CAPABILITIES: VegaPreviewCapabilities = Object.freeze({
   commands: [
@@ -34,7 +40,14 @@ const CAPABILITIES: VegaPreviewCapabilities = Object.freeze({
     "debug.step",
     "debug.breakpoints.set",
     "debug.variables",
+    "debug.variables.set",
     "stage.snapshot",
+    "stage.capture",
+    "audio.snapshot",
+    "stage.recording.start",
+    "stage.recording.stop",
+    "stage.recording.read",
+    "stage.recording.release",
     "stage.reference-frame",
     "stage.transform.get",
     "stage.transform.set",
@@ -44,6 +57,7 @@ const CAPABILITIES: VegaPreviewCapabilities = Object.freeze({
   revisionCancellation: true,
   debugging: true,
   stageTransforms: true,
+  modelDefinitions: true,
   transports: ["message-port"] as const,
 });
 
@@ -58,6 +72,7 @@ export interface VegaPreviewRuntimeOptions {
   readonly theme?: string | false;
   /** Render contribution id or backend selected for every preview player. */
   readonly renderBackend?: string;
+  readonly externalPlaybackControls?: boolean;
   readonly maxPayloadBytes?: number;
 }
 
@@ -73,6 +88,7 @@ export class VegaPreviewRuntime {
   private readonly mount: HTMLElement;
   private readonly theme: string | false | undefined;
   private readonly renderBackend: string | undefined;
+  private readonly externalPlaybackControls: boolean;
   private readonly ownsEngine: boolean;
   private readonly maxPayloadBytes: number;
   private player: VegaPlayerHandle | null = null;
@@ -81,6 +97,7 @@ export class VegaPreviewRuntime {
   private sceneRevision = "0";
   private breakpoints: readonly VegaPreviewBreakpoint[] = [];
   private latestRevision = -1;
+  private latestSceneRevision = -1;
   private operationTail: Promise<void> = Promise.resolve();
   private activeOperation: AbortController | null = null;
   private playTask: Promise<void> | null = null;
@@ -94,6 +111,7 @@ export class VegaPreviewRuntime {
   private disposal: Promise<void> | null = null;
   private acceptingRequests = true;
   private disposed = false;
+  private recording?: StageRecording;
 
   constructor(options: VegaPreviewRuntimeOptions) {
     this.identity = options.identity;
@@ -102,6 +120,7 @@ export class VegaPreviewRuntime {
     this.engine = options.engine ?? new VegaEngine({ id: options.identity.runtimeInstanceId });
     this.theme = options.theme;
     this.renderBackend = options.renderBackend;
+    this.externalPlaybackControls = options.externalPlaybackControls ?? false;
     this.ownsEngine = !options.engine;
     this.maxPayloadBytes = options.maxPayloadBytes ?? 8 * 1024 * 1024;
   }
@@ -136,6 +155,7 @@ export class VegaPreviewRuntime {
     this.disposal = (async () => {
       await this.startPromise?.catch(() => undefined);
       await pending.catch(() => undefined);
+      await this.recording?.dispose();
       await this.player?.dispose();
       this.player = null;
       this.syncedStory = null;
@@ -161,11 +181,12 @@ export class VegaPreviewRuntime {
     }
     if (payloadSize > this.maxPayloadBytes)
       return this.reject(request, "payload-too-large", "Preview payload too large");
-    if (request.revision < this.latestRevision) {
+    if (request.revision < this.latestSceneRevision) {
       return this.respond(request, { status: "superseded" });
     }
-    if (request.revision > this.latestRevision) {
-      this.latestRevision = request.revision;
+    this.latestRevision = Math.max(this.latestRevision, request.revision);
+    if (vegaPreviewSupersedesScene(request.command.name) && request.revision > this.latestSceneRevision) {
+      this.latestSceneRevision = request.revision;
       this.activeOperation?.abort();
     }
     if (this.replacesPlayer(request)) {
@@ -179,7 +200,7 @@ export class VegaPreviewRuntime {
   }
 
   private async execute(request: VegaPreviewRequest): Promise<void> {
-    if (request.revision < this.latestRevision) {
+    if (request.revision < this.latestSceneRevision) {
       this.respond(request, { status: "superseded" });
       return;
     }
@@ -262,14 +283,56 @@ export class VegaPreviewRuntime {
           result = this.breakpointResult() as unknown as VegaJsonValue;
           this.scheduleStateEvent();
           break;
+        case "debug.variables.set":
+          this.requirePlayer().player.narrativeStore.setVariable(request.command.variable, request.command.value);
+          result = snapshotState(this.requirePlayer().player.narrativeStore.snapshot().variables);
+          this.scheduleStateEvent();
+          break;
         case "debug.variables":
           result = snapshotState(this.requirePlayer().player.narrativeStore.snapshot().variables);
           break;
         case "runtime.snapshot":
           result = snapshotState(this.requirePlayer().player.state);
           break;
+        case "audio.snapshot":
+          result = snapshotState(this.requirePlayer().player.SoundManager.audioStatus());
+          break;
+        case "stage.capture": {
+          const player = this.requirePlayer().player,
+            scene = player.SceneRoot,
+            viewport = player.state.viewport;
+          const height =
+            viewport.width > 0 && viewport.height > 0 ? Math.round((512 * viewport.height) / viewport.width) : 288;
+          const image = await scene.capturePreview?.({ width: 512, height, format: "image/webp", quality: 0.85 });
+          if (!image) throw new Error("Stage capture is unavailable");
+          result = { image };
+          break;
+        }
+        case "stage.recording.start": {
+          if (this.recording) throw new Error("Video recording already exists");
+          this.recording = new StageRecording(this.requirePlayer().player, request.command);
+          result = { recording: true };
+          break;
+        }
+        case "stage.recording.stop": {
+          if (!this.recording) throw new Error("No video recording");
+          const blob = await this.recording.stop();
+          result = { size: blob.size, mimeType: blob.type, subtitles: this.recording.subtitles };
+          break;
+        }
+        case "stage.recording.read": {
+          if (!this.recording) throw new Error("No video recording");
+          result = { data: await this.recording.read(request.command.offset) };
+          break;
+        }
+        case "stage.recording.release": {
+          await this.recording?.dispose();
+          this.recording = undefined;
+          result = {};
+          break;
+        }
         case "stage.snapshot":
-          result = this.stageSnapshot();
+          result = this.stageSnapshot(true);
           break;
         case "stage.reference-frame":
           result = this.referenceFrame(request.command.target) as unknown as VegaJsonValue;
@@ -295,12 +358,12 @@ export class VegaPreviewRuntime {
         case "runtime.patch":
           return this.reject(request, "unsupported", "Runtime patching is not enabled by this build");
       }
-      if (operation.signal.aborted || request.revision < this.latestRevision) {
+      if (operation.signal.aborted || request.revision < this.latestSceneRevision) {
         return this.respond(request, { status: "superseded" });
       }
       this.respond(request, { status: "executed", result });
     } catch (error) {
-      if (operation.signal.aborted || request.revision < this.latestRevision) {
+      if (operation.signal.aborted || request.revision < this.latestSceneRevision) {
         this.respond(request, { status: "superseded" });
       } else {
         this.reject(request, "execution", error instanceof Error ? error.message : String(error));
@@ -323,7 +386,7 @@ export class VegaPreviewRuntime {
     handle.player.pause();
     await handle.player.seekTo(index, { resume: false });
     await playback?.catch(() => undefined);
-    if (signal.aborted || request.revision < this.latestRevision) return false;
+    if (signal.aborted || request.revision < this.latestSceneRevision) return false;
     handle.shell?.enterGame();
     this.pausedBoundaryIndex = handle.player.currentProgressIndex();
     if (this.replacingRevision === request.revision) this.replacingRevision = null;
@@ -342,22 +405,24 @@ export class VegaPreviewRuntime {
       throw new TypeError("Preview story must be an object");
     }
     const seekDecisions = story === this.syncedStory && this.player ? this.player.player.exportSeekDecisions() : null;
+    if (this.recording) await this.recording.stop();
     const next = await this.engine.createPlayer({
       mount: this.mount,
       story,
       ...(this.theme === undefined ? {} : { theme: this.theme }),
       ...(this.renderBackend ? { renderBackend: this.renderBackend } : {}),
+      externalPlaybackControls: this.externalPlaybackControls,
     });
     next.player.subscribeExecutionObserver((boundary) => this.observeExecutionBoundary(next, boundary));
     try {
-      if (signal.aborted || request.revision < this.latestRevision) {
+      if (signal.aborted || request.revision < this.latestSceneRevision) {
         await next.dispose();
         return false;
       }
       next.shell?.enterGame();
       if (seekDecisions) next.player.importSeekDecisions(seekDecisions);
       if (commandIndex != null) await next.player.replayFromStartTo(commandIndex);
-      if (signal.aborted || request.revision < this.latestRevision) {
+      if (signal.aborted || request.revision < this.latestSceneRevision) {
         await next.dispose();
         return false;
       }
@@ -491,7 +556,7 @@ export class VegaPreviewRuntime {
     );
   }
 
-  private stageSnapshot(): VegaJsonValue {
+  private stageSnapshot(inspectRenderer = false): VegaJsonValue {
     const handle = this.requirePlayer();
     const narrative = handle.player.narrativeStore.snapshot();
     const snapshot: VegaPreviewStageSnapshot = {
@@ -512,8 +577,38 @@ export class VegaPreviewRuntime {
       state: snapshotState(handle.player.state),
       camera: snapshotState(handle.player.SceneRoot.cameraState),
       targets: this.stageTargets(),
+      ...(inspectRenderer ? { renderer: this.rendererSnapshot() } : {}),
     };
     return snapshot as unknown as VegaJsonValue;
+  }
+
+  private rendererSnapshot(): VegaJsonValue {
+    const scene = snapshotState(this.requirePlayer().player.SceneRoot.createSeekSnapshot());
+    if (!scene || typeof scene !== "object" || Array.isArray(scene)) return null;
+    const characters = Array.isArray(scene.characters)
+      ? scene.characters.map((value) => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+          return Object.fromEntries(
+            [
+              "target",
+              "visible",
+              "characterKey",
+              "worldPosition",
+              "alpha",
+              "brightness",
+              "angle",
+              "bodyAngle",
+              "lookX",
+              "lookY",
+              "currentMotionName",
+              "activeExpressionName",
+            ]
+              .filter((key) => value[key] !== undefined)
+              .map((key) => [key, value[key]!]),
+          );
+        })
+      : [];
+    return { characters, transforms: scene.transforms ?? [], propertyAnimations: scene.propertyAnimations ?? [] };
   }
 
   private referenceFrame(target: string): VegaPreviewReferenceFrameResult {
@@ -717,8 +812,8 @@ const requireSnippetCommands = (commands: readonly VegaJsonValue[]): AdvCommand[
       throw new TypeError(`Preview snippet command ${index} must be an object`);
     }
     const command = (value as Record<string, unknown>).command;
-    if (!Number.isSafeInteger(command) || Number(command) < 0) {
-      throw new TypeError(`Preview snippet command ${index} must have a non-negative integer opcode`);
+    if (!(Number.isSafeInteger(command) && Number(command) >= 0) && !isVegaCommandType(command)) {
+      throw new TypeError(`Preview snippet command ${index} must have an opcode or qualified command type`);
     }
     return value as unknown as AdvCommand;
   });

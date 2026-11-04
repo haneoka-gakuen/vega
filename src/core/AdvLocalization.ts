@@ -32,5 +32,8 @@ export function resolveAdvLocale(
     for (const wrapper of ["values", "text", "value"]) if (record[wrapper] != null) return read(record[wrapper]);
     return undefined;
   };
-  return read(value) ?? fallback(value);
+  const resolved = read(value);
+  return resolved && (resolved.text !== "" || typeof value === "string" || typeof value === "number")
+    ? resolved
+    : fallback(value);
 }

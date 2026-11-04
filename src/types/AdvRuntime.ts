@@ -758,6 +758,9 @@ export interface AdvCommand {
   /** Provider-authored cross-character draw order; larger values render first (behind). */
   characterRenderOrder?: number;
   cameraDistance?: number;
+  cameraAnchor?: "slot" | "character";
+  focusTargets?: readonly string[];
+  fallbackToWide?: boolean;
   advTextId?: string;
   text?: string;
   /** Flattened localized text sources retained by a composed dialogue. */
@@ -801,6 +804,7 @@ export interface AdvCommand {
   movie?: AdvVideoEntry;
   clip?: AdvVideoEntry;
   characterModel?: AdvCharacterModelEntry;
+  characterModelRef?: string;
   characterKey?: string;
   motionName?: string;
   motionFadeIn?: number;
@@ -829,6 +833,7 @@ export interface AdvCommand {
 }
 
 export interface AdvStory {
+  characterModels?: Readonly<Record<string, AdvCharacterModelEntry>>;
   commands?: AdvCommand[];
   runtime?: Partial<AdvRuntimeConfig>;
   localization?: {
@@ -933,6 +938,7 @@ export interface AdvPlayerState {
     enabled: boolean;
     visible: boolean;
     speaker: string;
+    portraitRef?: string;
     speakerLang?: string;
     text: string;
     textLang?: string;

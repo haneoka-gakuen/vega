@@ -26,8 +26,8 @@ export const bindVegaProject = (project: VegaProject | AdvStory, sceneId?: strin
     return { story: project };
   }
   const validated = parseVegaProject(project);
-  const compiled = compileVegaProject(validated);
   const selectedSceneId = sceneId ?? validated.entryScene;
+  const compiled = compileVegaProject({ ...validated, entryScene: selectedSceneId });
   const entryKey = compiled.sceneKeys.get(selectedSceneId);
   if (!entryKey) throw new Error(`Vega project has no scene named ${selectedSceneId}`);
   return {

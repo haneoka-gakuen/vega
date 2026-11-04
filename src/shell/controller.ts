@@ -194,24 +194,20 @@ class DefaultVegaShellController implements VegaManagedShellController {
               }),
         };
       }),
-      gallery: this.galleryEntries.map(
-        (entry): VegaShellGalleryItem => ({
-          ...entry,
-          unlocked: this.narrative.isUnlocked(entry.kind, entry.id),
-        }),
-      ),
-      flow: this.sceneMarkers.map(
-        (marker): VegaShellFlowNode => ({
-          id: marker.id,
-          label: marker.label,
-          sceneId: marker.id,
-          visited: this.narrative.isUnlocked("scene", marker.id) || narrative.visitedFlowNodes.includes(marker.id),
-          current: marker.id === currentScene,
-          ...(marker.chapter ? { chapter: marker.chapter } : {}),
-          ...(marker.thumbnail ? { thumbnail: marker.thumbnail } : {}),
-          ...(marker.description ? { description: marker.description } : {}),
-        }),
-      ),
+      gallery: this.galleryEntries.map((entry): VegaShellGalleryItem => ({
+        ...entry,
+        unlocked: this.narrative.isUnlocked(entry.kind, entry.id),
+      })),
+      flow: this.sceneMarkers.map((marker): VegaShellFlowNode => ({
+        id: marker.id,
+        label: marker.label,
+        sceneId: marker.id,
+        visited: this.narrative.isUnlocked("scene", marker.id) || narrative.visitedFlowNodes.includes(marker.id),
+        current: marker.id === currentScene,
+        ...(marker.chapter ? { chapter: marker.chapter } : {}),
+        ...(marker.thumbnail ? { thumbnail: marker.thumbnail } : {}),
+        ...(marker.description ? { description: marker.description } : {}),
+      })),
       flowEdges: this.flowEdges.map((edge) => ({ ...edge })),
     };
   }
@@ -439,6 +435,7 @@ class DefaultVegaShellController implements VegaManagedShellController {
     this.narrative.reset({ preserveSettings: true, preserveUnlocks: true });
     this.player.importSeekDecisions();
     await this.player.replayFromStartTo(0);
+    if (typeof this.story.vegaEntryKey === "string") this.player.navigateToKey(this.story.vegaEntryKey);
     this.hasStarted = true;
     this.returnScreen = undefined;
     this.screen = "game";
@@ -494,7 +491,8 @@ class DefaultVegaShellController implements VegaManagedShellController {
     if (save.player.stage) {
       await this.player.SceneRoot.restoreSeekSnapshot(save.player.stage as unknown as AdvStorySceneSeekSnapshot);
     }
-    if (save.player.audio) this.player.SoundManager.restoreSnapshot(save.player.audio as unknown as AdvSoundSnapshot);
+    if (save.player.audio)
+      await this.player.SoundManager.restoreSnapshot(save.player.audio as unknown as AdvSoundSnapshot);
     this.hasStarted = true;
     this.returnScreen = undefined;
     this.screen = "game";
