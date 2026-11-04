@@ -1,5 +1,16 @@
 import type { AdvCommand, AdvCommandGroup, AdvCommandGroupAction } from "../types/AdvRuntime";
 import { resolveAdvCommandGroup, sortAdvCommandGroupActions } from "./AdvCommandGroup";
+import { ADV_COMMAND } from "./AdvConstants";
+
+const cameraTransitions = new Set<number>([
+  ADV_COMMAND.Focus,
+  ADV_COMMAND.Pan,
+  ADV_COMMAND.PanV2,
+  ADV_COMMAND.Tilt,
+  ADV_COMMAND.Pedestal,
+  ADV_COMMAND.Track,
+  ADV_COMMAND.Zoom,
+]);
 
 export interface AdvCommandGroupSchedulerOptions {
   execute: (command: AdvCommand, signal: AbortSignal) => Promise<void> | void;
@@ -234,7 +245,16 @@ export class AdvCommandGroupScheduler {
     const event: AdvCommandGroupEventOwner = { controller, parent: owner, done: Promise.resolve() };
     this.runningEvents.add(event);
     event.done = Promise.resolve()
-      .then(() => this.execute(command, controller.signal))
+      // The event already runs concurrently; retain its cancellation owner
+      // until a camera tween finishes instead of detaching it a second time.
+      .then(() =>
+        this.execute(
+          command.noWait && typeof command.command === "number" && cameraTransitions.has(command.command)
+            ? { ...command, noWait: false }
+            : command,
+          controller.signal,
+        ),
+      )
       .then(
         () => undefined,
         (error) => this.report(error),

@@ -15,6 +15,7 @@ import {
   type StoryCharacterProvider,
 } from "../rendering/StoryCharacterModel";
 import { DefaultStoryResourceResolver } from "../resources/StoryResourceResolver";
+import { isStoryResourceTemplate } from "../resources/StoryResourceTemplate";
 import {
   collectStoryResourceDeclarations,
   normalizeStoryResourceDeclarations,
@@ -298,12 +299,14 @@ export class AdvEpisodeResourceLoader {
       if (!firstCmdIndex.has(url)) firstCmdIndex.set(url, index);
     };
     const addFile = (label: string, url: string, index: number) => {
+      if (isStoryResourceTemplate(url)) return;
       assertLocalRuntimeUrl(label, url);
       if (!isLocalRuntimeUrl(url)) return;
       fileUrls.set(url, label);
       noteIndex(url, index);
     };
     const addTexture = (url: string, index: number) => {
+      if (isStoryResourceTemplate(url)) return;
       assertLocalRuntimeUrl("image", url);
       if (!isLocalRuntimeUrl(url)) return;
       textureUrls.add(url);
@@ -312,6 +315,7 @@ export class AdvEpisodeResourceLoader {
     };
     const addAudio = (sound: AdvSoundEntry | null | undefined, category: AdvSoundCategory, index: number) => {
       const url = sound?.playableUrl || "";
+      if (isStoryResourceTemplate(url)) return;
       addFile(category.toLocaleLowerCase(), url, index);
       if (!url || !isLocalRuntimeUrl(url)) return;
       const requests = audioRequests.get(url) || [];
@@ -974,7 +978,7 @@ function assertLocalRuntimeUrl(label: string, value: string) {
 
 const STORY_RESOURCE_FIELD = /(?:url$|^(?:src|source|runtime|model)$|textures?$)/i;
 const STORY_RESOURCE_COLLECTION = /textures$/i;
-const PROVIDER_OWNED_STORY_FIELD = /^characterModel$/iu;
+const PROVIDER_OWNED_STORY_FIELD = /^(?:characterModel|sourceMetadata|provenance|scope|resourceRef)$/iu;
 function assertNestedCanonicalResourceUrls(
   value: unknown,
   label = "story",

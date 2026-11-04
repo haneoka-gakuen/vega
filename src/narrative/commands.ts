@@ -8,6 +8,7 @@ import {
 import type { AdvCommandExecutor } from "../core/AdvCommandService";
 import type { AdvCommand } from "../types/AdvRuntime";
 import { evaluateVegaCondition, interpolateVegaText } from "./expression";
+import { decodeStoryResourceTemplate, isStoryResourceTemplate } from "../resources/StoryResourceTemplate";
 import { vegaSceneKey } from "./project";
 import { VegaNarrativeStore } from "./state";
 
@@ -171,6 +172,23 @@ export const interpolateNarrativeCommand = (command: AdvCommand, store: VegaNarr
       typeof value === "string" && value.includes("{") ? interpolateVegaText(value, store.variables) : value,
     );
   }
+  const resource = (value: unknown): unknown => {
+    if (typeof value === "string") return isStoryResourceTemplate(value)
+      ? interpolateVegaText(decodeStoryResourceTemplate(value), store.variables) : value;
+    if (Array.isArray(value)) {
+      const next = value.map(resource);
+      return next.some((entry, index) => entry !== value[index]) ? next : value;
+    }
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value);
+      const next = entries.map(([key, value]) => [key, resource(value)] as const);
+      return next.some((entry, index) => entry[1] !== entries[index]![1]) ? Object.fromEntries(next) : value;
+    }
+    return value;
+  };
+  const fields = copy as unknown as Record<string, unknown>;
+  for (const field of ["background", "still", "bgm", "se", "voices", "chatSound", "frame", "effect", "ruleTransition", "video", "movie", "clip", "characterModel", "source", "sourceIdentity", "backgroundRef", "stillRef", "bgmRef", "seRef", "voiceRefs", "portraitRef", "live2dKey", "targetAssetName"])
+    if (fields[field] !== undefined) fields[field] = resource(fields[field]);
   return copy;
 };
 

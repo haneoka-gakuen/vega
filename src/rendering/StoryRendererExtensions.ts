@@ -46,7 +46,7 @@ export interface StoryRendererResourcePreparationContext {
  * Effect factory visible to a scene backend.
  *
  * Definitions remain portable data. The renderer id and typed host context
- * let an implementation select WebGL, WebGPU, Three, Pixi, native, or another
+ * let an implementation select WebGL, WebGPU, Three, native, or another
  * rendering path without Vega importing it.
  */
 export interface StoryRendererEffectContribution {

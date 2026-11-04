@@ -19,6 +19,7 @@ export interface VegaPreviewCapabilities {
   readonly debugging?: boolean;
   /** The runtime can inspect and edit real stage reference frames and transforms. */
   readonly stageTransforms?: boolean;
+  readonly modelDefinitions?: boolean;
   readonly transports: readonly ("message-port" | "websocket")[];
 }
 
@@ -92,6 +93,7 @@ export interface VegaPreviewStageSnapshot {
   readonly state: VegaJsonValue;
   readonly camera: VegaJsonValue;
   readonly targets: readonly string[];
+  readonly renderer?: VegaJsonValue;
 }
 
 export const VEGA_PREVIEW_COMMAND_NAMES = Object.freeze([
@@ -110,13 +112,33 @@ export const VEGA_PREVIEW_COMMAND_NAMES = Object.freeze([
   "debug.step",
   "debug.breakpoints.set",
   "debug.variables",
+  "debug.variables.set",
   "stage.snapshot",
+  "stage.capture",
+  "audio.snapshot",
+  "stage.recording.start",
+  "stage.recording.stop",
+  "stage.recording.read",
+  "stage.recording.release",
   "stage.reference-frame",
   "stage.transform.get",
   "stage.transform.set",
 ] as const);
 
 export type VegaPreviewCommandName = (typeof VEGA_PREVIEW_COMMAND_NAMES)[number];
+
+/** Only scene-changing intents supersede in-flight scene work. Inspection and controls share its revision. */
+export function vegaPreviewSupersedesScene(name: VegaPreviewCommandName): boolean {
+  return [
+    "runtime.load",
+    "runtime.seek",
+    "editor.sync-scene",
+    "editor.run-scene",
+    "editor.run-from",
+    "editor.run-snippet",
+    "runtime.dispose",
+  ].includes(name);
+}
 
 export type VegaPreviewCommand =
   | { readonly name: "runtime.load"; readonly story: VegaJsonValue; readonly commandIndex?: number }
@@ -145,7 +167,14 @@ export type VegaPreviewCommand =
   | { readonly name: "debug.step" }
   | { readonly name: "debug.breakpoints.set"; readonly breakpoints: readonly VegaPreviewBreakpoint[] }
   | { readonly name: "debug.variables" }
+  | { readonly name: "debug.variables.set"; readonly variable: string; readonly value: VegaJsonValue }
   | { readonly name: "stage.snapshot" }
+  | { readonly name: "stage.capture" }
+  | { readonly name: "audio.snapshot" }
+  | { readonly name: "stage.recording.start"; readonly width: number; readonly height: number; readonly fps: number }
+  | { readonly name: "stage.recording.stop" }
+  | { readonly name: "stage.recording.read"; readonly offset: number }
+  | { readonly name: "stage.recording.release" }
   | { readonly name: "stage.reference-frame"; readonly target: string }
   | { readonly name: "stage.transform.get"; readonly target: string }
   | {
@@ -288,11 +317,23 @@ const isVegaPreviewCommand = (value: unknown): value is VegaPreviewCommand => {
         value.commands.every(isRecord) &&
         (value.label === undefined || typeof value.label === "string")
       );
+    case "debug.variables.set":
+      return isNonEmptyString(value.variable) && "value" in value && value.value !== undefined;
     case "debug.breakpoints.set":
       return Array.isArray(value.breakpoints) && value.breakpoints.every(isBreakpoint);
     case "stage.reference-frame":
     case "stage.transform.get":
       return isNonEmptyString(value.target);
+    case "stage.recording.start":
+      return (
+        typeof value.height === "number" &&
+        typeof value.fps === "number" &&
+        [720, 1080].includes(value.height) &&
+        value.width === (value.height * 16) / 9 &&
+        [24, 30, 60].includes(value.fps)
+      );
+    case "stage.recording.read":
+      return typeof value.offset === "number" && Number.isSafeInteger(value.offset) && value.offset >= 0;
     case "stage.transform.set":
       return (
         isNonEmptyString(value.target) &&
@@ -307,6 +348,10 @@ const isVegaPreviewCommand = (value: unknown): value is VegaPreviewCommand => {
     case "debug.step":
     case "debug.variables":
     case "stage.snapshot":
+    case "stage.capture":
+    case "audio.snapshot":
+    case "stage.recording.stop":
+    case "stage.recording.release":
       return true;
     default:
       return false;
@@ -378,6 +423,7 @@ const isCapabilities = (value: unknown): value is VegaPreviewCapabilities => {
     (value.revisionCancellation === undefined || typeof value.revisionCancellation === "boolean") &&
     (value.debugging === undefined || typeof value.debugging === "boolean") &&
     (value.stageTransforms === undefined || typeof value.stageTransforms === "boolean") &&
+    (value.modelDefinitions === undefined || typeof value.modelDefinitions === "boolean") &&
     value.transports.every((transport) => transport === "message-port" || transport === "websocket")
   );
 };

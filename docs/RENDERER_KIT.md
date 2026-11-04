@@ -28,7 +28,7 @@ resource resolver, and abort signal plus:
 
 The three generic parameters on `StoryCharacterProvider` describe the renderer
 id, renderer context, and returned renderer model. This lets WebGL, Three,
-Pixi, native, and future hosts share the same ABI without a graphics-library
+native, and future hosts share the same ABI without a graphics-library
 type in Vega.
 
 Backends should call `isRendererAwareCharacterProvider` and
@@ -53,9 +53,7 @@ Every scene backend created by `VegaEngine` receives an immutable
 active effect contributions and a typed service lookup:
 
 ```ts
-const bloom = context.rendererExtensions?.effects.filter(
-  (effect) => effect.effectType === "bloom",
-);
+const bloom = context.rendererExtensions?.effects.filter((effect) => effect.effectType === "bloom");
 const pipeline = context.rendererExtensions?.service(PIPELINE_SERVICE);
 ```
 
@@ -67,6 +65,13 @@ pipelines outside both the opcode interpreter and an application repository.
 
 ## Shared primitives
 
+Pixel-owning browser backends may implement
+`createVideoCapture({ width, height, fps })`, returning a `MediaStream` and an
+idempotent `dispose()` hook. Capture samples the backend's existing authored
+clock. The owner releases animation callbacks, stream tracks and temporary
+resolution changes when recording ends; the interpreter never reads renderer
+internals. Audio capture belongs to the player's sound manager.
+
 The renderer-kit entry exports:
 
 - complete public ADV runtime, command, quality, curve, particle, volume, and
@@ -76,11 +81,15 @@ The renderer-kit entry exports:
 - `VegaLifetime` and renderer/resource/provider lifecycle contracts;
 - renderer-neutral shake and frame-layout algorithms plus the portable
   seek-snapshot ABI;
+- shared stage-slot and focus-anchor resolution through
+  `resolveStoryStagePoint` and `resolveStoryFocusPoint`, including the native
+  centre-slot fallback;
+- the shared `AdvCamera.panV2CameraOffset` calculation;
 - adaptive render quality and renderer/resource/provider lifecycle helpers;
 - voice PCM, spectrum, analyzer, and portable viseme contracts;
 - `DefaultStoryResourceResolver` and renderer effect/service ports.
 
-Viewport policy, frame clocks, coordinate transforms, GPU target formats,
+Viewport policy, frame clocks, graphics-library coordinate adaptation, GPU target formats,
 look-target sampling, pending renderer queues, DOM composition, video waits,
 rain effects, texture caches, and rule-transition passes are implementation
 details of renderer plugins. The official Three.js implementations are

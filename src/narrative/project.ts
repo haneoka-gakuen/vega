@@ -1,4 +1,12 @@
-import { VEGA_ADV_OPCODE, VEGA_SYSTEM_OPCODE, type VegaCommand, type VegaProject } from "@haneoka/vega-protocol";
+import { STORY_CHARACTER_MODELS_KEY, resolveStoryCharacterModels } from "../resources/StoryCharacterReferences";
+import {
+  VEGA_ADV_OPCODE,
+  VEGA_SYSTEM_OPCODE,
+  VEGA_PROJECT_LOCALIZATION_METADATA_KEY,
+  type VegaProjectLocalization,
+  type VegaCommand,
+  type VegaProject,
+} from "@haneoka/vega-protocol";
 import type { AdvCommand, AdvStory } from "../types/AdvRuntime";
 
 export interface VegaCompiledProject {
@@ -40,7 +48,10 @@ export const compileVegaProject = (project: VegaProject): VegaCompiledProject =>
   delete portableStory.runtime;
   delete portableStory.assets;
 
-  for (const [sceneId, scene] of Object.entries(project.scenes)) {
+  const scenes = Object.entries(project.scenes).sort(
+    ([left], [right]) => Number(right === project.entryScene) - Number(left === project.entryScene),
+  );
+  for (const [sceneId, scene] of scenes) {
     const marker: AdvCommand = {
       command: VEGA_SYSTEM_OPCODE.SceneMarker,
       key: sceneKeys.get(sceneId)!,
@@ -88,6 +99,11 @@ export const compileVegaProject = (project: VegaProject): VegaCompiledProject =>
   const runtime = project.metadata?.["altair:runtime"];
   const authoringSource = project.metadata?.["altair:authoringSource"];
   const legacyAssets = project.metadata?.["altair:assets"];
+  const localization = project.metadata?.[VEGA_PROJECT_LOCALIZATION_METADATA_KEY] as unknown as
+    VegaProjectLocalization | undefined;
+  const authoringExtensions = project.metadata?.["altair:extensions"] as Record<string, unknown> | undefined;
+  const locales = localization?.languages.map((language) => language.tag) ?? authoringExtensions?.altairProjectLocales;
+  const locale = localization?.defaultLanguage ?? project.metadata?.locale;
   const authoringAssets =
     authoringSource && typeof authoringSource === "object" && !Array.isArray(authoringSource)
       ? (authoringSource as Record<string, unknown>).assets
@@ -95,6 +111,9 @@ export const compileVegaProject = (project: VegaProject): VegaCompiledProject =>
   const story: AdvStory = {
     ...portableStory,
     commands,
+    ...(project.metadata?.[STORY_CHARACTER_MODELS_KEY]
+      ? { characterModels: clonePlain(project.metadata[STORY_CHARACTER_MODELS_KEY]) as AdvStory["characterModels"] }
+      : {}),
     ...(runtime && typeof runtime === "object" && !Array.isArray(runtime) ? { runtime: clonePlain(runtime) } : {}),
     ...(authoringAssets && typeof authoringAssets === "object"
       ? { assets: clonePlain(authoringAssets) }
@@ -107,11 +126,13 @@ export const compileVegaProject = (project: VegaProject): VegaCompiledProject =>
       title: clonePlain(project.title),
       entryScene: project.entryScene,
       formatVersion: project.formatVersion,
+      ...(typeof locale === "string" ? { locale } : {}),
+      ...(Array.isArray(locales) ? { locales: clonePlain(locales) } : {}),
     },
   };
   return {
     project,
-    story,
+    story: resolveStoryCharacterModels(story),
     entryKey: sceneKeys.get(project.entryScene)!,
     sceneKeys,
     commandScenes,

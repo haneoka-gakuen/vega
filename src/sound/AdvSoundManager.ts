@@ -2,7 +2,13 @@ import { Howl, Howler } from "howler";
 import { requireCanonicalStoryResourceUrl } from "../runtime";
 import type { StoryResourceResolver } from "../rendering/StorySceneBackend";
 import { estimateVegaVisemeFrame, type AdvVoiceAnalyzer, type VegaVoiceAnalyzer } from "./VoiceAnalysis";
-import { prepareStoryAudio } from "./StoryAudioPrimer";
+import { canUseStoryHtml5Audio, prepareStoryAudio } from "./StoryAudioPrimer";
+import {
+  AudioClipPlayer,
+  audioClipEnvelope,
+  type StoryAudioClip,
+  type StoryAudioClipSnapshot,
+} from "./AudioClipPlayer";
 
 export type {
   AdvVoiceAnalyzer,
@@ -109,9 +115,33 @@ type EpisodeAudioSource = {
 const AUDIO_LOAD_TIMEOUT_MS = 30_000;
 const MAXIMUM_WARM_HOWLS = 24;
 const MAXIMUM_WARM_DECODED_BYTES = 16 * 1024 * 1024;
+type CaptureMediaElement = HTMLMediaElement & { captureStream?(): MediaStream; mozCaptureStream?(): MediaStream };
+type CapturedMediaInput = {
+  readonly node?: MediaStreamAudioSourceNode;
+  readonly gain: GainNode;
+  refresh(): void;
+  dispose(): void;
+};
+let audioDeviceUsers = 0,
+  audioDeviceAutoSuspend = true;
+function retainAudioDevice(): () => void {
+  const device = Howler as typeof Howler & { _autoResume?(): void; _autoSuspend?(): void };
+  if (audioDeviceUsers++ === 0) {
+    audioDeviceAutoSuspend = Howler.autoSuspend;
+    Howler.autoSuspend = false;
+  }
+  device._autoResume?.();
+  return () => {
+    if (--audioDeviceUsers === 0) {
+      Howler.autoSuspend = audioDeviceAutoSuspend;
+      device._autoSuspend?.();
+    }
+  };
+}
 
 /** Snapshot type for save/restore of BGM state */
 export type AdvSoundSnapshot = {
+  clips?: StoryAudioClipSnapshot[];
   bgm: AdvSoundDescriptor | null;
   bgmPositionSeconds: number;
   bgmPlaying: boolean;
@@ -120,6 +150,7 @@ export type AdvSoundSnapshot = {
   frameStamp: number;
   lastBgmOrSeFrame: number;
   lastBgmLabel: string;
+  lastBgmSource?: string;
   lastSeLabel: string;
 };
 
@@ -184,7 +215,7 @@ function soundId(sound: AdvSoundDescriptor | null | undefined): number {
 }
 
 function soundLabel(sound: AdvSoundDescriptor | null | undefined): string {
-  return sound?.cueName || sound?.cueSheetName || String(soundId(sound) || "");
+  return sound?.cueName || sound?.cueSheetName || String(soundId(sound) || "") || sound?.playableUrl || "";
 }
 
 function localPlaybackUrl(url: string | undefined | null, label: string): string {
@@ -410,6 +441,7 @@ export class AdvSoundManager {
   lastBgmOrSeFrame: number;
   frameStamp: number;
   lastBgmLabel: string;
+  private lastBgmSource = "";
   lastSeLabel: string;
   warmHowls: Map<string, Howl>;
   nextPlayIdValue: number;
@@ -430,6 +462,169 @@ export class AdvSoundManager {
   private preparingUpcoming = new Set<string>();
   private deferredUpcoming = new Set<string>();
   private preparationIndex = -1;
+  private clipPlayer?: AudioClipPlayer;
+  private transportPaused = true;
+  private captureDestination?: MediaStreamAudioDestinationNode;
+  private releaseCaptureDevice?: () => void;
+  private readonly captureNodes = new Set<AudioNode>();
+  private readonly mediaCaptures = new Map<HTMLMediaElement, CapturedMediaInput>();
+
+  private get audioClips(): AudioClipPlayer {
+    if (!this.clipPlayer) {
+      if (!Howler.ctx || !Howler.masterGain) throw new Error("Audio device unavailable");
+      this.clipPlayer = new AudioClipPlayer(
+        Howler.ctx,
+        Howler.masterGain,
+        (category) => this.effectiveVolume(category),
+        this.resources,
+        retainAudioDevice,
+      );
+      this.clipPlayer.setCapture(this.captureDestination);
+      this.clipPlayer.setPaused(this.transportPaused);
+    }
+    return this.clipPlayer;
+  }
+
+  async playAudioClip(clip: StoryAudioClip, signal?: AbortSignal): Promise<void> {
+    await this.audioClips.play(clip, 0, signal);
+  }
+
+  setTransportPaused(paused: boolean): void {
+    this.transportPaused = paused;
+    this.clipPlayer?.setPaused(paused);
+  }
+
+  private tapEntry(entry: ManagedHowl): void {
+    if (!this.captureDestination || !Howler.ctx) return;
+    const node = (entry.howl as HowlExtended)._soundById(entry.howlId)?._node;
+    if (!node) return;
+    let output: AudioNode;
+    if (node instanceof HTMLMediaElement) {
+      const existing = this.mediaCaptures.get(node);
+      if (existing) {
+        existing.refresh();
+        return;
+      }
+      const media = node as CaptureMediaElement,
+        capture = media.captureStream ?? media.mozCaptureStream;
+      if (!capture) throw new Error("Audio capture unavailable");
+      const context = Howler.ctx,
+        stream = capture.call(media),
+        gain = context.createGain();
+      let input: MediaStreamAudioSourceNode | undefined;
+      const connect = () => {
+        input?.disconnect();
+        input = undefined;
+        const tracks = stream.getAudioTracks().filter((track) => track.readyState === "live");
+        if (tracks.length) {
+          input = context.createMediaStreamSource(new MediaStream(tracks));
+          input.connect(gain);
+        }
+      };
+      const volume = () => gain.gain.setValueAtTime(node.muted ? 0 : node.volume, context.currentTime);
+      stream.addEventListener("addtrack", connect);
+      stream.addEventListener("removetrack", connect);
+      node.addEventListener("volumechange", volume);
+      this.mediaCaptures.set(node, {
+        get node() {
+          return input;
+        },
+        gain,
+        refresh: () => {
+          connect();
+          volume();
+        },
+        dispose() {
+          stream.removeEventListener("addtrack", connect);
+          stream.removeEventListener("removetrack", connect);
+          node.removeEventListener("volumechange", volume);
+          input?.disconnect();
+          gain.disconnect();
+          for (const track of stream.getTracks()) track.stop();
+        },
+      });
+      connect();
+      volume();
+      output = gain;
+    } else output = node as unknown as AudioNode;
+    if (!this.captureNodes.has(output)) {
+      output.connect(this.captureDestination);
+      this.captureNodes.add(output);
+    }
+  }
+
+  beginAudioCapture(): MediaStream {
+    this.endAudioCapture();
+    if (!Howler.ctx) throw new Error("Audio device unavailable");
+    const prototype = HTMLMediaElement.prototype as CaptureMediaElement;
+    if (!prototype.captureStream && !prototype.mozCaptureStream) throw new Error("Audio capture unavailable");
+    this.captureDestination = Howler.ctx.createMediaStreamDestination();
+    this.releaseCaptureDevice = retainAudioDevice();
+    this.clipPlayer?.setCapture(this.captureDestination);
+    for (const entry of [this.bgm, ...this.se, ...this.voices]) if (entry) this.tapEntry(entry);
+    return this.captureDestination.stream;
+  }
+
+  endAudioCapture(): void {
+    const destination = this.captureDestination;
+    if (!destination) return;
+    this.clipPlayer?.setCapture(undefined);
+    for (const node of this.captureNodes) {
+      try {
+        node.disconnect(destination);
+      } catch {}
+    }
+    this.captureNodes.clear();
+    for (const capture of this.mediaCaptures.values()) capture.dispose();
+    this.mediaCaptures.clear();
+    for (const track of destination.stream.getTracks()) track.stop();
+    destination.disconnect();
+    this.captureDestination = undefined;
+    this.releaseCaptureDevice?.();
+    this.releaseCaptureDevice = undefined;
+  }
+
+  audioStatus() {
+    return {
+      device: Howler.ctx?.state ?? "closed",
+      channels: [this.bgm, ...this.se, ...this.voices]
+        .flatMap((entry) => {
+          if (!entry) return [];
+          const howl = entry.howl as HowlExtended,
+            node = howl._soundById(entry.howlId)?._node;
+          const media = node instanceof HTMLMediaElement ? this.mediaCaptures.get(node) : undefined;
+          const output =
+            node instanceof HTMLMediaElement ? (media?.node ? media.gain : undefined) : (node as AudioNode | undefined);
+          return [
+            {
+              name: entry.label.split("/").at(-1) || entry.label,
+              category: entry.category,
+              backend: howl._webAudio ? "Web Audio" : "HTML5",
+              state: howl.state(),
+              playing: howl.playing(entry.howlId),
+              position: Number(howl.seek()) || 0,
+              volume: Number(howl.volume()),
+              captured: Boolean(output && this.captureNodes.has(output)),
+            },
+          ];
+        })
+        .concat(
+          (this.clipPlayer?.snapshot() ?? []).map(({ clip, elapsedSeconds }) => ({
+            name: clip.trackName,
+            category: clip.category,
+            backend: "Web Audio",
+            state: "loaded" as const,
+            playing: !this.transportPaused,
+            position: elapsedSeconds,
+            volume: clip.muted
+              ? 0
+              : this.effectiveVolume({ categoryName: clip.category, volume: clip.volume * clip.trackVolume }) *
+                audioClipEnvelope(clip, elapsedSeconds),
+            captured: Boolean(this.captureDestination),
+          })),
+        ),
+    };
+  }
 
   constructor(runtime: AdvSoundRuntime | null | undefined, state: AdvSoundState, resources?: StoryResourceResolver) {
     // Register Howler's gesture listeners as soon as a player exists. The
@@ -489,6 +684,7 @@ export class AdvSoundManager {
   setMovieSoundVolume(volume: number | undefined | null) {
     const next = Number(volume);
     this.movieSoundVolume = Number.isFinite(next) ? Math.max(0, Math.min(1, next)) : 1;
+    this.clipPlayer?.refreshVolumes();
     if (this.bgm) this.applyEntryVolume(this.bgm, 0);
   }
 
@@ -555,6 +751,8 @@ export class AdvSoundManager {
   }
 
   dispose() {
+    this.endAudioCapture();
+    this.clipPlayer?.dispose();
     this.disposing = true;
     this.episodeAudioLifecycle.abort();
     for (const timer of this.pendingTimers) clearTimeout(timer);
@@ -583,8 +781,8 @@ export class AdvSoundManager {
     this.syncSessionSePlayIds();
   }
 
-  effectiveVolume(soundOrName: string | AdvSoundDescriptor | null | undefined) {
-    const category = categoryKey(soundOrName);
+  effectiveVolume(soundOrName: string | AdvSoundDescriptor | null | undefined, categoryOverride?: AdvSoundCategory) {
+    const category = categoryOverride ?? categoryKey(soundOrName);
     const authoredVolume = typeof soundOrName === "string" ? 1 : clampVolume(soundOrName?.volume, 1);
     const base =
       clampVolume(this.masterVolume, 1) *
@@ -603,7 +801,7 @@ export class AdvSoundManager {
       this.warmHowls.delete(key);
       try {
         warmed.loop(loop);
-        warmed.volume(this.effectiveVolume(sound));
+        warmed.volume(this.effectiveVolume(sound, category));
       } catch {}
       return warmed;
     }
@@ -617,7 +815,7 @@ export class AdvSoundManager {
       // episode warm anchor.
       html5: category === "Bgm",
       loop,
-      volume: this.effectiveVolume(sound),
+      volume: this.effectiveVolume(sound, category),
     });
   }
 
@@ -657,6 +855,7 @@ export class AdvSoundManager {
       throw audioPreloadAbortError(canonical);
     }
     const src = source.url;
+    if (category === "Bgm" && !canUseStoryHtml5Audio()) return;
     const key = audioWarmKey(category, canonical);
     if (this.preparationPlan.length && category !== "Bgm" && !this.upcomingKeys.has(key)) return;
     this.episodeWarmKeys.add(key);
@@ -923,6 +1122,7 @@ export class AdvSoundManager {
     };
     howl.once("loaderror", failed);
     howl.once("playerror", failed);
+    howl.on("play", () => this.tapEntry(entry));
     return entry;
   }
 
@@ -1185,7 +1385,7 @@ export class AdvSoundManager {
   }
 
   applyEntryVolume(entry: ManagedHowl, fadeSeconds = 0) {
-    const target = this.effectiveVolume(entry.sound);
+    const target = this.effectiveVolume(entry.sound, entry.category);
     try {
       if (fadeSeconds > 0) {
         const from = Number(entry.howl.volume()) || 0;
@@ -1262,7 +1462,7 @@ export class AdvSoundManager {
       try {
         const current = Math.max(0, Number(entry.howl.volume()) || 0);
         const scaledCurrent = previousGain > 0 ? current * (nextGain / previousGain) : 0;
-        const target = fade.target === "silence" ? 0 : this.effectiveVolume(entry.sound);
+        const target = fade.target === "silence" ? 0 : this.effectiveVolume(entry.sound, entry.category);
         entry.howl.fade(scaledCurrent, target, remaining);
         this.scheduleBgmFadeCompletion(entry, fade);
       } catch {}
@@ -1286,11 +1486,12 @@ export class AdvSoundManager {
   playBgm(sound: AdvSoundDescriptor | null | undefined, fadeSeconds = 0, startTimeSeconds = 0) {
     if (!sound?.playableUrl) return null;
     const label = soundLabel(sound);
-    if (this.isLastBgmOrSePlaybackFrame() && this.lastBgmLabel === label) return this.bgm;
+    if (this.isLastBgmOrSePlaybackFrame() && this.lastBgmSource === sound.playableUrl) return this.bgm;
     this.lastBgmLabel = label;
+    this.lastBgmSource = sound.playableUrl;
     this.updateLastBgmOrSePlaybackFrame();
 
-    if (this.bgm && (this.bgm.soundId === soundId(sound) || this.bgm.label === label)) {
+    if (this.bgm && this.bgm.sound?.playableUrl === sound.playableUrl) {
       this.bgm.sound = sound;
       this.state.audio.bgm = label;
       this.applyEntryVolume(this.bgm, finiteSeconds(fadeSeconds, 0));
@@ -1308,7 +1509,7 @@ export class AdvSoundManager {
     if (!entry) return null;
     this.bgm = entry;
     this.state.audio.bgm = entry.label;
-    const target = this.effectiveVolume(sound);
+    const target = this.effectiveVolume(sound, "Bgm");
     const start = finiteSeconds(startTimeSeconds, 0);
     if (start > 0) {
       entry.howl.once("play", (id: number) => {
@@ -1469,6 +1670,7 @@ export class AdvSoundManager {
     const next = clampVolume(nextVolume, previous);
     if (next === previous) return;
     this.masterVolume = next;
+    this.clipPlayer?.refreshVolumes();
 
     if (this.bgm && !this.bgmFades.has(this.bgm)) this.applyEntryVolume(this.bgm, 0);
     for (const entry of this.se) if (!entry.stopping) this.applyEntryVolume(entry, 0);
@@ -1486,6 +1688,7 @@ export class AdvSoundManager {
     const previous = this.categoryVolumes.get(category) ?? 1;
     const value = clampVolume(nextVolume, previous);
     this.categoryVolumes.set(category, value);
+    this.clipPlayer?.refreshVolumes();
     if (category === "Bgm" && value !== previous) this.retargetBgmFades(previous, value);
     const entries: ManagedHowl[] = [];
     if (category === "Bgm" && this.bgm && !this.bgmFades.has(this.bgm)) entries.push(this.bgm);
@@ -1503,6 +1706,7 @@ export class AdvSoundManager {
     const next = clampVolume(nextVolume, previous);
     if (next === previous) return;
     this.userCategoryVolumes.set(category, next);
+    this.clipPlayer?.refreshVolumes();
     if (category === "Bgm") this.retargetBgmFades(previous, next);
     const entries: ManagedHowl[] = [];
     if (category === "Bgm" && this.bgm && !this.bgmFades.has(this.bgm)) entries.push(this.bgm);
@@ -1512,6 +1716,7 @@ export class AdvSoundManager {
   }
 
   stopTransientForSeek(): void {
+    this.clipPlayer?.stopAll();
     for (const timer of this.pendingTimers) clearTimeout(timer);
     this.pendingTimers.clear();
     this.stopVoices();
@@ -1536,6 +1741,7 @@ export class AdvSoundManager {
       } catch {}
     }
     return {
+      clips: this.clipPlayer?.snapshot(),
       bgm: clonePlain(this.bgm?.sound || null),
       bgmPositionSeconds,
       bgmPlaying,
@@ -1544,12 +1750,16 @@ export class AdvSoundManager {
       frameStamp: this.frameStamp,
       lastBgmOrSeFrame: this.lastBgmOrSeFrame,
       lastBgmLabel: this.lastBgmLabel,
+      lastBgmSource: this.lastBgmSource,
       lastSeLabel: this.lastSeLabel,
     };
   }
 
-  restoreSnapshot(snapshotValue: unknown) {
+  async restoreSnapshot(snapshotValue: unknown, signal?: AbortSignal): Promise<void> {
     const snapshot = snapshotValue as Partial<AdvSoundSnapshot> | null;
+    this.clipPlayer?.stopAll();
+    for (const entry of snapshot?.clips ?? [])
+      void this.audioClips.play(entry.clip, entry.elapsedSeconds).catch(() => {});
     for (const timer of this.pendingTimers) clearTimeout(timer);
     this.pendingTimers.clear();
     this.stopVoices();
@@ -1561,11 +1771,14 @@ export class AdvSoundManager {
     this.stopAllBgmImmediately();
     if (snapshot?.bgm?.playableUrl) {
       const sound = clonePlain(snapshot.bgm);
+      await this.prepareSoundSource(sound, signal);
+      if (this.disposing) return;
+      signal?.throwIfAborted();
       const entry = this.createEntry(sound, "Bgm", true);
       if (entry) {
         this.bgm = entry;
         this.state.audio.bgm = entry.label;
-        entry.howl.volume(this.effectiveVolume(sound));
+        entry.howl.volume(this.effectiveVolume(sound, "Bgm"));
         entry.howlId = Number(entry.howl.play()) || 0;
         const position = finiteSeconds(snapshot.bgmPositionSeconds, 0);
         if (position > 0) {
@@ -1585,6 +1798,7 @@ export class AdvSoundManager {
       ? Math.trunc(Number(snapshot?.lastBgmOrSeFrame))
       : -1;
     this.lastBgmLabel = String(snapshot?.lastBgmLabel || "");
+    this.lastBgmSource = String(snapshot?.lastBgmSource ?? snapshot?.bgm?.playableUrl ?? "");
     this.lastSeLabel = String(snapshot?.lastSeLabel || "");
   }
 }

@@ -1,16 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://haneoka.dev/schemas/vega-project-v1.json",
+  "$id": "https://haneoka.dev/schemas/vega-project.json",
   "title": "Vega Project",
   "type": "object",
   "additionalProperties": false,
-  "required": ["format", "formatVersion", "id", "title", "entryScene", "scenes"],
+  "required": [
+    "format",
+    "formatVersion",
+    "id",
+    "title",
+    "entryScene",
+    "scenes"
+  ],
   "properties": {
     "format": {
       "const": "vega-project"
     },
     "formatVersion": {
-      "const": 1
+      "enum": [
+        1,
+        2
+      ]
     },
     "id": {
       "type": "string",
@@ -86,7 +96,11 @@
     "projectLocalization": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "languages", "defaultLanguage"],
+      "required": [
+        "version",
+        "languages",
+        "defaultLanguage"
+      ],
       "properties": {
         "version": {
           "const": 1
@@ -112,7 +126,9 @@
     "projectLanguage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tag"],
+      "required": [
+        "tag"
+      ],
       "properties": {
         "tag": {
           "type": "string",
@@ -135,7 +151,9 @@
     },
     "command": {
       "type": "object",
-      "required": ["command"],
+      "required": [
+        "command"
+      ],
       "properties": {
         "command": {
           "anyOf": [
@@ -169,7 +187,10 @@
     "scene": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "commands"],
+      "required": [
+        "id",
+        "commands"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -192,10 +213,21 @@
     "asset": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "source"],
+      "required": [
+        "type",
+        "source"
+      ],
       "properties": {
         "type": {
-          "enum": ["image", "audio", "video", "model", "font", "data", "other"]
+          "enum": [
+            "image",
+            "audio",
+            "video",
+            "model",
+            "font",
+            "data",
+            "other"
+          ]
         },
         "source": {
           "type": "string",
@@ -225,7 +257,10 @@
     "plugin": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "version"],
+      "required": [
+        "id",
+        "version"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -319,7 +354,10 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "package"],
+          "required": [
+            "type",
+            "package"
+          ],
           "properties": {
             "type": {
               "const": "registry"
@@ -337,7 +375,11 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "url", "integrity"],
+          "required": [
+            "type",
+            "url",
+            "integrity"
+          ],
           "properties": {
             "type": {
               "const": "url"
@@ -355,7 +397,10 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "path"],
+          "required": [
+            "type",
+            "path"
+          ],
           "properties": {
             "type": {
               "const": "workspace"
@@ -369,7 +414,10 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["type", "key"],
+          "required": [
+            "type",
+            "key"
+          ],
           "properties": {
             "type": {
               "const": "builtin"

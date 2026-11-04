@@ -28,6 +28,7 @@ export interface VegaPlayerPresentationOptions {
   readonly lifetime: VegaLifetime;
   readonly themes: readonly VegaThemeContribution[];
   readonly theme?: string | false;
+  readonly externalPlaybackControls?: boolean;
   readonly uiSlots: readonly VegaUiSlotContribution[];
 }
 
@@ -65,6 +66,7 @@ export const createVegaPlayerPresentation = (options: VegaPlayerPresentationOpti
   root.className = "vega-player";
   root.dataset.vegaEngine = options.engineId;
   root.dataset.vegaPlayer = options.playerId;
+  root.dataset.vegaExternalPlaybackControls = String(options.externalPlaybackControls ?? false);
   root.style.cssText = "position:absolute;inset:0;overflow:hidden;isolation:isolate;container-type:size;";
 
   const beforeStage = createSlot(document, "before-stage", -10);

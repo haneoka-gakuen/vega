@@ -1,4 +1,6 @@
+import type { TweenClock } from "../core/easing";
 import type { StoryResourceResolver } from "../resources/StoryResourcePort";
+import type { PropertyAnimationClip, PropertyAnimationOptions } from "./PropertyAnimation";
 export type { StoryResourceLease, StoryResourceResolver } from "../resources/StoryResourcePort";
 import type { StoryScreenEffectDefinition } from "./StoryScreenEffects";
 import type {
@@ -101,11 +103,18 @@ export interface StoryScenePreviewOptions {
  * complete backend without changing the opcode interpreter.
  */
 export interface StorySceneBackend {
+  readonly storyClock?: TweenClock;
   readonly screenEffectKeys?: readonly string[];
   setScreenEffect?(key: string, definition: StoryScreenEffectDefinition, signal?: AbortSignal): Promise<void>;
   clearScreenEffects?(key?: string): void;
 
   readonly cameraState: StoryCameraState;
+  playPropertyAnimation?(
+    target: string,
+    clip: PropertyAnimationClip,
+    options?: PropertyAnimationOptions,
+  ): Promise<void>;
+  cancelPropertyAnimations?(target?: string, channels?: readonly string[]): void;
   /** Scene-unit transforms around the fixed calibration frame; rotations are radians. */
   readSceneTransform?(target: string):
     | {
@@ -182,6 +191,10 @@ export interface StorySceneBackend {
    * implement this instead of making the shell inspect renderer internals.
    */
   capturePreview?(options: StoryScenePreviewOptions): string | undefined | Promise<string | undefined>;
+  createVideoCapture?(options: { width: number; height: number; fps: number }): {
+    stream: MediaStream;
+    dispose(): void;
+  };
   restoreSeekSnapshot(snapshot: AdvStorySceneSeekSnapshot, signal?: AbortSignal): Promise<void>;
   cancelTransitionsForSeek?(): void;
   presentSeekSnapshot?(): void;
@@ -196,6 +209,7 @@ export interface StorySceneBackend {
   hasCharacterController(target: string): boolean;
   isCharacterShowing(target: string, expectedIdentity?: string): boolean;
 
+  replaceCharacterImage?(target: string, source: string, signal?: AbortSignal): Promise<boolean>;
   selectCharacterAssetIndex(target: string, assetIndex: number): void;
   placeCharacter(cmd: AdvCommand, positionType: number, duration?: number, noWait?: boolean): Promise<unknown>;
   removeCharacter(target: string, duration?: number): Promise<boolean>;
@@ -369,8 +383,14 @@ export interface StorySceneBackend {
   setRimLight(target: string, color: unknown, shadowIntensity: number): Promise<void>;
 
   currentFocusData(distance: number): AdvFocusDataRow | null;
+  focusFrame?(targets: readonly string[], cameraDistance: number): { position: StoryPoint3; zoomRatio: number } | null;
   closestFocusDataByZoomRatio(ratio: number): AdvFocusDataRow | null;
-  focusBaseCameraPosition(positionType: number, targetName?: string, focusData?: AdvFocusDataRow | null): StoryPoint3;
+  focusBaseCameraPosition(
+    positionType: number,
+    targetName?: string,
+    focusData?: AdvFocusDataRow | null,
+    cameraAnchor?: "slot" | "character",
+  ): StoryPoint3;
   focus(options: Readonly<Record<string, unknown>>): Promise<void>;
   zoomByRatio(
     ratio: number,

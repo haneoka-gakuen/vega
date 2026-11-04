@@ -125,6 +125,11 @@
       "types": "./dist/web-ui-entry.d.ts",
       "import": "./dist/web-ui.js",
       "default": "./dist/web-ui.js"
+    },
+    "./story-resources": {
+      "types": "./dist/story-resources-entry.d.ts",
+      "import": "./dist/story-resources.js",
+      "default": "./dist/story-resources.js"
     }
   },
   "scripts": {
@@ -149,7 +154,8 @@
   },
   "packageManager": "pnpm@11.14.0",
   "dependencies": {
-    "@haneoka/vega-protocol": "workspace:*"
+    "@haneoka/vega-protocol": "workspace:*",
+    "popmotion": "^11.0.5"
   },
   "peerDependencies": {
     "howler": ">=2.2.0 <3",

@@ -47,6 +47,7 @@ export * from "./types/AdvQuality";
 export * from "./types/AdvRuntime";
 export * from "./core/AdvConstants";
 export * from "./core/easing";
+export * from "./rendering/PropertyAnimation";
 export * from "./core/AdvDoF";
 export * from "./core/AdvSettlingWait";
 export {
@@ -87,5 +88,8 @@ export * from "./rendering/StoryFrameLayout";
 export type * from "./rendering/StoryCanvasParticles";
 export * from "./rendering/StoryStillPresentation";
 export * from "./rendering/StoryPlaneLayout";
+export * from "./rendering/StoryStageGeometry";
 
 export * from "@haneoka/vega-protocol/coordinates";
+
+export { STORY_CHARACTER_MODELS_KEY, resolveStoryCharacterModels } from "./resources/StoryCharacterReferences";

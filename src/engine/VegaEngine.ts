@@ -10,6 +10,7 @@ import type { StoryResourceResolver } from "../resources/StoryResourcePort";
 import type { AdvPlayerState, AdvStory } from "../types/AdvRuntime";
 import { VegaEventBus, type VegaEventHandler, type VegaEventMap } from "./events";
 import { VegaLifetime } from "./lifecycle";
+import { coreCommandsPlugin } from "./coreCommands";
 import {
   VEGA_STORAGE_PORT,
   VegaPluginHost,
@@ -62,6 +63,8 @@ export interface VegaPlayerOptions {
   readonly narrativeInput?: VegaNarrativeInputProvider;
   /** Theme contribution id. `false` leaves the player unthemed. */
   readonly theme?: string | false;
+  /** The embedding editor or application owns playback controls outside the stage. */
+  readonly externalPlaybackControls?: boolean;
   /** Per-player services take precedence over engine-wide plugin services. */
   readonly services?: readonly VegaPlayerService[];
   /**
@@ -306,6 +309,7 @@ export class VegaEngine {
   }
 
   private async initializePlugins(options: VegaEngineOptions): Promise<void> {
+    await this.plugins.installOfficial(coreCommandsPlugin);
     for (const plugin of options.officialPlugins ?? []) await this.plugins.installOfficial(plugin);
     for (const plugin of options.plugins ?? []) await this.plugins.install(plugin);
   }

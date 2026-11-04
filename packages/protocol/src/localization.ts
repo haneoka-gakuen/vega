@@ -219,7 +219,7 @@ const lookupLocalizedText = (
 ): VegaResolvedLocalizedText | undefined => {
   let candidate = requested;
   while (candidate) {
-    if (Object.hasOwn(localized, candidate)) {
+    if (Object.hasOwn(localized, candidate) && localized[candidate] !== "") {
       return { text: localized[candidate]!, language: candidate };
     }
     candidate = truncateLanguageRange(candidate);

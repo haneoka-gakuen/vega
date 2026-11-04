@@ -66,6 +66,7 @@ export const createVegaWebPlayerHost = (): VegaPlayerHost => {
           lifetime,
           themes: engine.plugins.contributions("theme"),
           theme: options.theme,
+          externalPlaybackControls: options.externalPlaybackControls,
           uiSlots: engine.plugins.contributions("ui-slot"),
         });
         const renderContribution = selectVegaRenderContribution(
@@ -183,6 +184,48 @@ export const createVegaWebPlayerHost = (): VegaPlayerHost => {
           lifetime.use(shell);
           playerServices.set(VEGA_SHELL_CONTROLLER.id, shell);
         }
+        const inputRoot = presentation.root;
+        inputRoot.tabIndex = 0;
+        const interactive = (target: EventTarget | null): boolean =>
+          target instanceof Element &&
+          Boolean(
+            target.closest(
+              "button,a,input,select,textarea,summary,video,[role=button],[role=slider],[contenteditable=true]",
+            ),
+          );
+        const canAdvance = () => state.ready && !state.paused && (!shell || shell.currentScreen === "game");
+        inputRoot.addEventListener(
+          "click",
+          (event) => {
+            if (event.defaultPrevented || event.button !== 0 || interactive(event.target) || !canAdvance()) return;
+            const selection = inputRoot.ownerDocument.getSelection();
+            if (selection && !selection.isCollapsed && selection.anchorNode && inputRoot.contains(selection.anchorNode))
+              return;
+            inputRoot.focus({ preventScroll: true });
+            constructedPlayer.requestNext();
+          },
+          { signal: lifetime.signal },
+        );
+        inputRoot.addEventListener(
+          "keydown",
+          (event) => {
+            if (
+              event.defaultPrevented ||
+              event.repeat ||
+              event.isComposing ||
+              event.ctrlKey ||
+              event.metaKey ||
+              event.altKey ||
+              interactive(event.target) ||
+              !canAdvance()
+            )
+              return;
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            constructedPlayer.requestNext();
+          },
+          { signal: lifetime.signal },
+        );
         await mountVegaUiSlots({
           resources,
           contributions: engine.plugins.contributions("ui-slot"),

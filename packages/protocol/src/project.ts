@@ -64,7 +64,7 @@ export function assertVegaProject(value: unknown): asserts value is VegaProject 
   const project = requireRecord(value, "$");
   rejectUnknownKeys(project, PROJECT_KEYS, "$");
   if (project.format !== "vega-project") fail("$.format", "expected `vega-project`");
-  if (project.formatVersion !== 1) fail("$.formatVersion", "expected version 1");
+  if (project.formatVersion !== 1 && project.formatVersion !== 2) fail("$.formatVersion", "expected version 1 or 2");
   requireNonEmptyString(project.id, "$.id");
   assertLocalizedText(project.title, "$.title");
   requireNonEmptyString(project.entryScene, "$.entryScene");

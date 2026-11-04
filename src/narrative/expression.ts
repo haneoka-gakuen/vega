@@ -46,12 +46,13 @@ export const evaluateVegaCondition = (source: string, scope: VegaExpressionScope
  */
 export const interpolateVegaText = (text: string, scope: VegaExpressionScope): string =>
   String(text)
-    .replace(/\{\{([\s\S]*?)\}\}/g, (_match, expression: string) =>
+    .replace(/(?<!\\)\{\{([\s\S]*?)\}\}/g, (_match, expression: string) =>
       stringifyExpressionValue(evaluateVegaExpression(expression.trim(), scope)),
     )
-    .replace(/\{([A-Za-z_$\p{L}][\w$.\p{L}\p{N}]*)\}/gu, (_match, identifier: string) =>
+    .replace(/(?<![\\{])\{([A-Za-z_$\p{L}][\w$.\p{L}\p{N}]*)\}/gu, (_match, identifier: string) =>
       stringifyExpressionValue(resolveIdentifier(identifier, scope)),
-    );
+    )
+    .replace(/\\([{}])/gu, "$1");
 
 const stringifyExpressionValue = (value: VegaJsonValue | undefined): string => {
   if (value == null) return "";
