@@ -25,6 +25,7 @@ jobs:
         with:
           repository: haneoka-gakuen/vega-shell-default
           path: vega/.dependencies/vega-shell-default
+          ref: ab0494d9a7b46e3221e827a3649aa83a06d772f6
       - uses: pnpm/action-setup@v6
         with:
           version: 11.14.0
@@ -58,6 +59,7 @@ jobs:
         with:
           repository: haneoka-gakuen/vega-shell-default
           path: vega/.dependencies/vega-shell-default
+          ref: ab0494d9a7b46e3221e827a3649aa83a06d772f6
       - uses: pnpm/action-setup@v6
         with:
           version: 11.14.0
