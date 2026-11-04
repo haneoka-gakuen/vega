@@ -5,10 +5,6 @@ Vega is the story engine for web and native visual-novel players. It turns an
 choices, save data, and renderer-neutral scene state. Hosts choose the renderer,
 UI, audio, storage, character runtimes, and resource adapters through plugins.
 
-Embedded editors can set `externalPlaybackControls: true` on player or preview
-options. Themes then keep the entire stage for native rendering while the host
-owns the transport; standalone players retain their built-in controls.
-
 ## What you get
 
 - Native ADV commands for dialogue, choices, scenes, characters, backgrounds,
@@ -25,25 +21,6 @@ field carries a canonical URL such as `/stories/episode-1/bg/room.png` or an
 HTTPS URL. `DefaultStoryResourceResolver` handles HTTP(S), `data:`, and `blob:`
 URLs directly; native hosts add an adapter for `file:` URLs, archives, and
 application protocols.
-
-`VegaEngine` installs the first-party `haneoka.vega-core:audioClip@1` command.
-Its clips use source offsets and durations in seconds, independent named
-tracks, category and clip gains, rate, loop, mute, and fade envelopes. They
-share the player's audio device and resource port; transport pause preserves
-each playhead. Command-group lifetime and cancellation signals own playback.
-The `/audio` entry exports the clip types and envelope scheduler for authoring
-and offline mixing. Sound snapshots carry active clip positions.
-
-The preview protocol can record a backend's native video stream with its
-player-specific audio bus. Recording returns bounded chunks through the same
-preview port, plus subtitles timed from actual dialogue playback. The browser
-encoder records in real time; fixed-rate offline evaluation is a separate host
-capability.
-
-Camera transitions inside command-group events run concurrently with dialogue
-and retain their event owner until the tween finishes. An inner `noWait` does
-not detach the same transition twice; pause, seek and group cancellation still
-use the player's scene clock and cancellation signals.
 
 ## Build from a clean source checkout
 
@@ -117,10 +94,10 @@ const player = await engine.createPlayer({
         command: VEGA_ADV_OPCODE.Talk,
         targetName: "Guide",
         text: "Hello from Vega.",
-        noWait: true,
-      },
-    ],
-  },
+        noWait: true
+      }
+    ]
+  }
 });
 
 await player.player.play();
@@ -128,10 +105,10 @@ output.textContent = JSON.stringify(
   {
     ready: player.player.state.ready,
     finished: player.player.state.finished,
-    dialogue: player.player.state.talkLog.at(-1)?.text,
+    dialogue: player.player.state.talkLog.at(-1)?.text
   },
   null,
-  2,
+  2
 );
 
 await player.dispose();
@@ -162,7 +139,7 @@ Install plugins before `start()` or pass them to the constructor:
 
 ```ts
 const engine = new VegaEngine({
-  plugins: [myAudioPlugin, myInputPlugin, myStoragePlugin],
+  plugins: [myAudioPlugin, myInputPlugin, myStoragePlugin]
 });
 await engine.start();
 ```
@@ -176,29 +153,14 @@ Plugin setup registrations are scoped to the engine and roll back on failure.
 The default resolver handles ordinary web URLs. Add an adapter for an archive or
 desktop protocol by contributing a resource port with a scheme and a `load`
 method. A renderer receives that resolver through `StorySceneBackendContext`.
-
-Vega projects declare story languages in `metadata["vega:localization"]`.
-The native project adapter carries those languages and the default language into
-the player and shell. Earlier Altair exports retain their language list through
-the saved authoring metadata.
-
-Empty entries in language maps use the story's fallback or default language.
-A scalar empty string remains an empty authored text value.
-
-Resource paths may use the same bounded expression interpolation as dialogue.
-Their concrete URLs are resolved when the command executes, including cues
-inside timed groups. Preloading defers unresolved templates. Authoring hosts
-scope these paths to the project, and packaging includes every matching local
-candidate in the immutable resource closure. Escaped braces remain literal.
-
 Use `configureStoryRuntime()` for host localization and canonical URL policy:
 
 ```ts
 import { configureStoryRuntime } from "@haneoka/vega/runtime";
 
 configureStoryRuntime({
-  localize: (value) => (typeof value === "string" ? value : ""),
-  message: (key) => ({ loading: "Loading…", play: "Start" })[key] ?? key,
+  localize: (value) => typeof value === "string" ? value : "",
+  message: (key) => ({ loading: "Loading…", play: "Start" }[key] ?? key)
 });
 ```
 
@@ -260,16 +222,6 @@ The plain DOM backend is available when the host supplies no render plugin.
 Install UI-slot plugins for dialogue and controls. Factory and mount accept
 `null` for absent runtime-plugin and external-runtime indexes, matching Deneb's
 generated bootloader. Disposal also cancels an in-progress project request.
-
-The [presentation architecture](docs/ADV_PRESENTATION_AUDIT.md) describes the
-shared scene, model placement, camera, and authoring boundaries.
-
-## Native camera composition
-
-Native `Focus` supports `focusTargets` for multi-character composition. A `*`
-subject selects the currently visible cast. Renderers can supply `focusFrame`
-through the scene backend to keep the camera session, pan baseline and rendered
-frame consistent during playback and seeking.
 
 ## License
 
