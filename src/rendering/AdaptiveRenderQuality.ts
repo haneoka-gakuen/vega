@@ -26,6 +26,7 @@ export class AdaptiveRenderQuality {
   scale: number;
   private slowSamples = 0;
   private fastSamples = 0;
+  private longFrames = 0;
 
   constructor(options: AdaptiveRenderQualityOptions = {}) {
     this.enabled = options.enabled !== false;
@@ -44,12 +45,19 @@ export class AdaptiveRenderQuality {
     if (budget === this.frameBudgetMs) return;
     this.frameBudgetMs = budget;
     this.slowSamples = this.fastSamples = 0;
+    this.longFrames = 0;
   }
 
   sample(deltaMs: number) {
-    if (!this.enabled || !Number.isFinite(deltaMs) || deltaMs <= 0 || deltaMs > 250) return false;
+    if (!this.enabled || !Number.isFinite(deltaMs) || deltaMs <= 0) return false;
+    if (deltaMs > 250) {
+      if (++this.longFrames < 2) return false;
+      deltaMs = 250;
+    } else {
+      this.longFrames = 0;
+    }
     if (deltaMs > this.targetFrameMs * 1.28) {
-      this.slowSamples += 1;
+      this.slowSamples += Math.max(1, deltaMs / this.targetFrameMs);
       this.fastSamples = Math.max(0, this.fastSamples - 4);
     } else if (deltaMs < this.targetFrameMs * 0.9) {
       this.fastSamples += 1;
