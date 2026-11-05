@@ -22,7 +22,7 @@ export class AdaptiveRenderQuality {
   readonly enabled: boolean;
   readonly minScale: number;
   readonly maxScale: number;
-  readonly targetFrameMs: number;
+  private frameBudgetMs = 1000 / 60;
   scale: number;
   private slowSamples = 0;
   private fastSamples = 0;
@@ -32,7 +32,18 @@ export class AdaptiveRenderQuality {
     this.minScale = clamp(finite(options.minScale, 0.72), 0.5, 1);
     this.maxScale = Math.max(this.minScale, clamp(finite(options.maxScale, 1), this.minScale, 1.5));
     this.scale = clamp(finite(options.initialScale, this.maxScale), this.minScale, this.maxScale);
-    this.targetFrameMs = 1000 / clamp(finite(options.targetFps, 60), 30, 120);
+    this.setTargetFps(finite(options.targetFps, 60));
+  }
+
+  get targetFrameMs(): number {
+    return this.frameBudgetMs;
+  }
+
+  setTargetFps(targetFps: number): void {
+    const budget = 1000 / Math.max(30, finite(targetFps, 60));
+    if (budget === this.frameBudgetMs) return;
+    this.frameBudgetMs = budget;
+    this.slowSamples = this.fastSamples = 0;
   }
 
   sample(deltaMs: number) {

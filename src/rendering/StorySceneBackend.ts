@@ -168,6 +168,8 @@ export interface StorySceneBackend {
   setDeterministicReplayActive(active: boolean): void;
   /** Host transport pause, independent of authored per-character pause. */
   setTransportPaused?(paused: boolean): void;
+  /** Presentation cap; zero uses every browser animation frame. */
+  setFrameRateLimit?(limit: number): void;
   /** Keep checkpoint compilation from consuming episode-resident models. */
   setSeekIndexCompilationActive?(active: boolean): void;
 
