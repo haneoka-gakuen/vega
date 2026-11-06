@@ -4309,22 +4309,13 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.FadeOut, async (cmd, ctx, signal) => {
-      // FadeOut completes its transition before playback advances.
+      // Effect commands retain their toggle state across cover transitions.
       const color = htmlColor(param(cmd, 0), "#000000");
       const duration = commandDuration(ctx, cmd, 0);
       const transitionGeneration = ++this.coverTransitionGeneration;
       const rule = cmd.ruleTransition || (ctx.runtime.defaultRuleTransition as AdvRuleTransitionEntry | undefined);
       if (rule && (rule.texture || rule.maskTexture || rule.gradient != null)) {
         await ctx.SceneRoot.runRuleTransition(rule, color, duration, true);
-        if (
-          this.disposed ||
-          signal?.aborted ||
-          this.abortController.signal.aborted ||
-          transitionGeneration !== this.coverTransitionGeneration
-        )
-          return;
-        ctx.SceneRoot.stopCommandEffects();
-        ctx.state.effect = null;
         return;
       }
       const from = ctx.state.cover.opacity;
@@ -4347,8 +4338,6 @@ export class AdvPlayer {
         return;
       ctx.state.cover.opacity = 1;
       ctx.SceneRoot.setCover(color, 1);
-      ctx.SceneRoot.stopCommandEffects();
-      ctx.state.effect = null;
     });
 
     register(ADV_COMMAND.FadeIn, async (cmd, ctx, signal) => {
