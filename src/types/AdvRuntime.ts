@@ -668,6 +668,8 @@ export interface AdvTargetEntry {
 
 /** Source-neutral dialogue reveal timing for hosts that reproduce an authored player. */
 export interface AdvTalkTextReveal {
+  /** Source reveal elapsed at an instance cut-in, measured in the selected text units. */
+  initialUnits?: number;
   /** JavaScript UTF-16 units preserve players that advance text with String#slice. */
   unit?: "code-point" | "utf16-code-unit";
   unitsPerSecond?: number;
@@ -716,11 +718,16 @@ export interface AdvCommandGroupAction {
   atSeconds: number;
   role: "lifetime" | "event";
   command: AdvCommand;
+  cueId?: string;
+  minimumEndSeconds?: number;
+  suppressed?: boolean;
+  anchor?: { nodeId: string; point: "start" | "end"; offsetSeconds: number };
 }
 
 /** Generic concurrent Story command object. */
 export interface AdvCommandGroup {
   waitForPrevious: boolean;
+  waitForCompletion?: boolean;
   cancelOnManualAdvance: boolean;
   durationSeconds: number;
   actions: AdvCommandGroupAction[];
@@ -760,6 +767,8 @@ export interface AdvCommand {
   cameraDistance?: number;
   cameraAnchor?: "slot" | "character";
   focusTargets?: readonly string[];
+  /** Named gaze target for authored shots, with native stage-slot lookup as the default. */
+  lookTarget?: string;
   fallbackToWide?: boolean;
   advTextId?: string;
   text?: string;
@@ -777,7 +786,14 @@ export interface AdvCommand {
   commandGroup?: AdvCommandGroup | null;
   duration?: number;
   delaySeconds?: number;
+  /** Optional time from the start of a Talk or ChatTalk presentation to automatic advance. */
+  advanceAfterSeconds?: number;
   noWait?: boolean;
+  timelineAudioMuted?: boolean;
+  timelineReplayImmediate?: boolean;
+  timelineShakeSeed?: string;
+  nativeTimelineSpan?: import("../core/easing").NativeTimelineSpan;
+  timelineSourceWindow?: import("../core/easing").NativeTimelineSourceWindow;
   ignoreLipSync?: unknown;
   /** Voice-index-aligned mouth targets when they differ from the dialogue speaker. */
   lipSyncTargets?: string[];

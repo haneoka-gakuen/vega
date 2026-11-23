@@ -91,5 +91,6 @@ export * from "./rendering/StoryPlaneLayout";
 export * from "./rendering/StoryStageGeometry";
 
 export * from "@haneoka/vega-protocol/coordinates";
+export { stageMediaOpacity } from "@haneoka/vega-protocol";
 
 export { STORY_CHARACTER_MODELS_KEY, resolveStoryCharacterModels } from "./resources/StoryCharacterReferences";

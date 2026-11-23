@@ -155,6 +155,9 @@
   "packageManager": "pnpm@11.14.0",
   "dependencies": {
     "@haneoka/vega-protocol": "workspace:*",
+    "gifenc": "1.0.3",
+    "html-to-image": "1.11.13",
+    "mediabunny": "1.66.2",
     "popmotion": "^11.0.5"
   },
   "peerDependencies": {

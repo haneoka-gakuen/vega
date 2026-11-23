@@ -1,4 +1,7 @@
-import type { TweenClock } from "../core/easing";
+import type { NativeTimelineSourceWindow, NativeTimelineSpan, TweenClock } from "../core/easing";
+import type { VegaStageAdjustment } from "@haneoka/vega-protocol";
+import type { VegaStageMediaClip } from "@haneoka/vega-protocol";
+export type { VegaStageAdjustment, VegaStageMediaClip } from "@haneoka/vega-protocol";
 import type { StoryResourceResolver } from "../resources/StoryResourcePort";
 import type { PropertyAnimationClip, PropertyAnimationOptions } from "./PropertyAnimation";
 export type { StoryResourceLease, StoryResourceResolver } from "../resources/StoryResourcePort";
@@ -30,6 +33,14 @@ export interface StoryPoint2 {
 
 export interface StoryPoint3 extends StoryPoint2 {
   z: number;
+}
+
+export interface StoryFrameCaptureContext {
+  readonly signal: AbortSignal;
+  nowSeconds(): number;
+  wait(seconds: number, signal?: AbortSignal): Promise<void>;
+  hold<T>(resource: Promise<T>): Promise<T>;
+  playVideoAudio(source: string, offset: number, rate: number): () => void;
 }
 
 export interface StoryCameraState {
@@ -93,7 +104,20 @@ export interface StoryScenePreviewOptions {
   readonly height: number;
   readonly format: "image/png" | "image/jpeg" | "image/webp";
   readonly quality?: number;
+  readonly fullResolution?: boolean;
 }
+
+export interface StoryStageRaster {
+  readonly canvas: HTMLCanvasElement;
+  sample(seconds: number, loop?: boolean): Promise<boolean>;
+  subtitleText?(): string;
+  dispose(): void | Promise<void>;
+}
+
+export type StoryStageRasterFactory = (
+  viewport: { width: number; height: number },
+  signal: AbortSignal,
+) => Promise<StoryStageRaster>;
 
 /**
  * Stable command-to-renderer port.
@@ -103,8 +127,17 @@ export interface StoryScenePreviewOptions {
  * complete backend without changing the opcode interpreter.
  */
 export interface StorySceneBackend {
+  withNativeTimelineSpan?<T>(span: NativeTimelineSpan | undefined, invoke: () => T): T;
   readonly storyClock?: TweenClock;
   readonly screenEffectKeys?: readonly string[];
+  beginStageAdjustment?(adjustment: VegaStageAdjustment, signal?: AbortSignal): (() => void) | Promise<() => void>;
+  beginStageMediaClip?(
+    id: string,
+    clip: VegaStageMediaClip,
+    signal?: AbortSignal,
+    raster?: StoryStageRasterFactory,
+  ): Promise<() => void>;
+  timelineSubtitleText?(): readonly string[];
   setScreenEffect?(key: string, definition: StoryScreenEffectDefinition, signal?: AbortSignal): Promise<void>;
   clearScreenEffects?(key?: string): void;
 
@@ -193,8 +226,18 @@ export interface StorySceneBackend {
    * implement this instead of making the shell inspect renderer internals.
    */
   capturePreview?(options: StoryScenePreviewOptions): string | undefined | Promise<string | undefined>;
-  createVideoCapture?(options: { width: number; height: number; fps: number }): {
+  createVideoCapture?(options: { width: number; height: number; fps: number; transparentBackground?: boolean }): {
     stream: MediaStream;
+    canvas?: HTMLCanvasElement;
+    dispose(): void;
+  };
+  createFrameCapture?(
+    options: { width: number; height: number; transparentBackground?: boolean },
+    context: StoryFrameCaptureContext,
+  ): {
+    canvas: HTMLCanvasElement;
+    advance(deltaSeconds: number): void;
+    capture(): void | Promise<void>;
     dispose(): void;
   };
   restoreSeekSnapshot(snapshot: AdvStorySceneSeekSnapshot, signal?: AbortSignal): Promise<void>;
@@ -258,12 +301,29 @@ export interface StorySceneBackend {
     enabled?: boolean,
     lookTargetName?: string,
   ): Promise<void>;
-  playMotionForTarget(target: string, motionName?: string, fadeIn?: number, expectedIdentity?: string): void;
+  playMotionForTarget(
+    target: string,
+    motionName?: string,
+    fadeIn?: number,
+    expectedIdentity?: string,
+    sourceWindow?: NativeTimelineSourceWindow,
+  ): void;
   playExpressionForTarget(target: string, expressionName?: string, fadeIn?: number, expectedIdentity?: string): void;
   /** Opcode 68: loop a parameter-fade motion until a stop request replaces it. */
-  playParameterLoopForTarget(target: string, motionName: string, fadeIn?: number, expectedIdentity?: string): void;
+  playParameterLoopForTarget(
+    target: string,
+    motionName: string,
+    fadeIn?: number,
+    expectedIdentity?: string,
+    sourceWindow?: NativeTimelineSourceWindow,
+  ): void;
   /** Opcode 68 "stop": end the target's parameter loop with its authored fade-out. */
-  stopParameterLoopForTarget(target: string, fadeOut?: number, expectedIdentity?: string): void;
+  stopParameterLoopForTarget(
+    target: string,
+    fadeOut?: number,
+    expectedIdentity?: string,
+    sourceWindow?: NativeTimelineSourceWindow,
+  ): void;
   /** Opcode 69: stop auto eye blink (lids ease open over `transitionSeconds`) or resume it. */
   setEyeBlinkStoppedForTarget(
     target: string,
@@ -298,7 +358,7 @@ export interface StorySceneBackend {
   clearStill(duration?: number): Promise<void>;
   setFrameOverlay(frame: AdvFrameEntry, alpha?: number, key?: string): Promise<void>;
   /** Select a prepared overlay's authored clip without decoding its textures again. */
-  playFrameAnimation?(frame: AdvFrameEntry, key: string): void;
+  playFrameAnimation?(frame: AdvFrameEntry, key: string, window?: NativeTimelineSourceWindow): void;
   setFrameOpacity(alpha: number, slide?: number, key?: string): void;
   clearFrameOverlay(key?: string): void;
   setCover(color: unknown, opacity: unknown): void;
@@ -354,7 +414,7 @@ export interface StorySceneBackend {
   applyStageEnv(index?: number): void;
   applyStageLight(index?: number): void;
   applyStagePostEffect(index?: number): void;
-  changeStageParticleEffects(index?: number): void;
+  changeStageParticleEffects(index?: number, sourceWindow?: NativeTimelineSourceWindow): void;
 
   setRendererCharacterBrightness(
     target: string,
@@ -424,7 +484,7 @@ export interface StorySceneBackend {
   shakeCommand(...args: unknown[]): Promise<void>;
   isCameraShakePlaying(): boolean;
   enableCameraShake(...args: unknown[]): Promise<void>;
-  disableCameraShake(fadeDuration: number): Promise<void>;
+  disableCameraShake(fadeDuration: number, window?: NativeTimelineSourceWindow, seed?: string): Promise<void>;
 
   startTimedPseudoLipSync(targets: string[] | string, talkLength: number, speed?: number, multiplier?: number): void;
   startTimedHoldOpenPseudoLipSync(

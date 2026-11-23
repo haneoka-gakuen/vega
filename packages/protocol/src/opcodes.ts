@@ -1,5 +1,8 @@
 export const VEGA_CORE_PROPERTY_CLIP = "haneoka.vega-core:propertyClip@1" as const;
 export const VEGA_CORE_AUDIO_CLIP = "haneoka.vega-core:audioClip@1" as const;
+export const VEGA_CORE_ADJUSTMENT = "haneoka.vega-core:adjustment@1" as const;
+export const VEGA_CORE_MEDIA_CLIP = "haneoka.vega-core:mediaClip@1" as const;
+export const VEGA_CORE_COMPOSITION = "haneoka.vega-core:composition@1" as const;
 
 /**
  * Native ADV opcodes. Values 0-100 are immutable compatibility territory.

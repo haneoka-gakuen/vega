@@ -1,4 +1,11 @@
-export function delaySeconds(seconds: number, signal?: AbortSignal): Promise<void> {
+export type ScheduleStoryDelay = (seconds: number, callback: () => void) => () => void;
+
+const scheduleWallDelay: ScheduleStoryDelay = (seconds, callback) => {
+  const timer = setTimeout(callback, seconds * 1000);
+  return () => clearTimeout(timer);
+};
+
+export function delaySeconds(seconds: number, signal?: AbortSignal, schedule = scheduleWallDelay): Promise<void> {
   const ms = Math.max(0, Number(seconds) || 0) * 1000;
   if (ms <= 0 || signal?.aborted) return Promise.resolve();
   return new Promise<void>((resolve) => {
@@ -6,11 +13,11 @@ export function delaySeconds(seconds: number, signal?: AbortSignal): Promise<voi
     const finish = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(id);
+      cancel();
       signal?.removeEventListener("abort", finish);
       resolve();
     };
-    const id = setTimeout(finish, ms);
+    const cancel = schedule(ms / 1000, finish);
     signal?.addEventListener("abort", finish, { once: true });
     if (signal?.aborted) finish();
   });
@@ -24,6 +31,7 @@ interface AdvCommandTransitionOwner {
 }
 
 export class AdvCommandDelayTokens {
+  schedule: ScheduleStoryDelay = scheduleWallDelay;
   commonDelayCancellationTokenSource: AbortController;
   private readonly transitionOwners = new Map<AdvCommandTransitionChannel, AdvCommandTransitionOwner>();
 
@@ -94,14 +102,14 @@ export class AdvCommandDelayTokens {
       const finish = (completed: boolean): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        cancel();
         linked.signal.removeEventListener("abort", cancelled);
         signal?.removeEventListener("abort", abort);
         own.removeEventListener("abort", abort);
         resolve(completed);
       };
       const cancelled = (): void => finish(false);
-      const timer = setTimeout(() => finish(true), durationMs);
+      const cancel = this.schedule(durationMs / 1000, () => finish(true));
       linked.signal.addEventListener("abort", cancelled, { once: true });
       if (linked.signal.aborted) cancelled();
     });

@@ -115,6 +115,8 @@ export const VEGA_PREVIEW_COMMAND_NAMES = Object.freeze([
   "debug.variables.set",
   "stage.snapshot",
   "stage.capture",
+  "stage.timeline-sample",
+  "stage.timeline-clear",
   "audio.snapshot",
   "stage.recording.start",
   "stage.recording.stop",
@@ -140,8 +142,18 @@ export function vegaPreviewSupersedesScene(name: VegaPreviewCommandName): boolea
   ].includes(name);
 }
 
+export interface VegaPreviewRouteDecision {
+  readonly commandIndex: number;
+  readonly values: readonly (string | number)[];
+}
+
 export type VegaPreviewCommand =
-  | { readonly name: "runtime.load"; readonly story: VegaJsonValue; readonly commandIndex?: number }
+  | {
+      readonly name: "runtime.load";
+      readonly story: VegaJsonValue;
+      readonly commandIndex?: number;
+      readonly choiceRoute?: readonly VegaPreviewRouteDecision[];
+    }
   | { readonly name: "runtime.patch"; readonly patch: readonly VegaJsonPatch[] }
   | { readonly name: "runtime.play" }
   | { readonly name: "runtime.pause" }
@@ -169,9 +181,31 @@ export type VegaPreviewCommand =
   | { readonly name: "debug.variables" }
   | { readonly name: "debug.variables.set"; readonly variable: string; readonly value: VegaJsonValue }
   | { readonly name: "stage.snapshot" }
-  | { readonly name: "stage.capture" }
+  | {
+      readonly name: "stage.capture";
+      readonly height?: number;
+      readonly format?: "image/png" | "image/jpeg" | "image/webp";
+      readonly burnSubtitles?: boolean;
+    }
   | { readonly name: "audio.snapshot" }
-  | { readonly name: "stage.recording.start"; readonly width: number; readonly height: number; readonly fps: number }
+  | {
+      readonly name: "stage.timeline-sample";
+      readonly commandIndex: number;
+      readonly seconds: number;
+      readonly source?: { readonly id: string; readonly story: VegaJsonValue };
+    }
+  | { readonly name: "stage.timeline-clear" }
+  | {
+      readonly name: "stage.recording.start";
+      readonly width: number;
+      readonly height: number;
+      readonly fps: number;
+      readonly autoAdvance?: boolean;
+      readonly frameByFrame?: boolean;
+      readonly burnSubtitles?: boolean;
+      readonly transparentBackground?: boolean;
+      readonly container?: "webm" | "mp4" | "mov" | "gif" | "apng" | "wav";
+    }
   | { readonly name: "stage.recording.stop" }
   | { readonly name: "stage.recording.read"; readonly offset: number }
   | { readonly name: "stage.recording.release" }
@@ -237,6 +271,15 @@ export type VegaPreviewEvent =
   | {
       readonly protocol: typeof VEGA_PREVIEW_PROTOCOL;
       readonly kind: "event";
+      readonly event: "stage.recording.progress";
+      readonly identity: VegaPreviewIdentity;
+      readonly frame: number;
+      readonly seconds: number;
+      readonly phase: "render" | "mix";
+    }
+  | {
+      readonly protocol: typeof VEGA_PREVIEW_PROTOCOL;
+      readonly kind: "event";
       readonly event: "runtime.stopped";
       readonly identity: VegaPreviewIdentity;
       readonly revision: number;
@@ -296,7 +339,23 @@ const isVegaPreviewCommand = (value: unknown): value is VegaPreviewCommand => {
   if (!isRecord(value) || typeof value.name !== "string") return false;
   switch (value.name) {
     case "runtime.load":
-      return isRecord(value.story) && (value.commandIndex === undefined || isCommandIndex(value.commandIndex));
+      return (
+        isRecord(value.story) &&
+        (value.commandIndex === undefined || isCommandIndex(value.commandIndex)) &&
+        (value.choiceRoute === undefined ||
+          (Array.isArray(value.choiceRoute) &&
+            value.choiceRoute.every(
+              (entry) =>
+                isRecord(entry) &&
+                isCommandIndex(entry.commandIndex) &&
+                Array.isArray(entry.values) &&
+                entry.values.length > 0 &&
+                entry.values.every(
+                  (answer: unknown) =>
+                    typeof answer === "string" || (typeof answer === "number" && Number.isFinite(answer)),
+                ),
+            )))
+      );
     case "runtime.patch":
       return Array.isArray(value.patch) && value.patch.every(isJsonPatch);
     case "runtime.seek":
@@ -326,14 +385,46 @@ const isVegaPreviewCommand = (value: unknown): value is VegaPreviewCommand => {
       return isNonEmptyString(value.target);
     case "stage.recording.start":
       return (
+        typeof value.width === "number" &&
         typeof value.height === "number" &&
         typeof value.fps === "number" &&
-        [720, 1080].includes(value.height) &&
-        value.width === (value.height * 16) / 9 &&
-        [24, 30, 60].includes(value.fps)
+        [720, 1080, 2160].includes(Math.min(value.width, value.height)) &&
+        Math.max(value.width, value.height) <= 4096 &&
+        value.width % 2 === 0 &&
+        value.height % 2 === 0 &&
+        [24, 30, 60].includes(value.fps) &&
+        (value.autoAdvance === undefined || typeof value.autoAdvance === "boolean") &&
+        (value.frameByFrame === undefined || typeof value.frameByFrame === "boolean") &&
+        (value.burnSubtitles === undefined || typeof value.burnSubtitles === "boolean") &&
+        (value.transparentBackground === undefined || typeof value.transparentBackground === "boolean") &&
+        (value.container === undefined ||
+          value.container === "webm" ||
+          value.container === "mp4" ||
+          value.container === "mov" ||
+          value.container === "gif" ||
+          value.container === "wav" ||
+          value.container === "apng")
       );
     case "stage.recording.read":
       return typeof value.offset === "number" && Number.isSafeInteger(value.offset) && value.offset >= 0;
+    case "stage.timeline-sample":
+      return (
+        isCommandIndex(value.commandIndex) &&
+        isFiniteNumber(value.seconds) &&
+        value.seconds >= 0 &&
+        value.seconds <= 1800 &&
+        (value.source === undefined ||
+          (isRecord(value.source) && isNonEmptyString(value.source.id) && isRecord(value.source.story)))
+      );
+    case "stage.capture":
+      return (
+        (value.burnSubtitles === undefined || typeof value.burnSubtitles === "boolean") &&
+        (value.height === undefined || value.height === 720 || value.height === 1080 || value.height === 2160) &&
+        (value.format === undefined ||
+          value.format === "image/png" ||
+          value.format === "image/jpeg" ||
+          value.format === "image/webp")
+      );
     case "stage.transform.set":
       return (
         isNonEmptyString(value.target) &&
@@ -348,7 +439,7 @@ const isVegaPreviewCommand = (value: unknown): value is VegaPreviewCommand => {
     case "debug.step":
     case "debug.variables":
     case "stage.snapshot":
-    case "stage.capture":
+    case "stage.timeline-clear":
     case "audio.snapshot":
     case "stage.recording.stop":
     case "stage.recording.release":
@@ -400,6 +491,13 @@ export const isVegaPreviewMessage = (value: unknown): value is VegaPreviewMessag
         ["info", "warning", "error"].includes(String(value.level)) &&
         isNonEmptyString(value.code) &&
         typeof value.message === "string"
+      );
+    case "stage.recording.progress":
+      return (
+        isCommandIndex(value.frame) &&
+        isFiniteNumber(value.seconds) &&
+        value.seconds >= 0 &&
+        (value.phase === "render" || value.phase === "mix")
       );
     case "runtime.stopped":
       return (

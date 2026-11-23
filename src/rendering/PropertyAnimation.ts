@@ -48,11 +48,21 @@ function sampleTrack(track: PropertyAnimationTrack, time: number): number {
     name && typeof curves[name as keyof typeof curves] === "function"
       ? (curves[name as keyof typeof curves] as (value: number) => number)
       : resolveEase(token);
-  return from.value + (to.value - from.value) * ease(progress);
+  const span = to.easeSpan;
+  if (!span) return from.value + (to.value - from.value) * ease(progress);
+  const left = ease(span.start),
+    right = ease(span.end);
+  const curve = ease(span.start + (span.end - span.start) * progress);
+  return (
+    from.value + (to.value - from.value) * progress + span.amplitude * (curve - (left + (right - left) * progress))
+  );
 }
 
 export function samplePropertyAnimation(clip: PropertyAnimationClip, timeSeconds: number): Values {
-  return Object.fromEntries(clip.tracks.map((track) => [track.channel, sampleTrack(track, timeSeconds)]));
+  const sourceTime = clip.sourceWindow
+    ? clip.sourceWindow.offsetSeconds + timeSeconds * clip.sourceWindow.playbackRate
+    : timeSeconds;
+  return Object.fromEntries(clip.tracks.map((track) => [track.channel, sampleTrack(track, sourceTime)]));
 }
 
 /** Serializable property tracks driven by the same clock as native scene animation. */

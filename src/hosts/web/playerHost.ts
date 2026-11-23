@@ -24,6 +24,8 @@ import {
 } from "../../engine/VegaEngine";
 import type { VegaWebPlayerOptions } from "./engine";
 import { createRustVegaExecutionDriver } from "../../execution/wasm";
+import { createWebTimelineRaster } from "./timelineRaster";
+import { createWebFrameDialogue } from "./frameDialogue";
 
 /** Web composition owns DOM, input, browser persistence, shell and legacy media. */
 export const createVegaWebPlayerHost = (): VegaPlayerHost => {
@@ -110,6 +112,7 @@ export const createVegaWebPlayerHost = (): VegaPlayerHost => {
         }
         lifetime.use(executionDriver);
         throwIfAborted(lifetime.signal);
+        const dialogue = presentation.slots.get("dialogue");
         player = new AdvPlayer({
           executionDriver,
           mount: presentation.stage,
@@ -125,6 +128,8 @@ export const createVegaWebPlayerHost = (): VegaPlayerHost => {
           characterProviders,
           resourcePreparers: presentation.theme ? [presentation.theme] : [],
           textMetrics: engine.plugins.service(VEGA_TEXT_METRICS),
+          createTimelineRaster: createWebTimelineRaster(engine, hostOptions, resources, options.mount.ownerDocument),
+          ...(dialogue ? { paintFrameDialogue: createWebFrameDialogue(dialogue, lifetime.signal) } : {}),
         });
         const constructedPlayer = player;
         const disposeConstructedPlayer = (): Promise<void> => {

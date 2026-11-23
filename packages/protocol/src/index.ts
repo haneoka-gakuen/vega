@@ -9,3 +9,8 @@ export * from "./preview.js";
 export * from "./project.js";
 export * from "./ui.js";
 export * from "./property-animation.js";
+export * from "./adv-timing.js";
+export * from "./subrip.js";
+export * from "./stage-adjustment.js";
+export * from "./stage-media-clip.js";
+export * from "./stage-media-effects.js";

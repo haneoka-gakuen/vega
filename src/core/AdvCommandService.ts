@@ -1,9 +1,10 @@
+import type { parseVegaStageComposition } from "@haneoka/vega-protocol";
 import type { AdvCommand, AdvRuntimeConfig, AdvPlayerState } from "../types/AdvRuntime";
 import type { AdvPlaybackSession } from "./AdvPlaybackSession";
 import type { AdvPlayerModel } from "./AdvPlayerModel";
 import type { AdvEpisodeResourceLoader } from "./AdvEpisodeResourceLoader";
 import type { AdvQualityConfig } from "./AdvQualityConfig";
-import type { StorySceneBackend } from "../rendering/StorySceneBackend";
+import type { StorySceneBackend, StoryStageRasterFactory } from "../rendering/StorySceneBackend";
 import type { AdvSoundManager } from "../sound/AdvSoundManager";
 
 export interface AdvCommandContext {
@@ -15,6 +16,11 @@ export interface AdvCommandContext {
   QualityConfig: AdvQualityConfig;
   state: AdvPlayerState;
   runtime: AdvRuntimeConfig;
+  waitTimelineSeconds(seconds: number, signal?: AbortSignal): Promise<void>;
+  createTimelineRaster?(
+    command: AdvCommand,
+    options: Omit<ReturnType<typeof parseVegaStageComposition>, "clip">,
+  ): StoryStageRasterFactory;
 }
 
 export type AdvCommandExecutor = (

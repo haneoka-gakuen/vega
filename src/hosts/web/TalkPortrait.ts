@@ -4,6 +4,7 @@ import type { VegaWebUiSlotContext } from "./uiSlots";
 export function createTalkPortrait(host: HTMLElement, context: VegaWebUiSlotContext) {
   const image = host.ownerDocument.createElement("img");
   image.className = "vega-talk-portrait";
+  image.dataset.vegaFrameDialogue = "";
   image.alt = "";
   image.hidden = true;
   image.style.cssText =

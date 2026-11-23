@@ -166,12 +166,14 @@ export const storyResourceContentType = (source: string, bytes?: Readonly<Uint8A
   if (embedded) return embedded.toLowerCase();
   const pathname = source.split(/[?#]/, 1)[0]?.toLowerCase() ?? "";
   if (pathname.endsWith(".png")) return "image/png";
+  if (pathname.endsWith(".apng")) return "image/apng";
   if (pathname.endsWith(".webp")) return "image/webp";
   if (pathname.endsWith(".gif")) return "image/gif";
   if (pathname.endsWith(".svg")) return "image/svg+xml";
   if (pathname.endsWith(".jpg") || pathname.endsWith(".jpeg")) return "image/jpeg";
   if (pathname.endsWith(".avif")) return "image/avif";
   if (pathname.endsWith(".mp4")) return "video/mp4";
+  if (pathname.endsWith(".mov") || pathname.endsWith(".qt")) return "video/quicktime";
   if (pathname.endsWith(".webm")) return "video/webm";
   if (pathname.endsWith(".ogg") || pathname.endsWith(".opus")) return "audio/ogg";
   if (pathname.endsWith(".mp3")) return "audio/mpeg";

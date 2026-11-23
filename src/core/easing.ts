@@ -114,6 +114,8 @@ const EASE_NAME_TO_ENUM: Readonly<Record<string, number>> = Object.freeze({
 });
 
 export function resolveEase(value: unknown, fallback = 6, parameters?: EaseParameters): EaseFn {
+  if (value === "hold") return (progress) => (progress === 1 ? 1 : 0);
+  if (value === "smoothstep") return (progress) => progress * progress * (3 - 2 * progress);
   const numeric = Number(value);
   const key = String(value)
     .replace(/[^a-z0-9]/gi, "")
@@ -146,6 +148,35 @@ export function lerp(a: number, b: number, t: number) {
 export interface TweenClock {
   nowSeconds(): number;
   subscribe(tick: (timeSeconds: number) => void, invalidated: () => void): () => void;
+}
+
+export interface NativeTimelineSpan {
+  readonly from: number;
+  readonly to: number;
+  readonly sourceDurationSeconds?: number;
+}
+export interface NativeTimelineSourceWindow {
+  readonly offsetSeconds: number;
+  readonly durationSeconds: number;
+  readonly playbackRate: number;
+}
+
+/** Restrict a native transition to its original easing interval. */
+export function applyNativeTimelineSpan(options: Parameters<typeof tween>[0], span?: NativeTimelineSpan) {
+  if (!span || !options.update) return options;
+  const ease = options.ease ?? ((x: number) => x);
+  const update = options.update;
+  const from = clamp01(span.from),
+    to = Math.max(from, clamp01(span.to));
+  if (!options.signal?.aborted) update(ease(from), from);
+  return {
+    ...options,
+    ease: (x: number) => x,
+    update: (_eased: number, raw: number) => {
+      const phase = lerp(from, to, raw);
+      update(ease(phase), phase);
+    },
+  };
 }
 
 export function tween({
@@ -182,26 +213,44 @@ export function tween({
         signal?.removeEventListener("abort", stop);
         return true;
       };
-      const stop = (): void => { if (clean()) resolve(); };
-      const fail = (error: unknown): void => { if (clean()) reject(error); };
-      if (signal?.aborted) { stop(); return; }
+      const stop = (): void => {
+        if (clean()) resolve();
+      };
+      const fail = (error: unknown): void => {
+        if (clean()) reject(error);
+      };
+      if (signal?.aborted) {
+        stop();
+        return;
+      }
       signal?.addEventListener("abort", stop, { once: true });
       const tick = (now: number): void => {
         if (settled) return;
-        if (signal?.aborted) { stop(); return; }
+        if (signal?.aborted) {
+          stop();
+          return;
+        }
         if (!Number.isFinite(now) || now < start) {
           const error = new TypeError("Invalid tween clock point");
-          fail(error); throw error;
+          fail(error);
+          throw error;
         }
         const raw = clamp01((now - start) / seconds);
-        try { update?.(ease(raw), raw); } catch (error) { fail(error); throw error; }
+        try {
+          update?.(ease(raw), raw);
+        } catch (error) {
+          fail(error);
+          throw error;
+        }
         if (raw >= 1) stop();
       };
       try {
         const remove = clock.subscribe(tick, stop);
         if (settled) remove();
         else unsubscribe = remove;
-      } catch (error) { fail(error); }
+      } catch (error) {
+        fail(error);
+      }
     });
   }
   return new Promise<void>((resolve) => {

@@ -1,7 +1,14 @@
 import { Howl, Howler } from "howler";
+import type { StageFrameClock } from "../core/StageFrameClock";
+import { OfflineStageAudio, type OfflineStageSound } from "./OfflineStageAudio";
 import { requireCanonicalStoryResourceUrl } from "../runtime";
 import type { StoryResourceResolver } from "../rendering/StorySceneBackend";
-import { estimateVegaVisemeFrame, type AdvVoiceAnalyzer, type VegaVoiceAnalyzer } from "./VoiceAnalysis";
+import {
+  estimateVegaVisemeFrame,
+  type AdvVoiceAnalyzer,
+  type VegaVoiceAnalysisSource,
+  type VegaVoiceAnalyzer,
+} from "./VoiceAnalysis";
 import { canUseStoryHtml5Audio, prepareStoryAudio } from "./StoryAudioPrimer";
 import {
   AudioClipPlayer,
@@ -74,7 +81,11 @@ type SePlayOptions = {
   delaySeconds?: number;
   durationSeconds?: number;
   fadeOutSeconds?: number;
+  offsetSeconds?: number;
+  playbackRate?: number;
 };
+
+type NativeSoundWindow = { offsetSeconds: number; durationSeconds: number; playbackRate: number };
 
 type ManagedHowl = {
   playId: number;
@@ -463,8 +474,10 @@ export class AdvSoundManager {
   private deferredUpcoming = new Set<string>();
   private preparationIndex = -1;
   private clipPlayer?: AudioClipPlayer;
+  private exportAudio?: { clock: StageFrameClock; mixer: OfflineStageAudio; bgm?: OfflineStageSound };
   private transportPaused = true;
   private captureDestination?: MediaStreamAudioDestinationNode;
+  private captureClock?: ConstantSourceNode;
   private releaseCaptureDevice?: () => void;
   private readonly captureNodes = new Set<AudioNode>();
   private readonly mediaCaptures = new Map<HTMLMediaElement, CapturedMediaInput>();
@@ -485,8 +498,51 @@ export class AdvSoundManager {
     return this.clipPlayer;
   }
 
-  async playAudioClip(clip: StoryAudioClip, signal?: AbortSignal): Promise<void> {
-    await this.audioClips.play(clip, 0, signal);
+  async playAudioClip(
+    clip: StoryAudioClip,
+    signal?: AbortSignal,
+    onVoice?: (source: VegaVoiceAnalysisSource, durationSeconds: number) => void,
+  ): Promise<void> {
+    if (this.exportAudio) {
+      const { clock, mixer } = this.exportAudio;
+      if (signal?.aborted || clock.signal.aborted) return;
+      const clipVolume = clip.muted ? 0 : clip.volume * clip.trackVolume;
+      const sound = mixer.play({
+        url: clip.source,
+        category: clip.category,
+        clip,
+        video: clip.sourceKind === "video",
+        gain: clipVolume * this.effectiveVolume(clip.category),
+      });
+      const stop = () => mixer.stop(sound);
+      signal?.addEventListener("abort", stop, { once: true });
+      clock.signal.addEventListener("abort", stop, { once: true });
+      try {
+        onVoice?.(sound, clip.durationSeconds);
+        await sound.done;
+      } finally {
+        signal?.removeEventListener("abort", stop);
+        clock.signal.removeEventListener("abort", stop);
+      }
+      return;
+    }
+    await this.audioClips.play(clip, 0, signal, onVoice);
+  }
+
+  async prepareAudioClip(clip: StoryAudioClip): Promise<void> {
+    if (this.exportAudio) await this.exportAudio.mixer.prepare(clip.source, clip.sourceKind === "video");
+    else await this.audioClips.prepare(clip);
+  }
+
+  beginFrameExport(clock: StageFrameClock): OfflineStageAudio {
+    this.suspendForSeek();
+    const mixer = new OfflineStageAudio(clock, this.resources);
+    this.exportAudio = { clock, mixer };
+    return mixer;
+  }
+
+  endFrameExport(): void {
+    this.exportAudio = undefined;
   }
 
   setTransportPaused(paused: boolean): void {
@@ -555,11 +611,17 @@ export class AdvSoundManager {
 
   beginAudioCapture(): MediaStream {
     this.endAudioCapture();
-    if (!Howler.ctx) throw new Error("Audio device unavailable");
+    const context = Howler.ctx;
+    if (!context) throw new Error("Audio device unavailable");
     const prototype = HTMLMediaElement.prototype as CaptureMediaElement;
     if (!prototype.captureStream && !prototype.mozCaptureStream) throw new Error("Audio capture unavailable");
-    this.captureDestination = Howler.ctx.createMediaStreamDestination();
+    this.captureDestination = context.createMediaStreamDestination();
     this.releaseCaptureDevice = retainAudioDevice();
+    const clock = (this.captureClock = context.createConstantSource());
+    clock.offset.value = 0;
+    clock.connect(this.captureDestination);
+    clock.start();
+    if (context.state === "suspended") void context.resume().catch(() => {});
     this.clipPlayer?.setCapture(this.captureDestination);
     for (const entry of [this.bgm, ...this.se, ...this.voices]) if (entry) this.tapEntry(entry);
     return this.captureDestination.stream;
@@ -569,6 +631,9 @@ export class AdvSoundManager {
     const destination = this.captureDestination;
     if (!destination) return;
     this.clipPlayer?.setCapture(undefined);
+    this.captureClock?.stop();
+    this.captureClock?.disconnect();
+    this.captureClock = undefined;
     for (const node of this.captureNodes) {
       try {
         node.disconnect(destination);
@@ -618,7 +683,7 @@ export class AdvSoundManager {
             position: elapsedSeconds,
             volume: clip.muted
               ? 0
-              : this.effectiveVolume({ categoryName: clip.category, volume: clip.volume * clip.trackVolume }) *
+              : this.effectiveVolume(clip.category) * clip.volume * clip.trackVolume *
                 audioClipEnvelope(clip, elapsedSeconds),
             captured: Boolean(this.captureDestination),
           })),
@@ -684,6 +749,11 @@ export class AdvSoundManager {
   setMovieSoundVolume(volume: number | undefined | null) {
     const next = Number(volume);
     this.movieSoundVolume = Number.isFinite(next) ? Math.max(0, Math.min(1, next)) : 1;
+    this.exportAudio?.mixer.changeCategory(
+      "Bgm",
+      (entry) =>
+        this.effectiveVolume(entry.sound, "Bgm") * (entry.clip ? entry.clip.volume * entry.clip.trackVolume : 1),
+    );
     this.clipPlayer?.refreshVolumes();
     if (this.bgm) this.applyEntryVolume(this.bgm, 0);
   }
@@ -801,6 +871,7 @@ export class AdvSoundManager {
       this.warmHowls.delete(key);
       try {
         warmed.loop(loop);
+        warmed.rate(1);
         warmed.volume(this.effectiveVolume(sound, category));
       } catch {}
       return warmed;
@@ -831,6 +902,10 @@ export class AdvSoundManager {
   /** Prepare a local encoded source without creating an audio decoder. */
   async prepareSoundSource(sound: AdvSoundDescriptor, signal?: AbortSignal): Promise<void> {
     const canonical = localPlaybackUrl(sound.playableUrl, "audio");
+    if (this.exportAudio) {
+      if (canonical) await this.exportAudio.mixer.prepare(canonical);
+      return;
+    }
     if (canonical) await this.resolveEpisodeAudioSource(canonical, signal);
     if (this.preparationIndex < 0) this.prepareForCommand(this.state.ready ? (this.state.commandIndex ?? 0) : 0);
     this.pumpUpcoming();
@@ -1238,6 +1313,7 @@ export class AdvSoundManager {
    * release the wait without pretending that playback completed normally.
    */
   waitForVoicePlayback(playIds: readonly number[], options: WaitForVoicePlaybackOptions = {}): Promise<boolean> {
+    if (this.exportAudio) return this.exportAudio.mixer.waitForVoices(playIds, options);
     const ids = [...new Set(playIds.map((value) => Math.trunc(Number(value) || 0)).filter((value) => value > 0))];
     if (!ids.length) return Promise.resolve(true);
     if (
@@ -1483,8 +1559,32 @@ export class AdvSoundManager {
     return timer;
   }
 
-  playBgm(sound: AdvSoundDescriptor | null | undefined, fadeSeconds = 0, startTimeSeconds = 0) {
+  playBgm(sound: AdvSoundDescriptor | null | undefined, fadeSeconds = 0, startTimeSeconds = 0, playbackRate = 1) {
     if (!sound?.playableUrl) return null;
+    if (this.exportAudio) {
+      const url = localPlaybackUrl(sound.playableUrl, "audio");
+      const { mixer, bgm } = this.exportAudio;
+      if (
+        bgm?.isPlaying() &&
+        bgm.sound?.playableUrl === sound.playableUrl &&
+        !startTimeSeconds &&
+        bgm.rate === playbackRate
+      ) {
+        mixer.changeGain(bgm, this.effectiveVolume(sound, "Bgm"), fadeSeconds);
+        return bgm;
+      }
+      this.stopBgm(fadeSeconds);
+      return (this.exportAudio.bgm = mixer.play({
+        url,
+        category: "Bgm",
+        sound,
+        gain: this.effectiveVolume(sound, "Bgm"),
+        offset: startTimeSeconds,
+        fade: fadeSeconds,
+        loop: true,
+        rate: playbackRate,
+      }));
+    }
     const label = soundLabel(sound);
     if (this.isLastBgmOrSePlaybackFrame() && this.lastBgmSource === sound.playableUrl) return this.bgm;
     this.lastBgmLabel = label;
@@ -1495,10 +1595,12 @@ export class AdvSoundManager {
       this.bgm.sound = sound;
       this.state.audio.bgm = label;
       this.applyEntryVolume(this.bgm, finiteSeconds(fadeSeconds, 0));
+      this.bgm.howl.rate(playbackRate, this.bgm.howlId || undefined);
       const start = finiteSeconds(startTimeSeconds, 0);
       if (start > 0) {
         try {
-          this.bgm.howl.seek(start, this.bgm.howlId || undefined);
+          const seconds = Number(this.bgm.howl.duration());
+          this.bgm.howl.seek(seconds > 0 ? start % seconds : start, this.bgm.howlId || undefined);
         } catch {}
       }
       return this.bgm;
@@ -1508,13 +1610,15 @@ export class AdvSoundManager {
     const entry = this.createEntry(sound, "Bgm", true);
     if (!entry) return null;
     this.bgm = entry;
+    entry.howl.rate(playbackRate);
     this.state.audio.bgm = entry.label;
     const target = this.effectiveVolume(sound, "Bgm");
     const start = finiteSeconds(startTimeSeconds, 0);
     if (start > 0) {
       entry.howl.once("play", (id: number) => {
         try {
-          entry.howl.seek(start, Number.isFinite(id) ? id : entry.howlId || undefined);
+          const seconds = Number(entry.howl.duration());
+          entry.howl.seek(seconds > 0 ? start % seconds : start, Number.isFinite(id) ? id : entry.howlId || undefined);
         } catch {}
       });
     }
@@ -1528,13 +1632,19 @@ export class AdvSoundManager {
     }
     if (start > 0) {
       try {
-        entry.howl.seek(start, entry.howlId || undefined);
+        const seconds = Number(entry.howl.duration());
+        entry.howl.seek(seconds > 0 ? start % seconds : start, entry.howlId || undefined);
       } catch {}
     }
     return entry;
   }
 
   stopBgm(fadeSeconds = 0) {
+    if (this.exportAudio) {
+      if (this.exportAudio.bgm) this.exportAudio.mixer.stop(this.exportAudio.bgm, fadeSeconds);
+      this.exportAudio.bgm = undefined;
+      return;
+    }
     const entry = this.bgm;
     this.bgm = null;
     this.state.audio.bgm = "";
@@ -1543,6 +1653,29 @@ export class AdvSoundManager {
 
   playSe(sound: AdvSoundDescriptor | null | undefined, options: SePlayOptions = {}) {
     const delaySeconds = finiteSeconds(options.delaySeconds, 0);
+    if (this.exportAudio) {
+      const { clock, mixer } = this.exportAudio;
+      if (delaySeconds > 0) {
+        clock.schedule(delaySeconds, () => this.playSe(sound, { ...options, delaySeconds: 0 }));
+        return null;
+      }
+      if (!sound?.playableUrl) return null;
+      const entry = mixer.play({
+        url: localPlaybackUrl(sound.playableUrl, "audio"),
+        category: "Se",
+        sound,
+        gain: this.effectiveVolume(sound, "Se"),
+        loop: sound.isLoop,
+        offset: options.offsetSeconds,
+        rate: options.playbackRate,
+      });
+      this.scheduleSoundAutoStop(
+        entry,
+        finiteSeconds(options.durationSeconds, 0),
+        finiteSeconds(options.fadeOutSeconds, 0),
+      );
+      return entry;
+    }
     if (delaySeconds > 0) {
       this.scheduleTimer(delaySeconds, () => this.playSe(sound, { ...options, delaySeconds: 0 }));
       return null;
@@ -1564,7 +1697,9 @@ export class AdvSoundManager {
         if (!this.returnEntryToWarmPool(entry)) entry.howl.unload();
       } catch {}
     });
-    entry.howl.play();
+    if (options.playbackRate !== undefined) entry.howl.rate(options.playbackRate);
+    const id = entry.howl.play();
+    if (options.offsetSeconds) entry.howl.seek(options.offsetSeconds, id);
 
     const durationSeconds = finiteSeconds(options.durationSeconds, 0);
     if (durationSeconds > 0)
@@ -1572,7 +1707,23 @@ export class AdvSoundManager {
     return entry;
   }
 
-  scheduleSoundAutoStop(entry: ManagedHowl, durationSeconds: number, fadeOutSeconds = 0, onStop?: () => void) {
+  scheduleSoundAutoStop(
+    entry: ManagedHowl | OfflineStageSound,
+    durationSeconds: number,
+    fadeOutSeconds = 0,
+    onStop?: () => void,
+  ) {
+    if ("offline" in entry) {
+      if (!this.exportAudio) return;
+      const { clock, mixer } = this.exportAudio;
+      if (entry.autoStop !== undefined) clock.cancel(entry.autoStop);
+      if (durationSeconds > 0)
+        entry.autoStop = clock.schedule(durationSeconds, () => {
+          mixer.stop(entry, fadeOutSeconds);
+          onStop?.();
+        });
+      return;
+    }
     if (entry.stopTimer) clearTimeout(entry.stopTimer);
     const duration = finiteSeconds(durationSeconds, 0);
     if (duration <= 0) {
@@ -1588,6 +1739,15 @@ export class AdvSoundManager {
 
   stopSe(soundOrId?: number | AdvSoundDescriptor | null, fadeSeconds = 0, delaySeconds = 0) {
     const delay = finiteSeconds(delaySeconds, 0);
+    if (this.exportAudio) {
+      if (delay > 0) this.exportAudio.clock.schedule(delay, () => this.stopSe(soundOrId, fadeSeconds));
+      else
+        this.exportAudio.mixer.stopSoundEffect(
+          typeof soundOrId === "number" ? Math.trunc(soundOrId) : soundId(soundOrId),
+          fadeSeconds,
+        );
+      return;
+    }
     if (delay > 0) {
       this.scheduleTimer(delay, () => this.stopSe(soundOrId, fadeSeconds, 0));
       return;
@@ -1597,7 +1757,20 @@ export class AdvSoundManager {
     for (const entry of entries) this.stopEntry(entry, fadeSeconds);
   }
 
-  playVoice(sound: AdvSoundDescriptor | null | undefined) {
+  playVoice(sound: AdvSoundDescriptor | null | undefined, window?: NativeSoundWindow) {
+    if (this.exportAudio) {
+      if (!sound?.playableUrl) return null;
+      const entry = this.exportAudio.mixer.play({
+        url: localPlaybackUrl(sound.playableUrl, "audio"),
+        category: "Voice",
+        sound,
+        gain: this.effectiveVolume(sound, "Voice"),
+        offset: window?.offsetSeconds,
+        rate: window?.playbackRate,
+      });
+      if (window?.durationSeconds) this.scheduleSoundAutoStop(entry, window.durationSeconds);
+      return entry;
+    }
     const entry = this.createEntry(sound, "Voice", false);
     if (!entry) return null;
     this.addVoiceEntry(entry);
@@ -1632,8 +1805,11 @@ export class AdvSoundManager {
       entry.analyzer = attachVoiceAnalyzer(entry);
     });
     try {
+      if (window) entry.howl.rate(window.playbackRate);
       const howlId = entry.howl.play();
       entry.howlId = Number.isFinite(howlId) ? howlId : 0;
+      if (window?.offsetSeconds) entry.howl.seek(window.offsetSeconds, entry.howlId || undefined);
+      if (window?.durationSeconds) this.scheduleSoundAutoStop(entry, window.durationSeconds);
       markPlaybackStarted();
       entry.analyzer = attachVoiceAnalyzer(entry);
     } catch {
@@ -1644,6 +1820,10 @@ export class AdvSoundManager {
   }
 
   stopVoices() {
+    if (this.exportAudio) {
+      this.exportAudio.mixer.stopCategory("Voice");
+      return;
+    }
     for (const entry of [...this.voices]) this.stopEntry(entry, 0);
     this.voices.clear();
     this.state.audio.voice = "";
@@ -1655,6 +1835,10 @@ export class AdvSoundManager {
   stopVoicePlaybacks(playIds: readonly number[]) {
     const ids = new Set(playIds.map((value) => Math.trunc(Number(value) || 0)).filter((value) => value > 0));
     if (!ids.size) return;
+    if (this.exportAudio) {
+      this.exportAudio.mixer.stopCategory("Voice", 0, ids);
+      return;
+    }
     for (const entry of [...this.voices]) {
       if (ids.has(entry.playId)) this.stopEntry(entry, 0);
     }
@@ -1688,6 +1872,15 @@ export class AdvSoundManager {
     const previous = this.categoryVolumes.get(category) ?? 1;
     const value = clampVolume(nextVolume, previous);
     this.categoryVolumes.set(category, value);
+    if (this.exportAudio) {
+      this.exportAudio.mixer.changeCategory(
+        category,
+        (entry) =>
+          this.effectiveVolume(entry.sound, category) * (entry.clip ? entry.clip.volume * entry.clip.trackVolume : 1),
+        fadeSeconds,
+      );
+      return;
+    }
     this.clipPlayer?.refreshVolumes();
     if (category === "Bgm" && value !== previous) this.retargetBgmFades(previous, value);
     const entries: ManagedHowl[] = [];
@@ -1696,6 +1889,10 @@ export class AdvSoundManager {
     if (category === "Voice") entries.push(...this.voices);
     const fade = finiteSeconds(fadeSeconds, 0);
     for (const entry of entries) this.applyEntryVolume(entry, fade);
+  }
+
+  getCategoryVolume(category: "Bgm" | "Voice"): number {
+    return this.categoryVolumes.get(category) ?? 1;
   }
 
   /** Browser/user gain is intentionally outside authored SoundVolume state. */

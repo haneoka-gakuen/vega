@@ -23,6 +23,9 @@ import type { AdvCommand, AdvStory } from "../types/AdvRuntime";
 import type { VegaPlayerHandle } from "../web-entry";
 import { VegaEngine } from "../web-entry";
 import { StageRecording } from "./StageRecording";
+import { FixedStageRecording } from "./FixedStageRecording";
+import { StageTimelineSampler } from "./StageTimelineSampler";
+import { addStageCaptionToImage, hasStageDialogue } from "./SubtitleOverlay";
 
 const CAPABILITIES: VegaPreviewCapabilities = Object.freeze({
   commands: [
@@ -43,6 +46,8 @@ const CAPABILITIES: VegaPreviewCapabilities = Object.freeze({
     "debug.variables.set",
     "stage.snapshot",
     "stage.capture",
+    "stage.timeline-sample",
+    "stage.timeline-clear",
     "audio.snapshot",
     "stage.recording.start",
     "stage.recording.stop",
@@ -111,7 +116,11 @@ export class VegaPreviewRuntime {
   private disposal: Promise<void> | null = null;
   private acceptingRequests = true;
   private disposed = false;
-  private recording?: StageRecording;
+  private recording?: StageRecording | FixedStageRecording;
+  private timelineSampler?: { key: string; sampler: StageTimelineSampler };
+  private timelineFrame?: HTMLImageElement;
+  private timelineGeneration = 0;
+  private activeTimelineSample?: AbortController;
 
   constructor(options: VegaPreviewRuntimeOptions) {
     this.identity = options.identity;
@@ -156,6 +165,7 @@ export class VegaPreviewRuntime {
       await this.startPromise?.catch(() => undefined);
       await pending.catch(() => undefined);
       await this.recording?.dispose();
+      await this.disposeTimelineSampler();
       await this.player?.dispose();
       this.player = null;
       this.syncedStory = null;
@@ -189,17 +199,37 @@ export class VegaPreviewRuntime {
       this.latestSceneRevision = request.revision;
       this.activeOperation?.abort();
     }
-    if (this.replacesPlayer(request)) {
+    const replacing = this.replacesPlayer(request);
+    if (
+      replacing ||
+      [
+        "stage.timeline-clear",
+        "runtime.play",
+        "debug.continue",
+        "debug.step",
+        "editor.run-snippet",
+        "stage.recording.start",
+      ].includes(request.command.name)
+    ) {
+      this.timelineGeneration++;
+      this.activeTimelineSample?.abort();
+      this.clearTimelineFrame();
+    }
+    if (replacing) {
       this.stateEventGeneration += 1;
       this.replacingRevision = request.revision;
       this.player?.player.pause();
     }
+    if (request.command.name === "stage.recording.release" && this.recording instanceof FixedStageRecording) {
+      this.recording.cancel();
+    }
     if (request.command.name === "runtime.dispose") this.acceptingRequests = false;
-    const operation = this.operationTail.then(() => this.execute(request));
+    const timelineGeneration = this.timelineGeneration;
+    const operation = this.operationTail.then(() => this.execute(request, timelineGeneration));
     this.operationTail = operation.catch(() => undefined);
   }
 
-  private async execute(request: VegaPreviewRequest): Promise<void> {
+  private async execute(request: VegaPreviewRequest, timelineGeneration: number): Promise<void> {
     if (request.revision < this.latestSceneRevision) {
       this.respond(request, { status: "superseded" });
       return;
@@ -218,6 +248,11 @@ export class VegaPreviewRuntime {
             operation.signal,
           );
           if (!loaded) return this.respond(request, { status: "superseded" });
+          if (request.command.choiceRoute) {
+            const player = this.requirePlayer().player;
+            player.setPreviewChoiceRoute(request.command.choiceRoute);
+            if (!player.Model.isAutoPlay) player.toggleAuto();
+          }
           break;
         }
         case "editor.sync-scene": {
@@ -257,6 +292,7 @@ export class VegaPreviewRuntime {
           break;
         }
         case "editor.run-snippet": {
+          await this.disposeTimelineSampler();
           const commands = requireSnippetCommands(request.command.commands);
           const handle = this.requirePlayer();
           handle.shell?.enterGame();
@@ -267,6 +303,7 @@ export class VegaPreviewRuntime {
         }
         case "runtime.play":
         case "debug.continue":
+          await this.disposeTimelineSampler();
           this.continuePlayback();
           result = { commandIndex: this.requirePlayer().player.currentProgressIndex() };
           break;
@@ -275,6 +312,7 @@ export class VegaPreviewRuntime {
           result = { commandIndex: this.requirePlayer().player.currentProgressIndex() };
           break;
         case "debug.step":
+          await this.disposeTimelineSampler();
           this.stepPlayback();
           result = { commandIndex: this.requirePlayer().player.currentProgressIndex() };
           break;
@@ -301,16 +339,60 @@ export class VegaPreviewRuntime {
           const player = this.requirePlayer().player,
             scene = player.SceneRoot,
             viewport = player.state.viewport;
-          const height =
-            viewport.width > 0 && viewport.height > 0 ? Math.round((512 * viewport.height) / viewport.width) : 288;
-          const image = await scene.capturePreview?.({ width: 512, height, format: "image/webp", quality: 0.85 });
+          const aspect = viewport.width > 0 && viewport.height > 0 ? viewport.width / viewport.height : 16 / 9;
+          const height = request.command.height ?? Math.round(512 / aspect);
+          const format = request.command.format ?? "image/webp";
+          const image = await scene.capturePreview?.({
+            width: request.command.height ? Math.round(height * aspect) : 512,
+            height,
+            format,
+            quality: request.command.height ? 0.92 : 0.85,
+            ...(request.command.height ? { fullResolution: true } : {}),
+          });
           if (!image) throw new Error("Stage capture is unavailable");
-          result = { image };
+          const includeDialogue = request.command.burnSubtitles && hasStageDialogue(player);
+          result = { image: includeDialogue ? await addStageCaptionToImage(image, format, player) : image };
+          break;
+        }
+        case "stage.timeline-sample": {
+          if (timelineGeneration !== this.timelineGeneration) return this.respond(request, { status: "superseded" });
+          if (this.recording) throw new Error("The stage is busy");
+          this.activeTimelineSample = operation;
+          const { commandIndex, seconds, source } = request.command;
+          const image = await this.sampleTimeline(commandIndex, seconds, operation.signal, source);
+          operation.signal.throwIfAborted();
+          this.presentTimelineFrame(image, seconds);
+          result = { seconds };
+          break;
+        }
+        case "stage.timeline-clear": {
+          await this.disposeTimelineSampler();
+          result = {};
           break;
         }
         case "stage.recording.start": {
           if (this.recording) throw new Error("Video recording already exists");
-          this.recording = new StageRecording(this.requirePlayer().player, request.command);
+          await this.disposeTimelineSampler();
+          const player = this.requirePlayer().player;
+          const recording = request.command.frameByFrame
+            ? await FixedStageRecording.start(player, request.command, (frame, seconds, phase) => {
+                if (this.disposed || this.player?.player !== player) return;
+                this.port.postMessage({
+                  protocol: VEGA_PREVIEW_PROTOCOL,
+                  kind: "event",
+                  event: "stage.recording.progress",
+                  identity: this.identity,
+                  frame,
+                  seconds,
+                  phase,
+                });
+              })
+            : await StageRecording.start(player, request.command);
+          if (operation.signal.aborted || this.disposed || request.revision < this.latestSceneRevision) {
+            await recording.dispose();
+            return this.respond(request, { status: "superseded" });
+          }
+          this.recording = recording;
           result = { recording: true };
           break;
         }
@@ -370,6 +452,7 @@ export class VegaPreviewRuntime {
       }
     } finally {
       if (this.activeOperation === operation) this.activeOperation = null;
+      if (this.activeTimelineSample === operation) this.activeTimelineSample = undefined;
       if (this.replacesPlayer(request) && this.replacingRevision === request.revision) {
         this.replacingRevision = null;
         this.scheduleStateEvent();
@@ -404,6 +487,7 @@ export class VegaPreviewRuntime {
     if (!story || typeof story !== "object" || Array.isArray(story)) {
       throw new TypeError("Preview story must be an object");
     }
+    await this.disposeTimelineSampler();
     const seekDecisions = story === this.syncedStory && this.player ? this.player.player.exportSeekDecisions() : null;
     if (this.recording) await this.recording.stop();
     const next = await this.engine.createPlayer({
@@ -456,8 +540,102 @@ export class VegaPreviewRuntime {
     return true;
   }
 
+  private async disposeTimelineSampler(preserveFrame = false): Promise<void> {
+    if (!preserveFrame) this.clearTimelineFrame();
+    const current = this.timelineSampler;
+    this.timelineSampler = undefined;
+    await current?.sampler.dispose();
+  }
+
+  private clearTimelineFrame(): void {
+    this.timelineFrame?.remove();
+    this.timelineFrame = undefined;
+  }
+
+  private presentTimelineFrame(image: string, seconds: number): void {
+    if (!this.timelineFrame) {
+      const frame = this.mount.ownerDocument.createElement("img");
+      frame.alt = "";
+      frame.className = "vega-timeline-frame";
+      Object.assign(frame.style, {
+        position: "absolute",
+        inset: "0",
+        width: "100%",
+        height: "100%",
+        objectFit: "contain",
+        zIndex: "16",
+        pointerEvents: "none",
+        background: "black",
+      });
+      this.mount.appendChild(frame);
+      this.timelineFrame = frame;
+    }
+    this.timelineFrame.dataset.seconds = String(seconds);
+    this.timelineFrame.src = image;
+  }
+
+  private async sampleTimeline(
+    commandIndex: number,
+    seconds: number,
+    signal: AbortSignal,
+    override?: { id: string; story: VegaJsonValue },
+  ): Promise<string> {
+    const source = this.requirePlayer().player;
+    const story = (override?.story as unknown as AdvStory | undefined) ?? this.syncedStory;
+    if (!story || (!override && !source.story.commands?.[commandIndex]?.commandGroup))
+      throw new Error("Select a timeline to preview");
+    const decisions = source.exportSeekDecisions();
+    const key = JSON.stringify([this.sceneRevision, override?.id, commandIndex, [...decisions]]);
+    const current = this.timelineSampler;
+    if (current?.key === key && current.sampler.seconds <= seconds) return current.sampler.sample(seconds, signal);
+    await this.disposeTimelineSampler(true);
+    signal.throwIfAborted();
+    const mount = this.mount.ownerDocument.createElement("div");
+    mount.setAttribute("aria-hidden", "true");
+    const viewport = source.state.viewport;
+    const aspect = viewport.width > 0 && viewport.height > 0 ? viewport.width / viewport.height : 16 / 9;
+    const width = 640,
+      height = Math.max(160, Math.min(640, Math.round(width / aspect)));
+    Object.assign(mount.style, {
+      position: "fixed",
+      left: "-200vw",
+      top: "0",
+      width: `${width}px`,
+      height: `${height}px`,
+      pointerEvents: "none",
+    });
+    this.mount.ownerDocument.body.appendChild(mount);
+    let sampler: StageTimelineSampler | undefined;
+    try {
+      const player = await this.engine.createPlayer({
+        mount,
+        story,
+        ...(this.theme === undefined ? {} : { theme: this.theme }),
+        ...(this.renderBackend ? { renderBackend: this.renderBackend } : {}),
+        externalPlaybackControls: true,
+      });
+      sampler = new StageTimelineSampler(player, mount);
+      signal.throwIfAborted();
+      player.shell?.enterGame();
+      player.player.importSeekDecisions(decisions);
+      await player.player.replayFromStartTo(commandIndex);
+      signal.throwIfAborted();
+      const command = player.player.story.commands?.[commandIndex];
+      if (!command?.commandGroup) throw new Error("Select a timeline to preview");
+      sampler.start(command, width, height);
+      const image = await sampler.sample(seconds, signal);
+      this.timelineSampler = { key, sampler };
+      return image;
+    } catch (error) {
+      if (sampler) await sampler.dispose();
+      else mount.remove();
+      throw error;
+    }
+  }
+
   private observeExecutionBoundary(handle: VegaPlayerHandle, boundary: AdvPlayerExecutionBoundary): void {
     if (this.player !== handle || this.disposed) return;
+    if (this.recording instanceof FixedStageRecording) return;
     if (boundary.phase === "before") {
       if (this.skipBreakpointOnce === boundary.commandIndex) {
         this.skipBreakpointOnce = null;
@@ -515,7 +693,7 @@ export class VegaPreviewRuntime {
 
   private startPlayback(handle: VegaPlayerHandle): void {
     if (handle.player.state.playing) return;
-    const playback = handle.player.play();
+    const playback = this.recording instanceof FixedStageRecording ? this.recording.play() : handle.player.play();
     this.playTask = playback;
     void playback.then(
       () => {
