@@ -2473,7 +2473,7 @@ export class AdvPlayer {
       clearSubtitlesState(this.state.subtitles);
       if (this.SceneRoot.videoClock) {
         const clock = this.SceneRoot.videoClock();
-        if (!clock || clock.failed) {
+        if ((!clock || clock.failed) && !this.runtime.allowMissingMedia) {
           this.clipPlaybackError = new Error(clock?.failed ? "Clip playback failed" : "Clip was detached");
           this.state.error = this.clipPlaybackError.message;
         }
@@ -2579,6 +2579,11 @@ export class AdvPlayer {
         this.Session.VideoPlaying = false;
         this.Session.FlowParameters.setClipVideoPlaying(false);
         clearSubtitlesState(this.state.subtitles);
+        if (this.Loader.maySkipMedia(error, controller.signal)) {
+          this.Session.FlowParameters.setClipSkip(false);
+          console.warn("[Vega] Skipping unavailable clip", error);
+          return;
+        }
         this.clipPlaybackError = error instanceof Error ? error : new Error(String(error));
         this.state.error = this.clipPlaybackError.message;
       }
@@ -3713,6 +3718,7 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Stage, async (cmd, ctx, signal) => {
+      if (ctx.Loader.isMissingMedia(cmd.background?.url)) return;
       const duration = commandDuration(ctx, cmd, 0);
       const applyStageState = (): void => {
         ctx.Session.setCurrentStage(cmd.background?.stage || null);
@@ -3739,6 +3745,12 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Frame, async (cmd, ctx, signal) => {
+      if (
+        ctx.Loader.isMissingMedia(cmd.frame?.texture) ||
+        Object.values(cmd.frame?.textures ?? {}).some((url) => ctx.Loader.isMissingMedia(String(url))) ||
+        cmd.frame?.edges?.some((edge) => ctx.Loader.isMissingMedia(edge?.texture)) ||
+        cmd.frame?.elements?.some((element) => ctx.Loader.isMissingMedia(element?.texture))
+      ) return;
       const span = cmd.nativeTimelineSpan;
       const window = cmd.timelineSourceWindow;
       const sampleFrame = (options: Parameters<typeof tween>[0]) =>
@@ -3963,13 +3975,17 @@ export class AdvPlayer {
             targetAssetIndex: Number(cmd.targetAssetIndex) || 0,
           };
         }
+        if (ctx.Loader.isMissingCharacter(liveCmd.characterModel)) return;
         ctx.Session.placeCharacter(target, (cmd.positionType as number) || 5);
         const placement = ctx.SceneRoot.placeCharacter(
           { ...liveCmd, targetName: target, targets: [{ target }] },
           (cmd.positionType as number) || 5,
           duration,
           cmd.noWait,
-        );
+        ).catch((error) => {
+          if (!ctx.Loader.maySkipMedia(error, signal || this.abortController.signal)) throw error;
+          console.warn("[Vega] Skipping unavailable character", error);
+        });
         // placeCharacter synchronously selects the controller identity before
         // its first resource await. Queue the authored layout presentation now
         // so a newly loaded model has it on its first visible frame.
@@ -4172,7 +4188,9 @@ export class AdvPlayer {
         // Preserve source indices: voice.characterId and voiceRefs are parallel
         // arrays, so compacting one failed Howl shifts every later mouth target.
         const voiceEntriesByIndex = playVoiceAudio
-          ? voices.map((voice) => ctx.SoundManager.playVoice(voice, cmd.timelineSourceWindow))
+          ? voices.map((voice) =>
+            ctx.Loader.isMissingMedia(voice.playableUrl) ? undefined : ctx.SoundManager.playVoice(voice, cmd.timelineSourceWindow),
+          )
           : [];
         const voiceEntries = voiceEntriesByIndex.filter(isPresent);
         const voicePlayIds = voiceEntries.map((entry) => entry.playId);
@@ -4302,7 +4320,9 @@ export class AdvPlayer {
         if (ctx.Model.shouldShortCut || commandSignal.aborted) return;
 
         const voices = cmd.voices || [];
-        const voiceEntriesByIndex = voices.map((voice) => ctx.SoundManager.playVoice(voice, cmd.timelineSourceWindow));
+        const voiceEntriesByIndex = voices.map((voice) =>
+            ctx.Loader.isMissingMedia(voice.playableUrl) ? undefined : ctx.SoundManager.playVoice(voice, cmd.timelineSourceWindow),
+          );
         const voiceEntries = voiceEntriesByIndex.filter(isPresent);
         const voicePlayIds = voiceEntries.map((entry) => entry.playId);
         const configuredTargets = Array.isArray(cmd.lipSyncTargets)
@@ -4400,12 +4420,13 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Bgm, async (cmd, ctx, signal) => {
+      const bgm = ctx.Loader.isMissingMedia(cmd.bgm?.playableUrl) ? null : cmd.bgm;
       const fade = ctx.Model.shouldShortCut ? 0 : soundFadeSeconds(cmd);
       const window = cmd.timelineSourceWindow;
       const offset = finite(param(cmd, 1), 0) + (window?.offsetSeconds ?? 0);
       if (this.seekIndexBuilding && this.seekSoundProjection) {
-        if (cmd.bgm) {
-          const sound = clonePlain(cmd.bgm);
+        if (bgm) {
+          const sound = clonePlain(bgm);
           const label = sound.cueName || sound.cueSheetName || String(sound.soundId ?? sound.id ?? "");
           this.seekSoundProjection.bgm = sound;
           this.seekSoundProjection.bgmPositionSeconds = Math.max(0, offset);
@@ -4426,10 +4447,10 @@ export class AdvPlayer {
         }
         return;
       }
-      if (cmd.bgm) {
-        await ctx.SoundManager.prepareSoundSource(cmd.bgm, signal);
+      if (bgm) {
+        await ctx.SoundManager.prepareSoundSource(bgm, signal);
         if (signal?.aborted) return;
-        const entry = ctx.SoundManager.playBgm(cmd.bgm, window?.offsetSeconds ? 0 : fade, offset, window?.playbackRate);
+        const entry = ctx.SoundManager.playBgm(bgm, window?.offsetSeconds ? 0 : fade, offset, window?.playbackRate);
         const playId = entry?.playId || 0;
         ctx.Session.CurrentBgmPlayId = playId;
         if (entry) {
@@ -4449,6 +4470,7 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Se, (cmd, ctx, signal) => {
+      if (ctx.Loader.isMissingMedia(cmd.se?.playableUrl)) return;
       if (ctx.Model.shouldShortCut) return;
       const rawSe = cmd.raw?.SeID ?? cmd.seId;
       const targetSe =
@@ -4531,7 +4553,12 @@ export class AdvPlayer {
       const duration = commandDuration(ctx, cmd, 0);
       const transitionGeneration = ++this.coverTransitionGeneration;
       const rule = cmd.ruleTransition || (ctx.runtime.defaultRuleTransition as AdvRuleTransitionEntry | undefined);
-      if (rule && (rule.texture || rule.maskTexture || rule.gradient != null)) {
+      if (
+        rule &&
+        (rule.texture || rule.maskTexture || rule.gradient != null) &&
+        !ctx.Loader.isMissingMedia(rule.texture) &&
+        !ctx.Loader.isMissingMedia(rule.maskTexture)
+      ) {
         await ctx.SceneRoot.runRuleTransition(rule, color, duration, true);
         return;
       }
@@ -4571,7 +4598,12 @@ export class AdvPlayer {
       const transitionGeneration = ++this.coverTransitionGeneration;
       const rule = cmd.ruleTransition || (ctx.runtime.defaultRuleTransition as AdvRuleTransitionEntry | undefined);
       await this.runCommandTask(cmd, async () => {
-        if (rule && (rule.texture || rule.maskTexture || rule.gradient != null)) {
+        if (
+        rule &&
+        (rule.texture || rule.maskTexture || rule.gradient != null) &&
+        !ctx.Loader.isMissingMedia(rule.texture) &&
+        !ctx.Loader.isMissingMedia(rule.maskTexture)
+      ) {
           await ctx.SceneRoot.runRuleTransition(rule, color, duration, false);
           return;
         }
@@ -5065,13 +5097,17 @@ export class AdvPlayer {
     });
 
     register(ADV_COMMAND.Still, async (cmd, ctx) => {
+      if (ctx.Loader.isMissingMedia(cmd.still?.url)) return;
       const duration = ctx.Model.calcDuration(finite(param(cmd, 0), 0), 0);
       const rawStillAlpha = finite(param(cmd, 1), 0);
       const stillAlpha = rawStillAlpha > 0 ? clamp01(rawStillAlpha) : 1;
       const animationIndex = Math.max(0, Math.trunc(finite(param(cmd, 2), 0)));
       const overlayAlpha = clamp01(param(cmd, 3));
       await this.runCommandTask(cmd, () =>
-        ctx.SceneRoot.runStillCommand(cmd.still, stillAlpha, overlayAlpha, animationIndex, duration),
+        ctx.SceneRoot.runStillCommand(cmd.still, stillAlpha, overlayAlpha, animationIndex, duration).catch((error) => {
+          if (!ctx.Loader.maySkipMedia(error, this.abortController.signal)) throw error;
+          console.warn("[Vega] Skipping unavailable still", error);
+        }),
       );
     });
 
@@ -5172,6 +5208,7 @@ export class AdvPlayer {
           ctx.Session.VideoPlaying = false;
           ctx.Session.FlowParameters.setClipVideoPlaying(false);
           const error = new Error(`Clip ${result} before subtitle time ${until.toFixed(3)}s`);
+          if (ctx.Loader.maySkipMedia(error, pollSignal)) return;
           this.clipPlaybackError = error;
           ctx.state.error = error.message;
           throw error;
@@ -5323,7 +5360,7 @@ export class AdvPlayer {
         (!wasVisible || ctx.state.chat.windowAssetName !== windowAssetName || closing)
       ) {
         const sound = chatSound(cmd.targetChatID || 0, "window");
-        if (sound) ctx.SoundManager.playSe(sound);
+        if (sound && !ctx.Loader.isMissingMedia(sound.playableUrl)) ctx.SoundManager.playSe(sound);
       }
       const finishTransition = async (task: Promise<void>): Promise<void> => {
         // AdvChatWindowCommand.Execute.MoveNext: authored IsNoWait forgets
@@ -5429,7 +5466,9 @@ export class AdvPlayer {
         const voiceEntriesByIndex =
           ctx.Model.shouldShortCut || cmd.timelineAudioMuted
             ? []
-            : soundInfos.map((voice) => ctx.SoundManager.playVoice(voice, cmd.timelineSourceWindow));
+            : soundInfos.map((voice) =>
+                ctx.Loader.isMissingMedia(voice.playableUrl) ? undefined : ctx.SoundManager.playVoice(voice, cmd.timelineSourceWindow),
+              );
         const voiceEntries = voiceEntriesByIndex.filter(isPresent);
         if (!truthy(cmd.ignoreLipSync) && Math.abs(ctx.Model.getCurrentSpeedRate() - 1) < 0.001) {
           cmd.lipSyncTargets?.forEach((target, index) => {
@@ -5458,7 +5497,7 @@ export class AdvPlayer {
         });
         if (!ctx.Model.shouldShortCut && !cmd.timelineAudioMuted) {
           const sound = chatSound(ctx.state.chat.chatId, "message", cmd.chatSound);
-          if (sound) ctx.SoundManager.playSe(sound);
+          if (sound && !ctx.Loader.isMissingMedia(sound.playableUrl)) ctx.SoundManager.playSe(sound);
         }
         const advanceAfter = this.timedAdvanceSeconds(cmd);
         if (advanceAfter !== undefined) {
@@ -5561,7 +5600,7 @@ export class AdvPlayer {
         });
         if (!ctx.Model.shouldShortCut && !cmd.timelineAudioMuted) {
           const sound = chatSound(ctx.state.chat.chatId, "message", cmd.chatSound);
-          if (sound) ctx.SoundManager.playSe(sound);
+          if (sound && !ctx.Loader.isMissingMedia(sound.playableUrl)) ctx.SoundManager.playSe(sound);
         }
         if (!cmd.noWait) await this.waitForChatRead(0, 0, signal || this.abortController.signal);
       });
@@ -5570,7 +5609,7 @@ export class AdvPlayer {
     register(ADV_COMMAND.Movie, async (cmd, ctx, signal) => {
       const movie = cmd.video || cmd.movie;
       const src = localPlaybackUrl(movie?.playableUrl || movie?.src || movie?.url, "video");
-      if (!src) return;
+      if (!src || ctx.Loader.isMissingMedia(src)) return;
       if (ctx.Model.shouldShortCut) {
         await ctx.SceneRoot.hideVideo(0);
         ctx.Session.VideoPlaying = false;
@@ -5613,6 +5652,10 @@ export class AdvPlayer {
           );
         }
         await ctx.SceneRoot.hideVideo(fadeOut);
+      } catch (error) {
+        if (!ctx.Loader.maySkipMedia(error, signal || this.abortController.signal)) throw error;
+        console.warn("[Vega] Skipping unavailable movie", error);
+        await ctx.SceneRoot.hideVideo(0);
       } finally {
         if (!cmd.timelineAudioMuted) {
           ctx.Session.setMovieSoundVolume(1);
@@ -5624,26 +5667,31 @@ export class AdvPlayer {
     register(ADV_COMMAND.Clip, async (cmd, ctx, signal) => {
       const clip = cmd.video || cmd.clip;
       const src = localPlaybackUrl(clip?.playableUrl || clip?.src || clip?.url, "video");
+      const missing = ctx.Loader.isMissingMedia(src) || (!src && ctx.runtime.allowMissingMedia === true);
       const fade = ctx.Model.calcDuration(finite(param(cmd, 0), 0), 0);
       const hasVideoId = hasAuthoredVideoId(cmd, src);
       const window = cmd.timelineSourceWindow;
       if (window && src && window.durationSeconds > 0 && !ctx.Model.shouldShortCut) {
+        if (missing) return;
         const videoInfo = { ...clip, playableUrl: src, src, timelineAudioMuted: cmd.timelineAudioMuted };
         const alpha = clamp01(optionalFinite(param(cmd, 1), 1), 1);
         const speed = ctx.Model.getCurrentSpeedRate() * window.playbackRate;
-        await ctx.SceneRoot.showVideo(
-          videoInfo,
-          window.offsetSeconds > 0 ? 0 : fade,
-          window.offsetSeconds,
-          speed,
-          signal,
-          alpha,
-        );
         try {
+          await ctx.SceneRoot.showVideo(
+            videoInfo,
+            window.offsetSeconds > 0 ? 0 : fade,
+            window.offsetSeconds,
+            speed,
+            signal,
+            alpha,
+          );
           await this.delayWithSpeedAdjustment(
             ctx.Model.calcDuration(window.durationSeconds),
             signal || this.abortController.signal,
           );
+        } catch (error) {
+          if (!ctx.Loader.maySkipMedia(error, signal || this.abortController.signal)) throw error;
+          console.warn("[Vega] Skipping unavailable timeline clip", error);
         } finally {
           if (!signal?.aborted) await ctx.SceneRoot.hideVideo(0);
         }
@@ -5661,7 +5709,7 @@ export class AdvPlayer {
         // Keep the logical clip so a boundary inside it restores the video.
         // As in live playback, a Clip row while one is active stops it.
         ctx.Session.ActiveClip =
-          hasVideoId && src && !ctx.Session.ActiveClip
+          hasVideoId && src && !missing && !ctx.Session.ActiveClip
             ? {
                 video: clip ? { ...clip, playableUrl: src, src } : src,
                 alpha: clamp01(optionalFinite(param(cmd, 1), 1), 1),
@@ -5673,6 +5721,7 @@ export class AdvPlayer {
       }
 
       if (hasVideoId && !ctx.Session.VideoPlaying) {
+        if (missing) return;
         if (!src) throw new Error(`ADV clip video ${String(cmd.videoId)} has no resolved local asset`);
         const alpha = clamp01(optionalFinite(param(cmd, 1), 1), 1);
         const videoInfo =

@@ -176,6 +176,8 @@ export interface AdvRuntimeConfig {
   lowTargetFrameRate: number;
   /** Phase 1 (blocking boot) preload worker count. Served over HTTP/2, so 8 is safe. */
   preloadConcurrency: number;
+  /** Continue rendering the narrative when individual media resources cannot be prepared. */
+  allowMissingMedia?: boolean;
   preloadAheadCommands: number;
   preloadBehindCommands: number;
   preloadBackgroundConcurrency: number;

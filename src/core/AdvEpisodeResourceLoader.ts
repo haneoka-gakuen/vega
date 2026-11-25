@@ -139,6 +139,7 @@ type PreloadTask = {
   label: string;
   index: number;
   run: () => Promise<unknown>;
+  markUnavailable?: () => void;
 };
 
 interface CharacterAnimationUsage {
@@ -180,6 +181,9 @@ export class AdvEpisodeResourceLoader {
   private completedTaskKeys: Set<string>;
   private scheduledTaskKeys: Set<string>;
   private readonly recoveryTaskKeys = new Set<string>();
+  private allowMissingMedia = false;
+  private readonly missingMedia = new Set<string>();
+  private missingCharacters = new WeakSet<AdvCharacterModelEntry>();
   private preloadSignal?: AbortSignal;
   private preloadController: AbortController | null;
   private preloadSourceSignal?: AbortSignal;
@@ -284,6 +288,9 @@ export class AdvEpisodeResourceLoader {
     this.preloadSignal = signal;
     const providerSignal = signal;
     assertNestedCanonicalResourceUrls(story);
+    this.allowMissingMedia = story?.runtime?.allowMissingMedia === true;
+    this.missingMedia.clear();
+    this.missingCharacters = new WeakSet();
     const commands = story?.commands || [];
     const animationUsage = collectReferencedCharacterAnimations(commands, story?.runtime?.targetNameSplitKey);
     const supportsRenderReadyCharacters = typeof this.sceneRoot.preloadCharacter === "function";
@@ -563,6 +570,7 @@ export class AdvEpisodeResourceLoader {
         key: `file:${url}`,
         label,
         index: firstCmdIndex.get(url) ?? 0,
+        markUnavailable: () => this.missingMedia.add(url),
         run: async () => {
           await this.retainEpisodeResource(url, providerSignal);
           for (const { sound } of audioRequests.get(url) || []) {
@@ -594,6 +602,9 @@ export class AdvEpisodeResourceLoader {
       key: `character:${warmup.identity}`,
       label: "character",
       index: warmup.index,
+      markUnavailable: () => {
+        if (warmup.command.characterModel) this.missingCharacters.add(warmup.command.characterModel);
+      },
       run: async () => {
         const prepared = await this.sceneRoot.preloadCharacter!(
           {
@@ -667,21 +678,22 @@ export class AdvEpisodeResourceLoader {
           if (preloadState) preloadState.label = task.label;
         }
         let completed = true;
-        let failure: unknown = null;
+        let failure: unknown;
         try {
           completed = (await task.run()) !== false;
-        } catch (err) {
+        } catch (error) {
           completed = false;
-          allCompleted = false;
-          failure = err;
-          if (!signal?.aborted && tracked) {
-            const preloadState = this.state.preload as Record<string, unknown> | undefined;
-            recordPreloadFailure(preloadState, errorMessage(err));
-          }
+          failure = error;
         }
-        if (!completed && failure == null && !signal?.aborted && tracked) {
-          const preloadState = this.state.preload as Record<string, unknown> | undefined;
-          recordPreloadFailure(preloadState, `Renderer did not make ${task.key} ready`);
+        if (!completed && !signal?.aborted) {
+          if (this.maySkipMedia(failure, signal)) {
+            task.markUnavailable?.();
+            console.warn(`[Vega] Skipping unavailable story resource ${task.key}`, failure);
+            completed = true;
+          } else if (tracked) {
+            const preloadState = this.state.preload as Record<string, unknown> | undefined;
+            recordPreloadFailure(preloadState, failure ? errorMessage(failure) : `Renderer did not make ${task.key} ready`);
+          }
         }
         if (completed) {
           this.completedTaskKeys.add(task.key);
@@ -698,6 +710,18 @@ export class AdvEpisodeResourceLoader {
     await Promise.all(Array.from({ length: workerCount }, runWorker));
     throwIfPreloadAborted(signal);
     return allCompleted;
+  }
+
+  maySkipMedia(error: unknown, signal?: AbortSignal): boolean {
+    return this.allowMissingMedia && !signal?.aborted && (error as { name?: string } | null)?.name !== "AbortError";
+  }
+
+  isMissingMedia(url?: string): boolean {
+    return Boolean(url && this.missingMedia.has(url));
+  }
+
+  isMissingCharacter(entry?: AdvCharacterModelEntry): boolean {
+    return Boolean(entry && this.missingCharacters.has(entry));
   }
 
   advanceTo(commandIndex: number) {
@@ -862,6 +886,11 @@ export class AdvEpisodeResourceLoader {
         : {}),
       resources: this.resources,
       signal,
+    }).catch((error) => {
+      if (!this.maySkipMedia(error, signal)) throw error;
+      this.missingCharacters.add(character);
+      console.warn("[Vega] Skipping unavailable character assets", error);
+      return [];
     });
     for (const declaration of declarations) {
       if (declaration.kind === "texture") {
