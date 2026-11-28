@@ -18,8 +18,8 @@ importers:
         specifier: 1.11.13
         version: 1.11.13
       mediabunny:
-        specifier: 1.66.2
-        version: 1.66.2
+        specifier: 1.66.4
+        version: 1.66.4
       popmotion:
         specifier: ^11.0.5
         version: 11.0.5
@@ -443,6 +443,9 @@ packages:
   '@types/dom-webcodecs@0.1.13':
     resolution: {integrity: sha512-O5hkiFIcjjszPIYyUSyvScyvrBoV3NOEEZx/pMlsu44TKzWNkLVBBxnxJz42in5n3QIolYOcBYFCPZZ0h8SkwQ==}
 
+  '@types/dom-webcodecs@0.1.19':
+    resolution: {integrity: sha512-+yFUIDUaASFz0vQpWBErPxun/Lb+F0TdrlTsj50gm7K797YzEx2TmV6fEiwciHyFNghlZYPgQXH5qRcwMHcJFQ==}
+
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
@@ -573,8 +576,8 @@ packages:
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
 
-  mediabunny@1.66.2:
-    resolution: {integrity: sha512-NTzRrBhAyRVi8qpJ9AH6XPyxiDVkfugxYY+gu3Z5zi+Nw2R/7nTAnXJEt2Ucy8wTIve1/UYGnCFf50x2LpvMDQ==}
+  mediabunny@1.66.4:
+    resolution: {integrity: sha512-VIPwwaVpY5mUnf9mAOJlBii4P1nHK05X8//veRjJrddn514BSOuYaMrUy1UReLMVVsm85id6eMu0z5K71Kkf+g==}
 
   muggle-string@0.4.1:
     resolution: {integrity: sha512-VNTrAak/KhO2i8dqqnqnAHOa3cYBwXEZe9h+D5h/1ZqFSTEFHdM65lR7RoIqq3tBBYavsOXV84NoHXZ0AkPyqQ==}
@@ -882,9 +885,11 @@ snapshots:
 
   '@types/dom-mediacapture-transform@0.1.12':
     dependencies:
-      '@types/dom-webcodecs': 0.1.13
+      '@types/dom-webcodecs': 0.1.19
 
   '@types/dom-webcodecs@0.1.13': {}
+
+  '@types/dom-webcodecs@0.1.19': {}
 
   '@types/estree@1.0.9': {}
 
@@ -1076,7 +1081,7 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  mediabunny@1.66.2:
+  mediabunny@1.66.4:
     dependencies:
       '@types/dom-mediacapture-transform': 0.1.12
       '@types/dom-webcodecs': 0.1.13
